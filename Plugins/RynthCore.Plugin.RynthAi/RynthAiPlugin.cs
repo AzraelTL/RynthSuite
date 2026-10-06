@@ -258,6 +258,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     {
         Log("RynthAi: logout — tearing down session.");
         try { _dashboard?.SaveSettings(); } catch { }
+        Loot.T11ItemSupport.Reset();
         // A real logout: the next OnLoginComplete is a fresh login, not a hot reload.
         ClearInGameMarker();
         TeardownSession();
@@ -585,6 +586,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         // other (the collision behind "you can only move or use one item at a
         // time" and the object-teardown AV).
         _weaponSwapGate ??= new WeaponSwapGate();
+        // The next swap goes once the server is done with the last one (not a flat 3 s).
+        _weaponSwapGate.ServerIdle = () => RynthCore.Plugin.Shared.ActionPacer.Enabled && RynthCore.Plugin.Shared.ActionPacer.Current(Host) == null;
+        _weaponSwapGate.IsWielded = id => RynthCore.Plugin.Shared.ActionPacer.IsWieldedByPlayer(Host, unchecked((uint)id));
 
         _buffManager = new BuffManager(Host, _dashboard.Settings, _spellManager, _vitals);
         _inGameMarkerSet = false;
@@ -1398,6 +1402,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             DrainGiveQueue();
             if (diag) Host.Log("[RynthAi] OnTick: after drain give queue");
             if (_loginComplete) TickItemInfo();
+            Loot.T11ItemSupport.SyncOverride(_dashboard?.Settings.T11ItemAugsOverride ?? -1);
             _jumper?.Tick();
             if (diag) Host.Log("[RynthAi] OnTick: after jumper tick");
 
@@ -2039,6 +2044,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _scrollLearner?.OnChat(text);
         _metaManager?.HandleChat(text, chatType);
         _questTracker?.OnChatLine(text);
+        // The "/aug" reply carries the T11 wield counters.
+        try { Loot.T11ItemSupport.OnChat(text); }
+        catch (Exception ex) { Log("RynthAi: T11 /aug parse failed: " + ex.Message); }
         CheckChatForSafetyStops(text);
         try { OnOwnCorpseChat(text); } catch { }
     }
@@ -2071,6 +2079,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             _objectCache?.OnDeleteObject(objectId);
             _combatManager?.OnObjectDeleted(objectId);   // D7/D8: free per-id maps + clear cast-wait if it was our target
             _scrollLearner?.OnObjectDeleted(objectId);   // a read scroll is consumed
+            Loot.T11ItemSupport.Forget(unchecked((int)objectId));
             HandleCorpseObjectDeleted(objectId);
         }
         catch (Exception ex)
@@ -3068,6 +3077,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "dumpprops":    HandleDumpPropsCommand(parts); break;
             case "iteminfo":     HandleItemInfoCommand(parts); break;
             case "version":      HandleVersionCommand(); break;
+            case "t11":          HandleT11Command(parts); break;
             case "wielded":      HandleWieldedCommand(); break;
             case "scan":         HandleScanCommand(); break;
             case "buildinfo":    HandleBuildInfoCommand(); break;

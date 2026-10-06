@@ -113,6 +113,12 @@ public partial class CombatManager : IDisposable
     // Combat must stow the bow into an open pack FIRST, then UseObject(wand), and
     // only request Magic once the wand is actually wielded (handled by the
     // alreadyWielded branch). Mirrors the proven BuffManager.EnsureMagicMode path.
+    // Switch like a player (2026-10-06, see BuffManager._directWandSwapFailed): the wand's use
+    // puts the weapon in hand away by itself; the pack move first is the fallback once a use
+    // hasn't done it in DirectWandSwapFallbackMs.
+    private bool _combatDirectWandSwapFailed;
+    private DateTime _combatDirectSwapSince = DateTime.MinValue;
+    private const double DirectWandSwapFallbackMs = 2000;   // SwapTracker retries at 2500: that retry is the pack move
     private int _combatBowDequipPendingId;
     private int _combatBowDequipAttempts;
     private DateTime _combatBowDequipAt = DateTime.MinValue;
@@ -146,6 +152,7 @@ public partial class CombatManager : IDisposable
         _combatBowDequipPendingId = 0;
         _combatBowDequipAttempts = 0;
         _combatSwapTeardownDone = false;
+        _combatDirectSwapSince = DateTime.MinValue;
     }
 
     // ── Face-before-attack state ─────────────────────────────────────────
@@ -4068,7 +4075,9 @@ public partial class CombatManager : IDisposable
             // nothing when the wand genuinely isn't wielded: ACE just denies it, and the
             // gated UseObject below still does the wielding. Mirrors the non-wand branch,
             // which has always sent both.
-            if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs()
+            // A weapon still in hand: the wand's use swaps it and the server then puts us in Magic.
+            if (FindWieldedNonWandWeapon(targetWeaponId) == 0
+                && (DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs()
                 && _host.ChangeCombatModeFor(desiredMode, "Combat", "stance"))
             {
                 if (diagNow) _host.Log($"[EquipDiag] hand clear — ChangeCombatMode({desiredMode}) alongside wand equip (mode={CurrentCombatMode})");
@@ -4156,6 +4165,16 @@ public partial class CombatManager : IDisposable
     private bool EnsureHandClearForWand(int wandId, bool diagNow)
     {
         int bowId = FindWieldedNonWandWeapon(wandId);
+        DateTime now = DateTime.Now;
+        if (bowId != 0 && !_combatDirectWandSwapFailed && IsWieldedLive(bowId))
+        {
+            if (_combatDirectSwapSince == DateTime.MinValue) _combatDirectSwapSince = now;
+            if ((now - _combatDirectSwapSince).TotalMilliseconds <= DirectWandSwapFallbackMs)
+                return true;   // the wand's use swaps
+            _combatDirectWandSwapFailed = true;
+            _host.Log($"[EquipDiag] using the wand didn't put 0x{(uint)bowId:X8} away in {DirectWandSwapFallbackMs:0} ms; from now on the weapon goes into a pack first");
+        }
+        _combatDirectSwapSince = DateTime.MinValue;
         if (bowId == 0)
         {
             _combatBowDequipPendingId = 0; _combatBowDequipAttempts = 0;
@@ -4165,7 +4184,6 @@ public partial class CombatManager : IDisposable
             return ClearOffhandFor(wandId, _curOffhandMode, gateHeld: true) == OffPrep.Ready;
         }
 
-        DateTime now = DateTime.Now;
         if (_combatBowDequipPendingId == bowId
             && (now - _combatBowDequipAt).TotalMilliseconds < WandSwapWieldResolveMs
             && IsWieldedLive(bowId))
@@ -4173,7 +4191,7 @@ public partial class CombatManager : IDisposable
 
         if (IsWieldedLive(bowId))
         {
-            int openPack = WorldObjectCache.FindPackFor(_host, _worldFilter, includeMainPack: true, requireFree: 1);
+            int openPack = OpenPackOverride?.Invoke() ?? WorldObjectCache.FindPackFor(_host, _worldFilter, includeMainPack: true, requireFree: 1);
             if (openPack == 0 || _combatBowDequipAttempts >= CombatBowDequipMaxAttempts)
             {
                 // No verified-open pack to receive the bow, or repeated failures — the swap
@@ -4192,6 +4210,7 @@ public partial class CombatManager : IDisposable
             }
             _combatBowDequipAttempts++;
             _host.MoveItemInternal((uint)bowId, (uint)openPack, 0, 1); // amount>=1 (engine rejects 0)
+            _weaponSwapGate?.NoteMove(bowId, wieldedNow: true);
             _combatBowDequipPendingId = bowId;
             _combatBowDequipAt = now;
             _host.Log($"[EquipDiag] dequip bow 0x{(uint)bowId:X8} -> pack 0x{(uint)openPack:X8} (attempt {_combatBowDequipAttempts}/{CombatBowDequipMaxAttempts}) before wand equip");

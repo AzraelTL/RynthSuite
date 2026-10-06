@@ -948,6 +948,7 @@ internal sealed class LegacyDashboardRenderer
                 BlacklistCastSettleMs      = s.BlacklistCastSettleMs,
                 TargetNoProgressTimeoutSec = s.TargetNoProgressTimeoutSec,
                 GiveQueueIntervalMs        = s.GiveQueueIntervalMs,
+                T11ItemAugsOverride        = s.T11ItemAugsOverride,
                 // Recharge
                 HealAt                     = s.HealAt,
                 UsePotions                 = s.UsePotions,
@@ -1154,6 +1155,7 @@ internal sealed class LegacyDashboardRenderer
             if (p.BlacklistCastSettleMs > 0) s.BlacklistCastSettleMs = p.BlacklistCastSettleMs;
             s.TargetNoProgressTimeoutSec = p.TargetNoProgressTimeoutSec;
             s.GiveQueueIntervalMs        = p.GiveQueueIntervalMs;
+            s.T11ItemAugsOverride        = p.T11ItemAugsOverride ?? -1;
             // Recharge
             s.HealAt                     = p.HealAt;
             s.UsePotions                 = p.UsePotions;
@@ -1770,6 +1772,7 @@ internal sealed class LegacyDashboardRenderer
         dst.NavLabelMode             = NavLabelModes.Clamp(tmp.NavLabelMode);
         dst.NavGuideLine             = tmp.NavGuideLine;
         dst.GiveQueueIntervalMs      = tmp.GiveQueueIntervalMs;
+        dst.T11ItemAugsOverride      = tmp.T11ItemAugsOverride;
         dst.SpellCastIntervalMs      = tmp.SpellCastIntervalMs;
         dst.AttackSpellIntervalMs    = tmp.AttackSpellIntervalMs;
         dst.EmbeddedNavs             = tmp.EmbeddedNavs;

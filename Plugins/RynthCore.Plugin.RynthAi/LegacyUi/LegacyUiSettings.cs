@@ -267,6 +267,13 @@ public sealed class LegacyUiSettings
 
     public int GiveQueueIntervalMs = 150;
 
+    /// <summary>
+    /// Item augmentation count used for T11 wield gates in loot rules ("T11: Can Wield").
+    /// -1 = automatic (read from the server's "/aug" reply). ACECustom doesn't send the count
+    /// at login, so this is the fallback when "/aug" is unavailable. Set with /ra t11 augs.
+    /// </summary>
+    public int T11ItemAugsOverride = -1;
+
     public int SpellCastIntervalMs = 400;
 
     /// <summary>
@@ -771,6 +778,7 @@ public sealed class SettingsBridgePayload
     public int BlacklistCastSettleMs { get; set; } = -1;
     public int TargetNoProgressTimeoutSec { get; set; }
     public int GiveQueueIntervalMs { get; set; }
+    public int? T11ItemAugsOverride { get; set; }
 
     // Recharge
     public int HealAt { get; set; }

@@ -328,6 +328,13 @@ public class BuffManager : IDisposable
     // stow the bow into a capacity-verified open pack FIRST (AutoCram pattern), then wield
     // the wand. All paths are bounded so a stale/no-op dequip or unwieldable wand can never
     // loop forever; on exhaustion the buff family is parked and the bot fights unbuffed.
+    // Switch like a player (2026-10-06): a use of the wand goes through ClientUISystem::UseObject,
+    // the client's double-click, which puts the weapon in hand away by itself (ACE's
+    // DoHandleActionGetAndWieldItem: "the client handles dequipping a lot of conflicting items
+    // automatically"). Drakkon's axe -> wand took 4.2 s with the pack move first (1.2 s for it,
+    // then the swap gate's flat 3 s). The pack move stays as the fallback: once a use hasn't
+    // got the wand into the hand in WieldResolveTimeoutMs, this session moves the weapon first.
+    private bool _directWandSwapFailed;
     private int _bowDequipPendingId;
     private DateTime _bowDequipAt = DateTime.MinValue;
     private int _bowDequipAttempts;
@@ -3893,6 +3900,15 @@ public class BuffManager : IDisposable
                 if ((now - _pendingWieldAt).TotalMilliseconds < WieldResolveTimeoutMs)
                     return false;
 
+                int stillInHand = _directWandSwapFailed ? 0 : FindWieldedNonWandWeapon(wandId);
+                if (stillInHand != 0 && IsWieldedLive(stillInHand))
+                {
+                    _directWandSwapFailed = true;
+                    _pendingWieldId = 0;
+                    _host.Log($"[WieldGate] using the wand didn't put 0x{(uint)stillInHand:X8} away in {WieldResolveTimeoutMs:0} ms; " +
+                              "from now on the weapon goes into a pack first");
+                    return false;
+                }
                 _host.Log($"[WieldGate] UseObject(0x{(uint)_pendingWieldId:X8}) not confirmed in " +
                           $"{WieldResolveTimeoutMs:0}ms — cooling down {WieldCooldownMs:0}ms");
                 _pendingWieldId = 0;
@@ -3930,7 +3946,7 @@ public class BuffManager : IDisposable
             // non-wand weapon into a capacity-verified open pack FIRST (AutoCram pattern,
             // AV-safe), then UseObject(wand) once the hand is free. Fully bounded.
             int bowId = FindWieldedNonWandWeapon(wandId);
-            if (bowId != 0)
+            if (bowId != 0 && (_directWandSwapFailed || !IsWieldedLive(bowId)))   // else the use swaps (see _directWandSwapFailed)
             {
                 if (_bowDequipPendingId == bowId
                     && (now - _bowDequipAt).TotalMilliseconds < WieldResolveTimeoutMs
@@ -3953,6 +3969,7 @@ public class BuffManager : IDisposable
                     if (_worldObjectCache?[bowId] is WorldObject blocker && IsInOffhandSlot(blocker))
                         OffhandStowed?.Invoke(bowId);   // a shield: combat puts it back after
                     _host.MoveItemInternal((uint)bowId, (uint)openPack, 0, 1); // amount>=1 (engine rejects 0)
+                    _weaponSwapGate?.NoteMove(bowId, wieldedNow: true);
                     _bowDequipPendingId = bowId;
                     _bowDequipAt = now;
                     _lastCastAttempt = now;
@@ -3962,7 +3979,7 @@ public class BuffManager : IDisposable
                 _bowDequipPendingId = 0; // bow confirmed unwielded — fall through to wield the wand
             }
 
-            _host.UseFor((uint)wandId, "Buff", "buffing: wield the wand");
+            _host.UseFor((uint)wandId, "Buff", bowId != 0 && !_directWandSwapFailed ? "buffing: switch to the wand" : "buffing: wield the wand");
             NoteStanceRequest();
             _pendingWieldId = wandId;
             _pendingWieldAt = now;

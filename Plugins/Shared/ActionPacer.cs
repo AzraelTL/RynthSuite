@@ -355,7 +355,7 @@ internal static class ActionPacer
         1 => "Peace", 2 => "Melee", 4 => "Missile", 8 => "Magic", _ => $"mode {mode}",
     };
 
-    private static bool IsWieldedByPlayer(RynthCoreHost host, uint id)
+    internal static bool IsWieldedByPlayer(RynthCoreHost host, uint id)
     {
         try
         {
