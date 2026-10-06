@@ -335,6 +335,9 @@ public class BuffManager : IDisposable
     // then the swap gate's flat 3 s). The pack move stays as the fallback: once a use hasn't
     // got the wand into the hand in WieldResolveTimeoutMs, this session moves the weapon first.
     private bool _directWandSwapFailed;
+    // The swap gate's claim count when the wand's use went out: a later claim means another swap
+    // (combat putting the axe back, 12:39 on 10-06) changed the hands, so the result says nothing.
+    private long _pendingWieldClaim;
     private int _bowDequipPendingId;
     private DateTime _bowDequipAt = DateTime.MinValue;
     private int _bowDequipAttempts;
@@ -3900,6 +3903,11 @@ public class BuffManager : IDisposable
                 if ((now - _pendingWieldAt).TotalMilliseconds < WieldResolveTimeoutMs)
                     return false;
 
+                if (_weaponSwapGate != null && _weaponSwapGate.Claims != _pendingWieldClaim)
+                {
+                    _pendingWieldId = 0;   // another swap since ours: not a failed wield
+                    return false;
+                }
                 int stillInHand = _directWandSwapFailed ? 0 : FindWieldedNonWandWeapon(wandId);
                 if (stillInHand != 0 && IsWieldedLive(stillInHand))
                 {
@@ -3981,6 +3989,7 @@ public class BuffManager : IDisposable
 
             _host.UseFor((uint)wandId, "Buff", bowId != 0 && !_directWandSwapFailed ? "buffing: switch to the wand" : "buffing: wield the wand");
             NoteStanceRequest();
+            _pendingWieldClaim = _weaponSwapGate?.Claims ?? 0;
             _pendingWieldId = wandId;
             _pendingWieldAt = now;
             _lastCastAttempt = now;

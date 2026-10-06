@@ -25,7 +25,10 @@ public sealed class WeaponSwapGate
     private long _lastSwapTickMs = long.MinValue / 4;
     private string _lastSwapBy = "";
     private int _movingId;
-    private bool _movingWasWielded;
+    private long _claims;
+
+    /// <summary>Swaps claimed so far: a caller can tell whether another swap went out after its own.</summary>
+    public long Claims { get { lock (_lock) { return _claims; } } }
 
     /// <summary>
     /// The longest one swap holds the next: a swap the server's answer can't be seen for (or
@@ -65,22 +68,21 @@ public sealed class WeaponSwapGate
             _lastSwapTickMs = now;
             _lastSwapBy = requestedBy ?? "";
             _movingId = 0;
+            _claims++;
             return true;
         }
     }
 
     /// <summary>
     /// The claimed swap moved <paramref name="itemId"/> into or out of a hand without a use (a
-    /// pack move or a slot wield, which the server answers with no UseDone): the swap is done
-    /// once the item's wielded state is no longer <paramref name="wieldedNow"/>.
+    /// pack move or a slot wield): the next swap waits the full MinIntervalMs, as before.
+    /// Drakkon 2026-10-06 13:58: the wand went out 1.3 s after the axe's pack move (the axe read
+    /// out of hand) and the server then held the first cast open until a relog. The server's
+    /// unwield motion outlasts the item move, and nothing tells us when it ends.
     /// </summary>
     public void NoteMove(int itemId, bool wieldedNow)
     {
-        lock (_lock)
-        {
-            _movingId = itemId;
-            _movingWasWielded = wieldedNow;
-        }
+        lock (_lock) _movingId = itemId;
     }
 
     private bool LastSwapDone(long since)
@@ -88,8 +90,7 @@ public sealed class WeaponSwapGate
         if (since < FloorMs || ServerIdle == null || IsWielded == null) return false;
         try
         {
-            if (!ServerIdle()) return false;
-            return _movingId == 0 || IsWielded(_movingId) != _movingWasWielded;
+            return _movingId == 0 && ServerIdle();
         }
         catch
         {
