@@ -53,6 +53,7 @@ internal static partial class Program
         RunTownNet();
         RunAvoid();
         RunTravelPlan();
+        RunTripExport();
 
         Console.WriteLine();
         Console.WriteLine(_fails == 0 && _asserts > 0

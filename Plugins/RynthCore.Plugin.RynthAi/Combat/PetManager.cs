@@ -60,6 +60,16 @@ internal sealed class PetManager
     // get parked so we advance to the next configured essence instead of looping.
     private readonly Dictionary<int, long> _deviceCooldownUntil = new();
 
+    // The server's word over a stale Structure read (2026-10-05). A read
+    // can say 0 while the server holds a full essence; the server then answers a refill with
+    // "already full" (or refills it and the read still lags), and deciding from the read alone
+    // re-issued the refill every think tick: peace mode and a clap each time, a spirit each time
+    // the refill was real. Essence -> until when its read of 0 is not believed; cleared when a
+    // summon reports "not enough charges".
+    private readonly Dictionary<int, long> _serverSaidFullUntil = new();
+    // Refills issued per essence: how many since the window opened, and when it opened.
+    private readonly Dictionary<int, (int Count, long Since)> _refills = new();
+
     // Encapsulated Spirit — the fixed retail recharge item (WCID 49485). Detected
     // by name; it is never itself a summon device.
     private const string EncapsulatedSpiritName = "Encapsulated Spirit";
@@ -69,11 +79,17 @@ internal sealed class PetManager
     private const long AssumeActiveAfterSummonMs = 10_000;
     private const long DeviceFailCooldownMs      = 30_000;
     private const long DeviceNoSpiritCooldownMs  = 15_000;
+    private const long ServerSaidFullTrustMs     = 30 * 60_000;
+    private const long RefillWindowMs            = 120_000;  // two refills inside this and the
+    private const int  RefillsPerWindow          = 2;        // essence still reads empty:
+    private const long RefillLoopParkMs          = 300_000;  // park it this long
 
     private string _playerName = string.Empty;
     private long   _playerNameAt;
 
-    private static long NowMs => Environment.TickCount64;
+    /// <summary>Clock (ms); tests replace it.</summary>
+    internal static Func<long> Clock { get; set; } = static () => Environment.TickCount64;
+    private static long NowMs => Clock();
 
     public PetManager(RynthCoreHost host, LegacyUiSettings settings,
                       WorldObjectCache objectCache, CombatManager? combat,
@@ -159,6 +175,7 @@ internal sealed class PetManager
             if (text.Contains("enough charges", StringComparison.OrdinalIgnoreCase))
             {
                 _host.Log($"[RynthAi] Pet: essence 0x{(uint)_activeDeviceId:X8} reports empty; will refill.");
+                _serverSaidFullUntil.Remove(_activeDeviceId);   // really empty: the read is right again
                 GoIdle();
                 return;
             }
@@ -168,10 +185,13 @@ internal sealed class PetManager
         if (_state == PetState.Refilling)
         {
             // "You add the spirit to the essence." (success) / "This essence is
-            // already full." (our Structure read was stale — also done).
-            if (text.Contains("add the spirit to the essence", StringComparison.OrdinalIgnoreCase)
-                || text.Contains("essence is already full", StringComparison.OrdinalIgnoreCase))
+            // already full." (our Structure read was stale — also done). Either way the
+            // essence is full now, whatever its read says until the next update.
+            bool added = text.Contains("add the spirit to the essence", StringComparison.OrdinalIgnoreCase);
+            bool full  = !added && text.Contains("essence is already full", StringComparison.OrdinalIgnoreCase);
+            if (added || full)
             {
+                OnServerSaidFull(_activeDeviceId, added);
                 GoIdle();
             }
         }
@@ -203,6 +223,12 @@ internal sealed class PetManager
 
             int charges = ReadCharges(deviceId); // -1 = unreadable
 
+            // The server called this essence full after the read last changed: the 0 is stale.
+            // Summon as for an unreadable one (an empty essence is refused harmlessly, and that
+            // "not enough charges" ends the trust).
+            if (charges == 0 && ServerSaidFull(deviceId, now))
+                charges = -1;
+
             if (charges != 0)
             {
                 // Has charges (or unreadable → attempt; an empty one is rejected
@@ -215,11 +241,13 @@ internal sealed class PetManager
             if (_settings.PetAutoRefill)
             {
                 int spiritId = FindEncapsulatedSpirit();
-                if (spiritId != 0)
+                if (spiritId != 0 && !RefillLooping(deviceId, now))
                 {
                     IssueRefill(deviceId, spiritId);
                     return;
                 }
+                if (spiritId != 0)
+                    continue;   // parked by RefillLooping; try the next essence
             }
 
             // Out of charges and no spirit (or refill off): park this essence
@@ -251,8 +279,55 @@ internal sealed class PetManager
         _activeDeviceId = deviceId;
         _activeSpiritId = spiritId;
         _actionIssuedAt = NowMs;
+        CountRefill(deviceId, _actionIssuedAt);
         _host.Log($"[RynthAi] Pet: refilling essence 0x{(uint)deviceId:X8} with spirit 0x{(uint)spiritId:X8}.");
         _host.UseOnFor(unchecked((uint)spiritId), unchecked((uint)deviceId), "Pet", "refill the essence with a spirit");
+    }
+
+    /// <summary>
+    /// The server said the essence is full ("You add the spirit..." / "...already full"): its
+    /// read of 0 is not believed for a while, and it is re-identified so the read catches up.
+    /// </summary>
+    private void OnServerSaidFull(int deviceId, bool refilled)
+    {
+        if (deviceId == 0) return;
+        _serverSaidFullUntil[deviceId] = NowMs + ServerSaidFullTrustMs;
+        if (_host.HasRequestId) _host.RequestId(unchecked((uint)deviceId));
+        _host.Log(refilled
+            ? $"[RynthAi] Pet: refill complete (essence 0x{(uint)deviceId:X8}, server confirmed)."
+            : $"[RynthAi] Pet: essence 0x{(uint)deviceId:X8} is already full (its charge read was stale); summoning from it.");
+    }
+
+    private bool ServerSaidFull(int deviceId, long now)
+    {
+        if (!_serverSaidFullUntil.TryGetValue(deviceId, out long until)) return false;
+        if (now < until) return true;
+        _serverSaidFullUntil.Remove(deviceId);
+        return false;
+    }
+
+    private void CountRefill(int deviceId, long now)
+    {
+        if (_refills.TryGetValue(deviceId, out var r) && now - r.Since < RefillWindowMs)
+            _refills[deviceId] = (r.Count + 1, r.Since);
+        else
+            _refills[deviceId] = (1, now);
+    }
+
+    /// <summary>
+    /// True, and the essence parked, when it was refilled <see cref="RefillsPerWindow"/> times
+    /// inside <see cref="RefillWindowMs"/> and still reads empty: another refill would only cost
+    /// a spirit and force peace mode again. An essence holds dozens of summons, so two real
+    /// refills that close together don't happen.
+    /// </summary>
+    private bool RefillLooping(int deviceId, long now)
+    {
+        if (!_refills.TryGetValue(deviceId, out var r) || now - r.Since >= RefillWindowMs || r.Count < RefillsPerWindow)
+            return false;
+        _refills.Remove(deviceId);
+        _deviceCooldownUntil[deviceId] = now + RefillLoopParkMs;
+        _host.Log($"[RynthAi] Pet: essence 0x{(uint)deviceId:X8} was refilled {r.Count}x in {(now - r.Since) / 1000}s and still reads empty; parking it for {RefillLoopParkMs / 60_000} min.");
+        return true;
     }
 
     private void GoIdle()

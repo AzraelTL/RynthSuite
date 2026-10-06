@@ -60,16 +60,16 @@ internal sealed class LegacyDashboardRenderer
     // escaped the snapshot poll's reverse-P/Invoke boundary it fail-fasted the
     // NativeAOT runtime. Copy-under-lock on read; lock the Clear+AddRange swap.
     private readonly object _profileListsLock = new();
-    private readonly string _navFolder = @"C:\Games\RynthSuite\RynthAi\NavProfiles";
-    private readonly string _lootFolder = @"C:\Games\RynthSuite\RynthAi\LootProfiles";
-    private readonly string _metaFolder = @"C:\Games\RynthSuite\RynthAi\MetaFiles";
+    private readonly string _navFolder = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "NavProfiles");
+    private readonly string _lootFolder = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "LootProfiles");
+    private readonly string _metaFolder = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "MetaFiles");
     // Profiles are kept per server: SettingsProfiles\<server>\<character> and
     // MonsterProfiles\<server>\<character>.json, the server being the world name
     // the server sends at login. Before 2026-09-28 every server shared
     // SettingsProfiles\ACEmulator, so the same character name on two servers
     // shared one profile; that folder is still used when no name is known.
-    private const string ProfilesBase       = @"C:\Games\RynthSuite\RynthAi\SettingsProfiles";
-    private const string MonstersBase       = @"C:\Games\RynthSuite\RynthAi\MonsterProfiles";
+    private static readonly string ProfilesBase = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "SettingsProfiles");
+    private static readonly string MonstersBase = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "MonsterProfiles");
     private const string LegacyServerFolder = "ACEmulator";
     private string _serverFolder = LegacyServerFolder;
     private string _settingsRoot   => Path.Combine(ProfilesBase, _serverFolder);
@@ -113,7 +113,8 @@ internal sealed class LegacyDashboardRenderer
     private DateTime _sessionStartUtc = DateTime.UtcNow;
     private long _sessionKills;       // Interlocked: incremented on the pump thread, read in the snapshot
     private double _killsPerHour;
-    private long _lastKillTicks;      // DateTime.UtcNow.Ticks of the last kill (0 = none yet this session)
+    /// <summary>The plugin's kill clock (secsSinceLastKill); set once at plugin init.</summary>
+    internal KillClock? KillClock { get; set; }
     // volatile: written on the pump thread (SetFreeSlots/SetComponentCounts), read on the snapshot-poll
     // thread (BuildSnapshotJson). x86 int writes are atomic but give no visibility guarantee — without
     // volatile the reader can see a stale value indefinitely. (_sessionKills uses Interlocked for the same reason.)
@@ -1009,6 +1010,8 @@ internal sealed class LegacyDashboardRenderer
                 NavHeightOffset            = s.NavHeightOffset,
                 NavSlopeSink               = s.NavSlopeSink,
                 ShowTerrainPassability     = s.ShowTerrainPassability,
+                NavLabelMode               = NavLabelModes.Clamp(s.NavLabelMode),
+                NavGuideLine               = s.NavGuideLine,
                 OpenDoors                  = s.OpenDoors,
                 OpenDoorRange              = s.OpenDoorRange,
                 AutoUnlockDoors            = s.AutoUnlockDoors,
@@ -1056,6 +1059,7 @@ internal sealed class LegacyDashboardRenderer
                 LootOwnership              = s.LootOwnership,
                 LootOwnCorpse              = s.LootOwnCorpse,
                 TravelToOwnCorpse          = s.TravelToOwnCorpse,
+                ItemInfoOnSelect           = s.ItemInfoOnSelect,
                 EnableAutostack            = s.EnableAutostack,
                 ReadUnknownScrolls         = s.ReadUnknownScrolls,
                 EnableCombineSalvage       = s.EnableCombineSalvage,
@@ -1212,6 +1216,8 @@ internal sealed class LegacyDashboardRenderer
             s.NavHeightOffset            = p.NavHeightOffset;
             s.NavSlopeSink               = p.NavSlopeSink;
             s.ShowTerrainPassability     = p.ShowTerrainPassability;
+            if (p.NavLabelMode >= 0) s.NavLabelMode = NavLabelModes.Clamp(p.NavLabelMode);
+            if (p.NavGuideLine is bool guideLine) s.NavGuideLine = guideLine;
             s.OpenDoors                  = p.OpenDoors;
             s.OpenDoorRange              = p.OpenDoorRange;
             s.AutoUnlockDoors            = p.AutoUnlockDoors;
@@ -1256,6 +1262,7 @@ internal sealed class LegacyDashboardRenderer
             s.LootOwnership              = p.LootOwnership;
             if (p.LootOwnCorpse is bool lootOwn) s.LootOwnCorpse = lootOwn;               // absent = unchanged
             if (p.TravelToOwnCorpse is bool travelOwn) s.TravelToOwnCorpse = travelOwn;   // absent = unchanged
+            if (p.ItemInfoOnSelect is bool infoOnSelect) s.ItemInfoOnSelect = infoOnSelect; // absent = unchanged
             s.EnableAutostack            = p.EnableAutostack;
             s.ReadUnknownScrolls         = p.ReadUnknownScrolls;
             s.EnableCombineSalvage       = p.EnableCombineSalvage;
@@ -1657,6 +1664,7 @@ internal sealed class LegacyDashboardRenderer
         dst.LootOwnership            = tmp.LootOwnership;
         dst.LootOwnCorpse            = tmp.LootOwnCorpse;
         dst.TravelToOwnCorpse        = tmp.TravelToOwnCorpse;
+        dst.ItemInfoOnSelect         = tmp.ItemInfoOnSelect;
         dst.LootOnlyRareCorpses      = tmp.LootOnlyRareCorpses;
         dst.PeaceModeWhenIdle        = tmp.PeaceModeWhenIdle;
         dst.RebuffWhenIdle           = tmp.RebuffWhenIdle;
@@ -1759,6 +1767,8 @@ internal sealed class LegacyDashboardRenderer
         dst.PatrolOnLogin            = tmp.PatrolOnLogin;
         dst.YieldToVTank             = tmp.YieldToVTank;
         dst.ShowTerrainPassability   = tmp.ShowTerrainPassability;
+        dst.NavLabelMode             = NavLabelModes.Clamp(tmp.NavLabelMode);
+        dst.NavGuideLine             = tmp.NavGuideLine;
         dst.GiveQueueIntervalMs      = tmp.GiveQueueIntervalMs;
         dst.SpellCastIntervalMs      = tmp.SpellCastIntervalMs;
         dst.AttackSpellIntervalMs    = tmp.AttackSpellIntervalMs;
@@ -1891,15 +1901,13 @@ internal sealed class LegacyDashboardRenderer
     {
         _sessionStartUtc = DateTime.UtcNow;
         System.Threading.Interlocked.Exchange(ref _sessionKills, 0);
-        System.Threading.Interlocked.Exchange(ref _lastKillTicks, 0);
     }
 
-    /// Called from the plugin's OnKillNotification (pump thread) for each kill — feeds kills/hour
-    /// and the "time since last kill" liveness signal.
+    /// Called from the plugin's OnKillNotification (pump thread) for each kill — feeds kills/hour.
+    /// The "time since last kill" signal is the plugin's KillClock.
     public void RecordKill()
     {
         System.Threading.Interlocked.Increment(ref _sessionKills);
-        System.Threading.Interlocked.Exchange(ref _lastKillTicks, DateTime.UtcNow.Ticks);
     }
 
     /// Pushed from the plugin tick (it owns the inventory cache) — main-pack empty slots. -1 = unknown.
@@ -2085,6 +2093,30 @@ internal sealed class LegacyDashboardRenderer
             }
         lock (_profileListsLock) { _navFiles.Clear(); _navFiles.AddRange(list); }
         _selectedNavIdx = sel;
+    }
+
+    private DateTime _navFolderStamp;
+    private long _nextNavFolderCheckMs;
+
+    /// <summary>
+    /// Lists NavProfiles again when the folder changed since the last look (a route saved there by
+    /// RynthNav's "save as nav route", or a file copied in), so the Nav picker shows it without a
+    /// relog. One folder time check every 3 s. Plugin tick.
+    /// </summary>
+    public void TickNavFolder()
+    {
+        long now = Environment.TickCount64;
+        if (now < _nextNavFolderCheckMs) return;
+        _nextNavFolderCheckMs = now + 3000;
+        try
+        {
+            DateTime stamp = Directory.Exists(_navFolder) ? Directory.GetLastWriteTimeUtc(_navFolder) : DateTime.MinValue;
+            if (stamp == _navFolderStamp) return;
+            bool first = _navFolderStamp == default;
+            _navFolderStamp = stamp;
+            if (!first) RefreshNavFiles();
+        }
+        catch { }
     }
 
     /// <summary>Save button and /ra nav save [name]. Returns the chat line.</summary>
@@ -2519,11 +2551,8 @@ internal sealed class LegacyDashboardRenderer
         // (kill counter + inventory cache); the rest of the player stats are engine top-level.
         AppendFloat(sb, "killsPerHour", (float)_killsPerHour); sb.Append(',');
         AppendInt(sb, "sessionKills", (int)System.Threading.Interlocked.Read(ref _sessionKills)); sb.Append(',');
-        long lastKillTicks = System.Threading.Interlocked.Read(ref _lastKillTicks);
-        int secsSinceLastKill = lastKillTicks == 0
-            ? -1
-            : (int)Math.Clamp((DateTime.UtcNow - new DateTime(lastKillTicks, DateTimeKind.Utc)).TotalSeconds, 0, int.MaxValue);
-        AppendInt(sb, "secsSinceLastKill", secsSinceLastKill); sb.Append(',');
+        // -1 before the first kill this session (the plugin's KillClock, reset at login).
+        AppendInt(sb, "secsSinceLastKill", KillClock?.SecondsSinceKillOnly() ?? -1); sb.Append(',');
         AppendInt(sb, "freeSlots", _freeSlots); sb.Append(',');
         // D2 three-tier target telemetry + D6 attack-cast/kill ratio (orphan early-warning).
         AppendInt(sb, "scanTotal", _scanTotal); sb.Append(',');
@@ -2732,7 +2761,7 @@ internal sealed class LegacyDashboardRenderer
 
     // ── Meta bridge ───────────────────────────────────────────────────────────
 
-    private static readonly string MetaFolder = @"C:\Games\RynthSuite\RynthAi\MetaFiles";
+    private static readonly string MetaFolder = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "MetaFiles");
 
     // Result of the last set_source, reported in BuildMetaJson (under MetaRulesLock).
     private long _metaApplySeq;
@@ -2993,11 +3022,10 @@ internal sealed class LegacyDashboardRenderer
                     break;
 
                 case "update_rule":
-                    if (cmd.Rule != null && cmd.Index >= 0 && cmd.Index < _settings.MetaRules.Count)
-                    {
-                        _settings.MetaRules[cmd.Index] = DtoToMetaRule(cmd.Rule);
+                    // The engine's editor saves every change (2026-10-05): keep the running rule's
+                    // latch (no re-fire) and the fields the panel can't send (MetaRuleEdits).
+                    if (cmd.Rule != null && MetaRuleEdits.Replace(_settings.MetaRules, cmd.Index, DtoToMetaRule(cmd.Rule)))
                         TryAutoSaveMetaCmd();
-                    }
                     break;
 
                 case "delete_rule":
@@ -3028,7 +3056,9 @@ internal sealed class LegacyDashboardRenderer
                 case "duplicate_rule":
                     if (cmd.Rule != null && cmd.Index >= 0 && cmd.Index < _settings.MetaRules.Count)
                     {
-                        _settings.MetaRules.Insert(cmd.Index + 1, DtoToMetaRule(cmd.Rule));
+                        var copy = DtoToMetaRule(cmd.Rule);
+                        MetaRuleEdits.KeepHidden(_settings.MetaRules[cmd.Index], copy);   // CallState return / ChatCapture colours
+                        _settings.MetaRules.Insert(cmd.Index + 1, copy);
                         TryAutoSaveMetaCmd();
                     }
                     break;

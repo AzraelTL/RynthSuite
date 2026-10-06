@@ -13,6 +13,7 @@ internal sealed class LegacyAdvancedSettingsUi
     private string _newBlacklistName = "";
 
     private static readonly string[] AttackHeights = { "Low", "Medium", "High" };
+    private static readonly string[] NavLabelModeNames = { "Off", "Numbers", "Numbers and names" };
     private static readonly string[] LootOwnershipModes = { "My Kills Only", "Fellowship Kills", "All Corpses" };
 
     public LegacyAdvancedSettingsUi(LegacyUiSettings settings)
@@ -564,7 +565,7 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.InputFloat("Nav point reach (yd)", ref _settings.FollowNavMin, 0.1f, 1.0f, "%.1f");
                 _settings.FollowNavMin = LegacyUiSettings.ClampFollowNavMin(_settings.FollowNavMin);
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("How close to get to each nav point before moving on to the next (yards). VTank calls it Follow/Nav Min Distance. Follow stops this close to its leader; the nav marker ring shows it.");
+                    ImGui.SetTooltip("How close to get to each nav point before moving on to the next (yards). VTank calls it Follow/Nav Min Distance. Up to 2 nav walks right up to each point before turning (tight dungeons); bigger values round corners. Follow stops this close to its leader; the nav marker ring shows it.");
 
                 ImGui.Spacing();
                 ImGui.Text("Nav Marker Display");
@@ -584,6 +585,11 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Checkbox("Show Terrain Passability", ref _settings.ShowTerrainPassability);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Highlight impassable terrain triangles in red.");
+                ImGui.SetNextItemWidth(160);
+                ImGui.Combo("Waypoint Labels", ref _settings.NavLabelMode, NavLabelModeNames, NavLabelModeNames.Length);
+                ImGui.Checkbox("Guide Line", ref _settings.NavGuideLine);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("A line from your character to the waypoint nav is heading for.");
 
                 ImGui.Spacing();
                 ImGui.Separator();
@@ -654,7 +660,7 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.InputFloat("Lookahead (yd)", ref _settings.NavLookaheadYards, 0.5f, 1f, "%.1f");
                 if (_settings.NavLookaheadYards < 0f) _settings.NavLookaheadYards = 0f;
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Within this distance of a waypoint, blend the aim point toward the next one to cut corners smoothly. 0 = off (aim straight at each waypoint).");
+                    ImGui.SetTooltip("Within this distance of a waypoint, blend the aim point toward the next one to round corners. The nav point reach limits it to 2 yd per yard of reach over 1 yd (no rounding up to a 2 yd reach), never more than this. 0 = off (aim straight at each waypoint).");
 
                 ImGui.SetNextItemWidth(80);
                 ImGui.InputFloat("Turn Rate (deg/s)", ref _settings.NavTurnRateDegPerSec, 15f, 45f, "%.0f");
@@ -767,6 +773,9 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Checkbox("Recover My Corpse", ref _settings.LootOwnCorpse);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("When your own corpse (\"Corpse of <you>\") is within loot range, open it and take\nevery item on it, whatever the loot profile and Loot From say.");
+                ImGui.Checkbox("Item Info On Select", ref _settings.ItemInfoOnSelect);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Selecting an item prints its details to chat (/ra iteminfo).");
                 ImGui.Checkbox("Travel Back To My Corpse", ref _settings.TravelToOwnCorpse);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("After a death, travel back to where you died with RynthNav (outdoors only),\nfighting on the way, recover the corpse, then carry on. Needs the macro running.");

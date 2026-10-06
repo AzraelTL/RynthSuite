@@ -43,7 +43,7 @@ public sealed class LegacyUiSettings
     public float NavResumeTurnAngle = 10f;
     public float NavDeadZone = 4f;
     public float NavSweepMult = 2.5f;
-    public float NavLookaheadYards = 4.0f;       // distance to start blending the aim point toward the next waypoint (0 = off)
+    public float NavLookaheadYards = 4.0f;       // most the aim point is blended toward the next waypoint (0 = off); the nav point reach scales it down (NavigationEngine.CornerLookaheadYards)
     public float NavShortcutYards = 1.0f;        // on arrival, skip waypoints only while the straight run to a later one stays within this of every skipped point (0 = visit every point)
     public float NavTurnRateDegPerSec = 270f;    // mode 0 (heading servo) max turn rate
     public float NavTier1TurnSpeed = 3.0f;       // mode 1 (CM_Movement) DoMovement turn-command speed (magnitude of CMotionInterp turn_speed; 1.0 = native keyboard rate)
@@ -167,6 +167,11 @@ public sealed class LegacyUiSettings
     public float NavHeightOffset = 0.05f;
     public float NavSlopeSink = 1.5f;
     public bool  ShowTerrainPassability = true;
+    // Nav3D extras, both off by default: labels over the route's waypoints (NavLabelModes:
+    // 0 off, 1 numbers, 2 numbers and what happens there) and a line from the character to
+    // the waypoint nav is heading for.
+    public int   NavLabelMode;
+    public bool  NavGuideLine;
     public double MaxMonRange = 12.0;
     public bool SummonPets;
     public int CustomPetRange = 5;
@@ -196,6 +201,11 @@ public sealed class LegacyUiSettings
     /// on the way as usual, recover the corpse, then carry on. Off by default.
     /// </summary>
     public bool TravelToOwnCorpse;
+    /// <summary>
+    /// Selecting an item prints its details to chat (/ra iteminfo, Mag-Tools style),
+    /// identifying it first when needed. Items RynthAi selects itself are skipped. On by default.
+    /// </summary>
+    public bool ItemInfoOnSelect = true;
     public bool LootOnlyRareCorpses;
     public bool PeaceModeWhenIdle = true;
     public bool RebuffWhenIdle;
@@ -828,6 +838,9 @@ public sealed class SettingsBridgePayload
     public float NavHeightOffset { get; set; }
     public float NavSlopeSink { get; set; }
     public bool ShowTerrainPassability { get; set; }
+    // Absent from an older engine: -1 / null keep the plugin's value.
+    public int NavLabelMode { get; set; } = -1;
+    public bool? NavGuideLine { get; set; }
     public bool OpenDoors { get; set; }
     public float OpenDoorRange { get; set; }
     public bool AutoUnlockDoors { get; set; }
@@ -882,6 +895,7 @@ public sealed class SettingsBridgePayload
     // and its save must leave them alone.
     public bool? LootOwnCorpse { get; set; }
     public bool? TravelToOwnCorpse { get; set; }
+    public bool? ItemInfoOnSelect { get; set; }
     public bool EnableAutostack { get; set; }
     public bool ReadUnknownScrolls { get; set; } = true;   // absent from an older engine: keep the default
     public bool EnableCombineSalvage { get; set; }
@@ -953,7 +967,11 @@ public enum MetaConditionType
     MainManaLE,
     MainManaPHE,
     MainStamLE,
-    VitaePHE
+    VitaePHE,
+    /// <summary>RynthAi only (2026-10-06): no kill for at least N minutes (ConditionData = minutes,
+    /// decimals allowed). Appended last: the value is the wire / JSON number, and an older RynthAi
+    /// that reads it treats the unknown number (and the .af keyword NoKillsInMins) as never true.</summary>
+    NoKillsWithinMinutes
 }
 
 public enum MetaActionType

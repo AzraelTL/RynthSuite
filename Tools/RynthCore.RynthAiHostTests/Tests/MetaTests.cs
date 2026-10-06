@@ -59,6 +59,127 @@ internal static class MetaTests
             SecondsInStatePPersists);
         r.Add("meta: MainHealthPHE / MainManaPHE mean 'percent >='", PercentConditionsAreGE);   // was a known failure; fixed by a7c4618
         r.Add("meta: a negative vital threshold never holds", NegativeVitalThreshold);   // was a known failure; fixed by 6f72b67
+        r.Add("meta edit: saving a rule keeps the running meta's state, clocks and latch", EditKeepsRunningMeta);
+        r.Add("meta edit: a saved rule keeps CallState's return state and ChatCapture's colours", EditKeepsHiddenFields);
+        r.Add("meta edit: the editor's Set current text matches the landblock / landcell", SetCurrentMatches);
+        r.Add("meta edit: a new state's Never -> None rule keeps it through a save and reload", NewStateSurvivesReload);
+    }
+
+    private static void SetCurrentMatches()
+    {
+        FakeHost.Reset();
+        foreach (uint cell in new uint[] { 0xA9B4001Cu, 0x00070143u, 0x8B370105u, 0x0001FFFEu })
+        {
+            FakeHost.PlayerPose = (cell, 10f, 10f, 0f);
+            var rig = new Rig(FakeHost.Create(), Player);
+            string block = RynthCore.Engine.UI.Data.MetaLocation.Text(RynthCore.Engine.UI.Data.MetaLocation.LandblockCondition, cell)!;
+            string here = RynthCore.Engine.UI.Data.MetaLocation.Text(RynthCore.Engine.UI.Data.MetaLocation.LandcellCondition, cell)!;
+            Check.True(rig.Holds(C.Landblock_EQ, block), $"Landblock == {block} holds at {cell:X8}");
+            Check.True(rig.Holds(C.Landcell_EQ, here), $"Landcell == {here} holds at {cell:X8}");
+            FakeHost.PlayerPose = (cell + 0x00010000u, 10f, 10f, 0f);
+            Check.False(rig.Holds(C.Landblock_EQ, block), $"not in the next landblock ({cell:X8})");
+            FakeHost.PlayerPose = (cell + 1, 10f, 10f, 0f);
+            Check.False(rig.Holds(C.Landcell_EQ, here), $"not in the next cell ({cell:X8})");
+        }
+    }
+
+    private static void NewStateSurvivesReload()
+    {
+        // What "+ New state..." adds (engine MetaRuleEdit.Placeholder): Never -> None in the new state.
+        var rules = new List<MetaRule>
+        {
+            Rule("Default", C.Always, "", A.SetMetaState, "Loot"),
+            new() { State = "Loot", Condition = C.Never, Action = A.None },
+        };
+        string text = AfFileWriter.SaveToString(rules, new Dictionary<string, List<string>>());
+        var back = AfFileParser.LoadFromText(text);
+        Check.Eq(back.Rules.Count, 2, "both rules back");
+        var loot = back.Rules.FirstOrDefault(x => x.State == "Loot");
+        Check.NotNull(loot, "the new state is still there");
+        if (loot != null)
+        {
+            Check.Eq(loot.Condition, C.Never, "Never");
+            Check.Eq(loot.Action, A.None, "None");
+        }
+
+        // It never fires, and SetState into it just sits there.
+        var rig = new Rig(rules: new[] { Rule("Default", C.Always, "", A.SetMetaState, "Loot"), Mark("Loot", C.Never, "", "x") });
+        rig.Tick();
+        rig.Tick(5);
+        Check.Eq(rig.S.CurrentState, "Loot", "moved into the new state");
+        Check.False(rig.Has("x"), "its Never rule never fires");
+    }
+
+    // ── Panel edits on a running meta (MetaRuleEdits, update_rule; 2026-10-05 autosave) ─────
+
+    private static void EditKeepsRunningMeta()
+    {
+        var rig = new Rig(rules: new[]
+        {
+            Mark("Default", C.Always, "", "a"),
+            Mark("Default", C.SecondsInState_GE, "10", "t"),
+        });
+        rig.Tick();
+        Check.Eq(rig.Var("a"), "1", "the Always rule fired on entry");
+        rig.Tick(6);
+
+        // What the editor's autosave sends: an edited copy of rule 0, then the structural bump
+        // TryAutoSaveMetaCmd makes.
+        MetaRule edited = Mark("Default", C.Always, "", "a");
+        edited.ActionData = "setvar[a, getvar[a]+10]";
+        Check.True(MetaRuleEdits.Replace(rig.S.MetaRules, 0, edited), "replaced");
+        rig.S.MetaRulesStructuralVersion++;
+        rig.Tick();
+        Check.Eq(rig.Var("a"), "1", "the edited rule did not fire again (latch kept)");
+        Check.Eq(rig.S.CurrentState, "Default", "state unchanged");
+        Check.Near(rig.M.GetStateSnapshot().SecondsInState, 6, 1e-9, "seconds in state not restarted");
+        rig.Tick(4.5);
+        Check.Eq(rig.Var("t"), "1", "the 10 s rule fired on the original clock");
+
+        // A real state entry re-arms it, now with the edited action.
+        rig.S.ForceStateReset = true;
+        rig.Tick();
+        Check.Eq(rig.Var("a"), "11", "re-armed by a state entry, runs the edited action");
+
+        // Out of range: nothing changes.
+        Check.False(MetaRuleEdits.Replace(rig.S.MetaRules, 5, Mark("Default", C.Never, "", "z")), "bad index refused");
+        Check.Eq(rig.S.MetaRules.Count, 2, "rule count unchanged");
+
+        // Before the fix (a plain replace) the same edit fired the rule again.
+        var old = new Rig(rules: new[] { Mark("Default", C.Always, "", "a") });
+        old.Tick();
+        old.S.MetaRules[0] = Mark("Default", C.Always, "", "a");
+        old.S.MetaRulesStructuralVersion++;
+        old.Tick();
+        Check.Eq(old.Var("a"), "2", "a plain replace re-fires (what MetaRuleEdits prevents)");
+    }
+
+    private static void EditKeepsHiddenFields()
+    {
+        var call = new MetaRule
+        {
+            State = "Default", Condition = C.ChatMessageCapture, ConditionData = "x", ChatColors = "2;4",
+            Action = A.CallMetaState, ActionData = "Buff", CallReturnState = "Hunt",
+        };
+        var rules = new List<MetaRule> { call };
+        // The panel's DTO carries neither field.
+        var edited = new MetaRule { State = "Default", Condition = C.ChatMessageCapture, ConditionData = "y", Action = A.CallMetaState, ActionData = "Buff2" };
+        MetaRuleEdits.Replace(rules, 0, edited);
+        Check.Eq(rules[0].CallReturnState, "Hunt", "CallState return kept");
+        Check.Eq(rules[0].ChatColors, "2;4", "ChatCapture colours kept");
+        Check.Eq(rules[0].ActionData, "Buff2", "the edit applied");
+
+        // Changing the action / condition drops them.
+        var other = new MetaRule { State = "Default", Condition = C.Always, Action = A.SetMetaState, ActionData = "Buff" };
+        MetaRuleEdits.Replace(rules, 0, other);
+        Check.Eq(rules[0].CallReturnState, "", "not a CallState any more");
+        Check.Eq(rules[0].ChatColors, "", "not a ChatCapture any more");
+
+        // Nested: an All's ChatCapture child by position.
+        var parent = new MetaRule { Condition = C.All, Children = { new MetaRule { Condition = C.ChatMessageCapture, ChatColors = "7" } } };
+        var parentEdit = new MetaRule { Condition = C.All, Children = { new MetaRule { Condition = C.ChatMessageCapture, ConditionData = "z" } } };
+        MetaRuleEdits.KeepHidden(parent, parentEdit);
+        Check.Eq(parentEdit.Children[0].ChatColors, "7", "child colours kept");
     }
 
     // ── Rig ───────────────────────────────────────────────────────────────────

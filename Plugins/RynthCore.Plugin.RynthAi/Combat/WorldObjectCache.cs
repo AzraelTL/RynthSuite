@@ -601,17 +601,17 @@ public class WorldObjectCache
                     return;
                 }
 
-                // Non-creature with a position — could be equipped item on 0x8000 range
-                // or static world object; classify by type flags
-                if ((typeFlags & (ItemTypeMeleeWeapon | ItemTypeMissileWeapon | ItemTypeCaster | ItemTypeArmor | ItemTypeContainer)) != 0)
-                {
-                    // Item with a world position = equipped or ground-dropped
-                    cls = ClassifyItem(uid, typeFlags);
-                    _inventory.Add(id);
-                    _landscape.Remove(id);
-                    _byId[id] = Make(id, name, cls);
+                // Non-creature with a position and a known item type: equipped gear, a ground
+                // drop, a chest. It gets the class its type gives and is filed by who has it
+                // (FileTypedObject). Only weapons, armor, casters and containers were taken
+                // here before, all into the inventory: keys, gems, comps, food and the like
+                // stayed Unknown landscape and were re-probed every 2 s for good, and other
+                // players' wielded gear and ground-dropped weapons counted as ours
+                // (2026-10-05). A static object that isn't a chest or a lifestone returns
+                // false and stays Unknown scenery below, hazard check included.
+                AcObjectClass typedCls = ClassifyItem(uid, typeFlags);
+                if (typedCls != AcObjectClass.Unknown && FileTypedObject(uid, id, name, typedCls, typeFlags))
                     return;
-                }
             }
             else if (uid >= 0x80000000u)
             {
@@ -658,6 +658,77 @@ public class WorldObjectCache
         _classifyRetry.Remove(uid);
         _byId[id] = Make(id, name, cls);
         }
+    }
+
+    private const uint ItemTypeGear = ItemTypeMeleeWeapon | ItemTypeMissileWeapon | ItemTypeCaster | ItemTypeArmor | ItemTypeContainer;
+
+    private enum Holder { Unknown, Player, OtherWielder, OtherContainer, Nobody }
+
+    /// <summary>
+    /// Who has the object: the player (wielded, in the main pack, or in a side pack), another
+    /// wielder (other players' and NPCs' gear), another container (a corpse, a chest), or
+    /// nobody (it lies on the ground). Unknown when the player isn't known yet or the engine
+    /// can't read the object's ownership. Caller holds _gate.
+    /// </summary>
+    private Holder WhoHas(int id)
+    {
+        if (_playerId == 0 || !TryGetOwnership(id, out int containerId, out int wielderId, out _))
+            return Holder.Unknown;
+        uint container = unchecked((uint)containerId), wielder = unchecked((uint)wielderId);
+        if (wielder == _playerId || container == _playerId) return Holder.Player;
+        if (wielder != 0) return Holder.OtherWielder;
+        if (container == 0) return Holder.Nobody;
+        // Side packs sit in the main pack (AC has no deeper nesting).
+        return TryGetOwnership(containerId, out int outer, out _, out _) && unchecked((uint)outer) == _playerId
+            ? Holder.Player : Holder.OtherContainer;
+    }
+
+    /// <summary>
+    /// Files a positioned non-creature whose item type gave it a real class. Caller holds _gate.
+    /// <list type="bullet">
+    /// <item>A lifestone: landscape.</item>
+    /// <item>Another static object: a chest goes on the landscape; anything else returns false
+    /// and the caller keeps it Unknown scenery (doors, signs, static hotspots).</item>
+    /// <item>A dynamic object the player has: inventory. One another player or an NPC wields:
+    /// neither list (known by id only), so it is not ours, not a ground item on the radar and
+    /// not something a meta can pick up. In another container or loose on the ground: landscape.</item>
+    /// <item>Ownership unreadable: gear goes to the inventory as before, the rest to the landscape.</item>
+    /// </list>
+    /// A non-gear object that lands on the landscape gets the hazard check it had as Unknown
+    /// (a hotspot spawned with a dynamic id and a Misc type is still a hazard).
+    /// </summary>
+    private bool FileTypedObject(uint uid, int id, string name, AcObjectClass cls, uint typeFlags)
+    {
+        bool gear = (typeFlags & ItemTypeGear) != 0;
+        bool toInventory, toLandscape;
+        if (cls == AcObjectClass.Lifestone)
+        {
+            toInventory = false;
+            toLandscape = true;
+        }
+        else if (uid < 0x80000000u)
+        {
+            if ((typeFlags & ItemTypeContainer) == 0) return false;
+            toInventory = false;
+            toLandscape = true;
+        }
+        else
+        {
+            Holder holder = WhoHas(id);
+            toInventory = holder == Holder.Player || (holder == Holder.Unknown && gear);
+            toLandscape = !toInventory && holder != Holder.OtherWielder;
+        }
+
+        _classifyRetry.Remove(uid);
+        _reclassifySkipState.Remove(uid);
+        if (toInventory) { if (_inventory.Add(id)) _inventoryDirty = true; }
+        else if (_inventory.Remove(id)) _inventoryDirty = true;
+        if (toLandscape) _landscape.Add(id);
+        else _landscape.Remove(id);
+        _byId[id] = Make(id, name, cls);
+        if (toLandscape && !gear)
+            MaybeRegisterHazard(uid, name);
+        return true;
     }
 
     // PublicWeenieDesc._bitfield BF_CORPSE (ObjectDescriptionFlag.Corpse).
@@ -725,6 +796,7 @@ public class WorldObjectCache
         List<int>? toPromote = null;
         List<int>? toCorpse  = null;
         List<(int id, string name, AcObjectClass cls)>? statics = null;
+        List<(int Id, uint Flags)>? typed = null;   // Unknowns whose item type now gives a class
         foreach (int id in _landscape)
         {
             uint uid = unchecked((uint)id);
@@ -754,7 +826,11 @@ public class WorldObjectCache
             // Bounded to Monster/Unknown so we don't name-query every ground
             // item each pass; IsCorpseName is specific ("X corpse"/"Corpse of X")
             // so a live mob cannot be misread as a corpse.
-            if ((wo.ObjectClass == AcObjectClass.Monster || wo.ObjectClass == AcObjectClass.Unknown)
+            // Container too: a corpse typed before its name or flag was readable is filed as a
+            // landscape Container by FileTypedObject (it used to go to the inventory, which the
+            // inventory pass below re-checks).
+            if ((wo.ObjectClass == AcObjectClass.Monster || wo.ObjectClass == AcObjectClass.Unknown
+                 || wo.ObjectClass == AcObjectClass.Container)
                 && ((_host.TryGetObjectName(uid, out string maybeCorpse) && IsCorpseName(maybeCorpse))
                     || HasCorpseFlag(uid)))
             {
@@ -771,14 +847,21 @@ public class WorldObjectCache
             // immediate signal that doesn't wait on qualities/appraisal). This
             // second path is what rescues a login mob within 2s if it slipped
             // to Unknown before its weenie/combat-state was readable.
-            bool isCreature = _host.TryGetItemType(uid, out uint typeFlags)
-                              && (typeFlags & ItemTypeCreature) != 0;
+            bool gotType = _host.TryGetItemType(uid, out uint typeFlags);
+            bool isCreature = gotType && (typeFlags & ItemTypeCreature) != 0;
             if (!isCreature
                 && _host.HasObjectIsAttackable
                 && _host.ObjectIsAttackable(uid))
                 isCreature = true;
             if (!isCreature)
             {
+                // Its type arrived after it was classified: file it as the item it is instead
+                // of probing it again every pass. Done after the loop (filing edits _landscape).
+                if (gotType && typeFlags != 0 && ClassifyByItemType(typeFlags) != AcObjectClass.Unknown)
+                {
+                    (typed ??= new()).Add((id, typeFlags));
+                    continue;
+                }
                 DiagLogReclassifySkip(uid, wo.Name);
                 continue;
             }
@@ -832,10 +915,27 @@ public class WorldObjectCache
             _host.Log($"[RynthAi] ReclassifyUnknownDynamics: rescued {toCorpse.Count} stale corpse(s) → Corpse");
         }
 
+        if (typed != null)
+        {
+            int filed = 0, intoInventory = 0;
+            foreach (var (id, flags) in typed)
+            {
+                if (!_byId.TryGetValue(id, out var wo)) continue;
+                uint uid = unchecked((uint)id);
+                AcObjectClass cls = ClassifyItem(uid, flags);
+                if (cls == AcObjectClass.Unknown || !FileTypedObject(uid, id, wo.Name ?? string.Empty, cls, flags)) continue;
+                filed++;
+                if (_inventory.Contains(id)) intoInventory++;
+            }
+            if (filed > 0)
+                _host.Log($"[RynthAi] ReclassifyUnknownDynamics: typed {filed} Unknown object(s) as items ({intoInventory} into the inventory)");
+        }
+
         // DIAG: heartbeat — Unknown landscape candidates checked but nothing promoted
         // this pass. Confirms ReclassifyUnknownDynamics is running and engine signals
         // keep failing for the stuck uids (vs. them never reaching _landscape at all).
         if (toPromote == null
+            && typed == null
             && _reclassifySkipState.Count > 0
             && _reclassifyDiagSummaryCount < MaxReclassifyDiagSummaries)
         {

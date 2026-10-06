@@ -104,7 +104,9 @@ public sealed partial class RynthAiPlugin
     private long _corpseIdsRequestedAt;
     private bool _corpseApproachTurnsActive;
 
-    private static long CorpseNowMs => Environment.TickCount64;
+    /// <summary>The loot clock (ms); the host tests replace it to run minutes of looting at once.</summary>
+    internal static Func<long> CorpseClock = static () => Environment.TickCount64;
+    private static long CorpseNowMs => CorpseClock();
     private void LootDiag(string message)
     {
         Log(message);
@@ -142,8 +144,49 @@ public sealed partial class RynthAiPlugin
     // busy-zero churn) paced the whole loot grind, and the 2026-06-12 09:33
     // storm of them latched the variant-2 stance/item deadlock.
     private const long BUSY_TIMEOUT_COMBAT_URGENT_MS = 5_000;
+    // The engine's count is the one owner (2026-10-06; analysis by Silentkelpie, re-implemented
+    // here): this mirror is fed by the engine's busy events, and the engine now sends one for
+    // every UseDone and every reset it does, so the two agree except for events still on their
+    // way. A disagreement that lasts BusyMirrorFollowMs is settled the engine's way; the old
+    // 5/10 s mirror reset below is only for an engine without GetBusyState.
+    private const long BusyMirrorFollowMs = 1_500;
+    private long _busyMismatchSince;
+    private long _lastBusyFollowLogAt;
+    private int _busyFollowsSinceLog;
+
+    private bool FollowEngineBusyCount()
+    {
+        if (!Host.HasGetBusyState) return false;
+        int engine;
+        try { engine = Host.GetBusyState(); } catch { return false; }
+        long now = CorpseNowMs;
+        if (engine == _busyCount) { _busyMismatchSince = 0; return true; }
+        if (_busyMismatchSince == 0) { _busyMismatchSince = now; return true; }
+        if (now - _busyMismatchSince < BusyMirrorFollowMs) return true;
+        int was = _busyCount;
+        _busyMismatchSince = 0;
+        _busyCount = Math.Max(0, engine);
+        _busyCountLastIncrementAt = 0;
+        _busyCountBecamePositiveAt = _busyCount > 0 ? now : 0;
+        if (_combatManager != null) _combatManager.BusyCount = _busyCount;
+        if (_buffManager != null) _buffManager.BusyCount = _busyCount;
+        _busyFollowsSinceLog++;
+        if (now - _lastBusyFollowLogAt >= 10_000)
+        {
+            Log($"[RynthAi] Busy mirror {was} -> {_busyCount}: following the engine's count ({_busyFollowsSinceLog} in the last {(now - _lastBusyFollowLogAt) / 1000.0:0} s; the client's count is never cleared by RynthAi).");
+            _lastBusyFollowLogAt = now;
+            _busyFollowsSinceLog = 0;
+        }
+        return true;
+    }
+
     private void CheckBusyTimeout()
     {
+        if (FollowEngineBusyCount())
+        {
+            PruneCorpseCollections();
+            return;
+        }
         if (_busyCount > 0 && _busyCountBecamePositiveAt != 0)
         {
             long elapsed = CorpseNowMs - _busyCountBecamePositiveAt;
@@ -176,10 +219,17 @@ public sealed partial class RynthAiPlugin
 
             if (elapsed > threshold)
             {
-                Log($"[RynthAi] Busy count stuck at {_busyCount} for >{elapsed}ms (combatUrgent={combatUrgent} lootOpenUrgent={lootOpenUrgent} castGesture={castGestureInProgress}) — force-clearing.");
-                // Reset pending loot item BEFORE zeroing AC's m_cBusy. If we have an
-                // in-flight UseObject, ForceResetBusyCount zeros m_cBusy under it; the
-                // retry in TickPendingCorpsePickup would then hit a freed AC object and crash.
+                // Our mirror only (2026-10-06). AC's m_cBusy is +1 per action the client sends and
+                // -1 per server UseDone (ClientUISystem::Handle_Item::UseDone, inline - which is why
+                // this mirror, fed by the Increment/Decrement hooks, never saw the decrement and
+                // looked "stuck"). Force-clearing AC's count here zeroed the count of actions the
+                // server had not answered yet (each later UseDone then drove it negative: ~190
+                // repairs an hour in the 10-05/10-06 logs) and let the next action out on top of
+                // them. The pacing waits on the server's answers now (ActionPacer); the client's
+                // own count is left to the client and the engine.
+                bool serverWaiting = RynthCore.Plugin.Shared.ActionPacer.Current(Host) != null;
+                Log($"[RynthAi] Busy mirror at {_busyCount} for >{elapsed}ms (combatUrgent={combatUrgent} lootOpenUrgent={lootOpenUrgent} castGesture={castGestureInProgress}" +
+                    $"{(serverWaiting ? ", a server action is still unanswered" : "")}) — resetting the mirror only (the client's count is left alone).");
                 ResetCurrentLootItem();
                 _corpseIdsRequested = false;
                 _lastLootActionAt = CorpseNowMs;
@@ -188,7 +238,6 @@ public sealed partial class RynthAiPlugin
                 _busyCountBecamePositiveAt = 0;
                 if (_combatManager != null) _combatManager.BusyCount = 0;
                 if (_buffManager != null) _buffManager.BusyCount = 0;
-                if (Host.HasForceResetBusyCount) Host.ForceResetBusyCount();
             }
         }
 
@@ -350,6 +399,8 @@ public sealed partial class RynthAiPlugin
         }
         LootDiag($"[RynthAi] Corpse loot: opened container 0x{objectId:X8}.");
         _consecutiveLootTimeouts = 0; // a successful open proves AC is responsive again
+        _lootWedgeAnnounced = false;
+        ApplyUseRefusalVerdict(_useRefusals.OnOpened(CorpseNowMs), CorpseNowMs);
         if (switchedTarget)
             LootDiag($"[RynthAi] Corpse loot: switching active corpse target from 0x{(uint)_targetCorpseId:X8} to 0x{objectId:X8}.");
 
@@ -476,7 +527,12 @@ public sealed partial class RynthAiPlugin
         // timeouts). Stop firing opens into a dead client until the halt window
         // elapses — hammering it can't recover a server-side lock, only a relog
         // can. Navigation/combat (non-item-action) still run elsewhere.
-        if (CorpseNowMs < _lootHaltUntil)
+        // The use-refusal watch first: it reads the server's answers to our opens, and while it
+        // has decided the server refuses every use (Stuck) no corpse is claimed or opened until
+        // its back-off ends.
+        long haltNow = CorpseNowMs;
+        TickUseRefusalWatch(haltNow);
+        if (haltNow < _lootHaltUntil || _useRefusals.HoldsOpens(haltNow))
             return;
 
         // ── Buffing: halt loot work but retain target so looting resumes immediately ──
@@ -613,6 +669,29 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
+        // An open goes out only once the arbiter has given Looting the tick. A corpse claimed on
+        // the tick a fight ended (Combat still owned it) used to be opened at once, and the
+        // arbiter's nav stop (StopCompletely) and Combat's idle peace-mode swap followed 3-30 ms
+        // later. On ACE both cancel the server's walk/turn to the corpse - a mode change runs
+        // HandleActionCancelAttack -> cancel_moveto - so that open could only fail (2026-10-06
+        // 06:18:44, the first failed open of the day's stall). One tick later the stop goes
+        // out first (PauseNavigationForCorpse) and the open after it.
+        if (_activity != BotActivity.Looting)
+            return;
+
+        // One server action at a time (2026-10-06, ActionPacer): no open while the server is still
+        // answering another action - a kit, a cast, a stance change, or the last open itself (a
+        // re-sent open restarts the server's walk and fails the first one's callback). The claim's
+        // 12 s timeout keeps running (the longest wait here is the 5 s limit on an open).
+        if (!ActionPacer.MayStart(Host, "Loot", HealNeed.None, out _))
+            return;
+        // The last corpse's close is not answered yet (CloseGroundContainer, ~40 ms): a use now makes
+        // the client send its own NoLongerViewingContents for that corpse too (flight recorder
+        // 2026-10-06 07:57:09.801: the engine's close, then the client's, beside the next use).
+        if (_closeSentFor != 0 && _closeSentFor != _targetCorpseId && now - _closeSentAt < CloseAnswerWaitMs
+            && Host.HasGetGroundContainerId && unchecked((int)Host.GetGroundContainerId()) == _closeSentFor)
+            return;
+
         // Farther than reach: just use the corpse. The server walks the character to it and turns
         // it (as a player's double-click does); steering there ourselves looked awkward and
         // turned slowly (owner, 2026-10-04). Our own movement stays off so it can't cancel that
@@ -625,8 +704,8 @@ public sealed partial class RynthAiPlugin
             if (_lastCorpseOpenAttemptAt == 0 || now - _lastCorpseOpenAttemptAt >= walkMs)
             {
                 if (_busyCount > 0 && now - _lastCorpseOpenAttemptAt < OpenBusyWaitMaxMs) return;
-                AttemptOpenCorpse(_targetCorpseId);
-                _lastCorpseOpenAttemptAt = now;
+                if (AttemptOpenCorpse(_targetCorpseId))
+                    _lastCorpseOpenAttemptAt = now;
             }
             return;
         }
@@ -651,8 +730,8 @@ public sealed partial class RynthAiPlugin
                     return; // busy — hold the open briefly
             }
             _corpseOpenBusyWaitSince = 0;
-            AttemptOpenCorpse(_targetCorpseId);
-            _lastCorpseOpenAttemptAt = now;
+            if (AttemptOpenCorpse(_targetCorpseId))
+                _lastCorpseOpenAttemptAt = now;
         }
     }
 
@@ -1299,6 +1378,7 @@ public sealed partial class RynthAiPlugin
 
             ChatLine($"[RynthAi] Loot rule: {matchItemName} -> [{matchActionLabel}] {matchRuleLabel}");
             _currentLootItemId = firstMatchId;
+            RynthCore.Plugin.RynthAi.ItemInfo.SelfSelect.Mark(unchecked((uint)firstMatchId));
             Host.SelectItem(unchecked((uint)firstMatchId));
             LootDiag($"[RynthAi] Corpse loot: picking up 0x{(uint)firstMatchId:X8} '{matchItemName}' from corpse 0x{(uint)corpseId:X8}.");
 
@@ -1412,6 +1492,7 @@ public sealed partial class RynthAiPlugin
         if (_busyCount > 0)
             return; // Client is busy — don't queue retry
 
+        RynthCore.Plugin.RynthAi.ItemInfo.SelfSelect.Mark(unchecked((uint)_currentLootItemId));
         Host.SelectItem(unchecked((uint)_currentLootItemId));
         LootPickupResult retry = SendLootPickup(_currentLootItemId, _currentLootItemName, _openedContainerId);
         if (retry == LootPickupResult.NoRoom || retry == LootPickupResult.Refused)
@@ -1544,6 +1625,11 @@ public sealed partial class RynthAiPlugin
     {
         _lootStarved = false;
         if (!settings.IsMacroRunning || !settings.EnableLooting)
+            return false;
+
+        // The server refuses every use (UseRefusalWatch, Stuck): no loot work until the back-off
+        // ends, so the arbiter lets nav and combat run on instead of standing at the corpses.
+        if (_openedContainerId == 0 && _useRefusals.HoldsOpens(CorpseNowMs))
             return false;
 
         // Already committed to a body, or mid-loot with the container open.
@@ -1993,10 +2079,6 @@ public sealed partial class RynthAiPlugin
 
         if (_manaStoneManager == null) return false;
         if (!Host.HasGetObjectIntProperty) return false;
-        // ACE won't drain a wand, staff or orb into a stone, so ManaStoneManager never taps
-        // one (and its pending-drain count skips them, so the quota never filled): every
-        // high-mana wand was looted and kept for good. Drakkon's "Piercing Sceptre", 2026-10-05.
-        if (ManaStoneManager.IsWandLike(item)) return false;
 
         int threshold = settings.ManaTapMinMana;
         if (threshold <= 0) return false;
@@ -2297,13 +2379,142 @@ public sealed partial class RynthAiPlugin
     // or a corpse the bot never reached?).
     private int _lastOpenAttemptCorpseId;
 
-    private void AttemptOpenCorpse(int corpseId)
+    /// <summary>Sends one open. False when the use-refusal watch acted instead (nothing sent).</summary>
+    private bool AttemptOpenCorpse(int corpseId)
     {
+        long now = CorpseNowMs;
+        bool watch = Host.HasUseDoneSeq;
+        if (watch)
+        {
+            // The previous open, answered with nothing opened, is judged before this one goes out:
+            // a clean stop or a back-off must not land right after a fresh use (it would cancel it).
+            var verdict = _useRefusals.SettleBeforeOpen(now);
+            if (verdict != UseRefusalWatch.Verdict.None)
+            {
+                ApplyUseRefusalVerdict(verdict, now);
+                return false;
+            }
+        }
+
         _lastOpenAttemptCorpseId = corpseId;
         StopCorpseMovement();
+        int seqBefore = watch ? Host.GetUseDoneSeq() : 0;
         Host.SelectItem(unchecked((uint)corpseId));
-        Host.UseFor(unchecked((uint)corpseId), "Loot", "open the claimed corpse");
+        bool sent = Host.UseFor(unchecked((uint)corpseId), "Loot", "open the claimed corpse");
+        if (watch && sent)
+            _useRefusals.OnOpenSent(corpseId, now, seqBefore);
         LootDiag($"[RynthAi] Corpse loot: attempting open for 0x{(uint)corpseId:X8}.");
+        return true;
+    }
+
+    // ── Server refuses every use (2026-10-06; Loot/UseRefusalWatch.cs) ─────────────────────
+    private readonly UseRefusalWatch _useRefusals = new();
+    private bool _useStuckAnnounced;
+    private bool _lootWedgeAnnounced;
+
+    /// <summary>Every tick while looting runs: the server's answers to our opens.</summary>
+    private void TickUseRefusalWatch(long now)
+    {
+        if (!Host.HasUseDoneSeq)
+            return;
+        int seq = Host.GetUseDoneSeq();
+        bool haveErr = Host.TryGetLastUseDone(out int lastSeq, out uint err) && lastSeq == seq;
+        ApplyUseRefusalVerdict(_useRefusals.OnTick(now, seq, err, haveErr), now);
+    }
+
+    private void ApplyUseRefusalVerdict(UseRefusalWatch.Verdict verdict, long now)
+    {
+        switch (verdict)
+        {
+            case UseRefusalWatch.Verdict.CleanStopAndRetry:
+            {
+                FlightRecorderSignal.Dump(Host, "use check: corpse opens answered but not opened");
+                Log($"[RynthAi] Use check: {_useRefusals.Refusals} corpse opens in a row were answered by the server but nothing opened ({RefusedList()}) - one clean stop, a {UseRefusalWatch.CleanStopPauseMs} ms pause, then one more try.");
+                Host.SetAutoRunBy("Loot/UseCheck", false);
+                if (Host.HasStopCompletely)
+                    Host.StopCompletelyBy("Loot/UseCheck");
+                _corpseAutorunActive = false;
+                _corpseApproachTurnsActive = false;
+                // Face the corpse for the retry. Since 2026-10-04 the bot leaves the turn to the
+                // server; if the server can't turn the character any more, a corpse already in
+                // front may still open (mid-stall, 06:28:19, a use by hand with the macro off
+                // opened one - the only open in those 13 minutes; whether it was faced isn't logged).
+                if (_targetCorpseId != 0 && Host.HasTurnToHeading
+                    && TryGetHeadingToObject(_targetCorpseId, out double faceDeg, out double faceErr, out _)
+                    && faceErr > 2.0)
+                {
+                    Host.TurnToHeadingBy("Loot/UseCheck", (float)faceDeg);
+                    Log($"[RynthAi] Use check: facing 0x{(uint)_targetCorpseId:X8} ({faceErr:0} deg off) for the retry.");
+                }
+                _lootHaltUntil = Math.Max(_lootHaltUntil, now + UseRefusalWatch.CleanStopPauseMs);
+                _lastCorpseOpenAttemptAt = 0;          // the retry goes out as soon as the pause ends
+                if (_targetCorpseId != 0)
+                    _corpseTargetSince = now;          // and gets a full corpse timeout
+                break;
+            }
+            case UseRefusalWatch.Verdict.DropCorpse:
+            {
+                int id = _useRefusals.LastRefusedCorpse;
+                Log($"[RynthAi] Use check: corpse 0x{(uint)id:X8} is answered but never opens - giving up on it; the next corpse tells whether every use is refused.");
+                if (id != 0 && _targetCorpseId == id && _openedContainerId == 0)
+                    AbandonCurrentCorpse(now, "refused");
+                else if (id != 0)
+                    _corpseCooldownUntil[id] = now + NeverOpenedAbandonRetryMs;
+                break;
+            }
+            case UseRefusalWatch.Verdict.Stuck:
+            {
+                FlightRecorderSignal.Dump(Host, "use check: server refuses every use");
+                Log($"[RynthAi] Use check: the server answers every use but nothing opens ({_useRefusals.Refusals} refusals on {RefusedList()}), the clean stop and retry didn't help - looting paused {_useRefusals.BackoffMs / 60_000} min, then one corpse is tried again.");
+                if (!_useStuckAnnounced)
+                {
+                    _useStuckAnnounced = true;
+                    ChatLine($"[RynthAi] The server isn't letting this character use objects; a relog fixes it. Looting is paused and tried again every few minutes.");
+                }
+                ResetCorpseTarget();
+                break;
+            }
+            case UseRefusalWatch.Verdict.StillStuck:
+                Log($"[RynthAi] Use check: still refused - next try in {_useRefusals.BackoffMs / 60_000} min.");
+                ResetCorpseTarget();
+                break;
+            case UseRefusalWatch.Verdict.Recovered:
+                Log("[RynthAi] Use check: a corpse opened - uses work again, looting resumes.");
+                if (_useStuckAnnounced)
+                    ChatLine("[RynthAi] Objects open again; looting is back on.");
+                _useStuckAnnounced = false;
+                break;
+        }
+    }
+
+    private string RefusedList() =>
+        string.Join(", ", _useRefusals.RefusedCorpses.Select(id => $"0x{(uint)id:X8}"));
+
+    // The arbiter's wantLoot of the current tick (HasLootWork), for LootHoldsIdlePeace.
+    private bool _lastWantLoot;
+
+    /// <summary>
+    /// CombatManager's idle peace-mode swap waits while looting has work: a corpse to claim, a
+    /// claimed or open corpse, or a door/corpse use the server is still answering. On ACE a
+    /// combat-mode change cancels the server's walk/turn to a used corpse (HandleActionCancelAttack
+    /// -> cancel_moveto), so the swap that went out 3 ms after the 06:18:44 open (2026-10-06) made
+    /// it fail; and between kills in a busy spawn it flipped peace/war every few seconds. Opening a
+    /// corpse needs no peace mode; the swap happens once looting is done.
+    /// </summary>
+    private bool LootHoldsIdlePeace() =>
+        _targetCorpseId != 0
+        || _openedContainerId != 0
+        || _lastWantLoot
+        || RynthCore.Plugin.Shared.UseAudit.WorldUseInFlight(Host, out _);
+
+    /// <summary>A fresh session (logout/login): a relog is what clears a server that refuses uses.</summary>
+    private void ResetUseRefusalState()
+    {
+        _useRefusals.Reset();
+        _useStuckAnnounced = false;
+        _lootWedgeAnnounced = false;
+        _consecutiveLootTimeouts = 0;
+        _lootHaltUntil = 0;
     }
 
     private void SyncCorpseContainerState()
@@ -2542,6 +2753,11 @@ public sealed partial class RynthAiPlugin
     /// which closes the window and brings OnStopViewingObjectContents. Older engines: nothing
     /// (the server closes the corpse when the next one is opened, as before).
     /// </summary>
+    // The last close sent, until the server's CloseGroundContainer answers it (see TickCorpseOpening).
+    private int _closeSentFor;
+    private long _closeSentAt;
+    private const long CloseAnswerWaitMs = 500;
+
     private void CloseCorpseContainer(int corpseId, string why)
     {
         if (corpseId == 0 || !Host.HasCloseContainer)
@@ -2553,7 +2769,11 @@ public sealed partial class RynthAiPlugin
             return;
 
         if (Host.CloseContainer(unchecked((uint)corpseId)))
+        {
+            _closeSentFor = corpseId;
+            _closeSentAt = CorpseNowMs;
             LootDiag($"[RynthAi] Corpse loot: closing 0x{(uint)corpseId:X8} ({why}).");
+        }
         else
             LootDiag($"[RynthAi] Corpse loot: close of 0x{(uint)corpseId:X8} not sent ({why}).");
     }
@@ -2583,7 +2803,7 @@ public sealed partial class RynthAiPlugin
 
         long ageMs = _corpseTargetSince != 0 ? now - _corpseTargetSince : 0;
         LootDiag($"[RynthAi] Corpse loot: abandoning corpse 0x{(uint)corpseId:X8} after {ageMs}ms ({reason}).");
-        ChatLine($"[RynthAi] Corpse timeout: giving up on 0x{(uint)corpseId:X8} after {ageMs}ms.");
+        ChatLine($"[RynthAi] Corpse {(reason == "refused" ? "refuses to open" : "timeout")}: giving up on 0x{(uint)corpseId:X8} after {ageMs}ms.");
 
         // Only a corpse we actually OPENED earns the completed mark (30-min
         // do-not-touch — its loot is permanently skipped). A never-opened
@@ -2655,13 +2875,19 @@ public sealed partial class RynthAiPlugin
     /// </summary>
     private void HandleLootWedge(long now)
     {
+        FlightRecorderSignal.Dump(Host, "loot wedge");
         _lootHaltUntil = now + LootWedgeHaltMs;
         _consecutiveLootTimeouts = 0; // re-arm; if still wedged it trips again after the halt
 
         if (Host.HasCancelAttack)        Host.CancelAttack();
-        if (Host.HasChangeCombatMode)    Host.ChangeCombatMode(CombatMode.NonCombat);
+        // Peace only when not already in it (2026-10-06): an unneeded request went to the server as
+        // a raw 0x53 anyway, and on ACE a mode change cancels whatever walk/turn is pending. Not
+        // while a server action is unanswered either (ChangeCombatModeFor holds it then).
+        Host.ChangeCombatModeFor(CombatMode.NonCombat, "Loot/Wedge", "loot wedge reset");
         if (Host.HasStopCompletely)      Host.StopCompletelyBy("Loot/Wedge");
-        if (Host.HasForceResetBusyCount) Host.ForceResetBusyCount();
+        // No ForceResetBusyCount (2026-10-06): AC's busy count is the count of actions the server
+        // has not answered; zeroing it fixed nothing here (the lock is the server's or the
+        // client's item-request gates below) and let the next action out on top of them.
         // The lock is client-side: AC's pending-item-request slot or attacking
         // flag (see the engine's ClientActionGates). Open both now.
         if (Host.HasInvokeChatParser)    Host.InvokeChatParser("/rc unlockactions");
@@ -2671,7 +2897,12 @@ public sealed partial class RynthAiPlugin
         if (_combatManager != null) _combatManager.BusyCount = 0;
         if (_buffManager != null)   _buffManager.BusyCount = 0;
 
-        ChatLine($"[RynthAi] WEDGE: {LootWedgeThreshold} corpse opens timed out — AC item-actions are locked. Halting looting {LootWedgeHaltMs / 1000}s and unlocking. If equip/loot stays stuck, /rc actionstate shows what the client is waiting on.");
+        // Once per stall (until a corpse opens): 2026-10-06 it fired 11 times in 13 minutes.
+        if (!_lootWedgeAnnounced)
+        {
+            _lootWedgeAnnounced = true;
+            ChatLine($"[RynthAi] WEDGE: {LootWedgeThreshold} corpse opens timed out — AC item-actions are locked. Halting looting {LootWedgeHaltMs / 1000}s and unlocking. If equip/loot stays stuck, /rc actionstate shows what the client is waiting on.");
+        }
         Log($"[RynthAi] LOOT WEDGE detected ({LootWedgeThreshold} consecutive open timeouts) — halt {LootWedgeHaltMs}ms + reset fired.");
     }
 
@@ -2707,6 +2938,10 @@ public sealed partial class RynthAiPlugin
         ChatLine($"[RynthAi] Corpse ranges: max={ConvertMetersToYards(maxMeters):F1} yd / {maxMeters:F1} m, min={ConvertMetersToYards(minMeters):F1} yd / {minMeters:F1} m");
         uint rawOpen = Host.HasGetGroundContainerId ? Host.GetGroundContainerId() : 0;
         ChatLine($"[RynthAi] Corpse state: target=0x{(uint)_targetCorpseId:X8}, corpse-open=0x{(uint)_openedContainerId:X8}, raw-open=0x{rawOpen:X8}, busy={_busyCount}, inv-update={(_openedContainerInventoryObservedAt != 0 ? 1 : 0)}, completed={_completedCorpses.Count}");
+        long infoNow = CorpseNowMs;
+        ChatLine($"[RynthAi] Use check: {_useRefusals.State}, {_useRefusals.Refusals} refused open(s) since the last open"
+                 + (_useRefusals.HoldsOpens(infoNow) ? $", looting paused {(_useRefusals.BackoffUntil - infoNow) / 1000}s more (the server refuses uses; a relog fixes it)" : "")
+                 + (Host.HasUseDoneSeq ? "" : " (this engine can't report the server's answers: the check is off)"));
 
         if (TryFindNearestCorpse(maxMeters, out WorldObject? corpse, out double distanceMeters))
             ChatLine($"[RynthAi] Nearest corpse: {corpse!.Name} (0x{(uint)corpse.Id:X8}) at {ConvertMetersToYards(distanceMeters):F1} yd / {distanceMeters:F1} m");

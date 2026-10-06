@@ -221,6 +221,14 @@ public partial class CombatManager : IDisposable
     private WeaponSwapGate? _weaponSwapGate;
     public void SetWeaponSwapGate(WeaponSwapGate gate) => _weaponSwapGate = gate;
 
+    /// <summary>
+    /// True = hold the idle peace-mode swap (PeaceModeWhenIdle) for now. RynthAi answers true while
+    /// looting has work: on ACE a combat-mode change cancels the server's walk/turn to a corpse
+    /// being opened (2026-10-06). Null = never hold.
+    /// </summary>
+    public Func<bool>? HoldIdlePeace { get; set; }
+    private bool _idlePeaceHeldLogged;
+
     /// <summary>Current combat mode — read live from AC client each access to avoid event-drop drift.</summary>
     public int CurrentCombatMode =>
         _host.HasGetCurrentCombatMode ? _host.GetCurrentCombatMode() : CombatMode.NonCombat;
@@ -305,7 +313,7 @@ public partial class CombatManager : IDisposable
     private DateTime _lastSwingEvidenceAt = DateTime.MinValue;
     private DateTime _lastHitAt  = DateTime.MinValue;
     private DateTime _lastMissAt = DateTime.MinValue;
-    private DateTime _lastKillAt = DateTime.MinValue;
+    private DateTime _lastKillAt = DateTime.MinValue;   // stall-watchdog evidence only; metas and the status feed read the plugin's KillClock
     private string   _lastSwingEvidenceKind = "none";
 
     private readonly CombatStallWatchdog _stallWatch = new();
@@ -2314,7 +2322,20 @@ public partial class CombatManager : IDisposable
             // prevents ChangeCombatMode spam while idling between spawns.
             if (CurrentCombatMode == CombatMode.NonCombat)
                 _idlePeaceAttempts = 0;   // reached peace — the next idle request starts fresh
+            bool peaceHeld = false;
             if (_settings.PeaceModeWhenIdle && CurrentCombatMode != CombatMode.NonCombat
+                && _scannedTargets.Count == 0 && BusyCount == 0
+                && DateTime.Now >= _navMagicWantedUntil)   // a nav recall wants Magic mode
+            {
+                try { peaceHeld = HoldIdlePeace?.Invoke() == true; } catch { peaceHeld = false; }
+                if (peaceHeld && !_idlePeaceHeldLogged)
+                {
+                    _idlePeaceHeldLogged = true;
+                    _host.Log($"[EquipDiag] idle peace-mode swap held: looting is working (a mode change would cancel the server's walk/turn to the corpse); it goes out once looting is done.");
+                }
+            }
+            if (!peaceHeld) _idlePeaceHeldLogged = false;
+            if (!peaceHeld && _settings.PeaceModeWhenIdle && CurrentCombatMode != CombatMode.NonCombat
                 && _scannedTargets.Count == 0 && BusyCount == 0
                 && DateTime.Now >= _navMagicWantedUntil)   // a nav recall wants Magic mode
             {
@@ -2325,9 +2346,9 @@ public partial class CombatManager : IDisposable
                 // 4 after that up to 15 s. An unbounded ChangeCombatMode stream is the
                 // 2026-05-25 stance-spam crash class; this used to retry every 500 ms forever.
                 double peaceDelayMs = Math.Min(15_000, 500 * Math.Pow(2, Math.Min(5, _idlePeaceAttempts / 4)));
-                if ((DateTime.Now - _lastPeaceAttempt).TotalMilliseconds > peaceDelayMs && !IsCastInFlight())
+                if ((DateTime.Now - _lastPeaceAttempt).TotalMilliseconds > peaceDelayMs && !IsCastInFlight()
+                    && _host.ChangeCombatModeFor(CombatMode.NonCombat, "Combat", "idle: no target (Peace Mode When Idle)"))
                 {
-                    _host.ChangeCombatMode(CombatMode.NonCombat);
                     _lastPeaceAttempt = DateTime.Now;
                     _idlePeaceAttempts++;
                     if (_idlePeaceAttempts == 16)
@@ -2410,6 +2431,17 @@ public partial class CombatManager : IDisposable
         // one of its steps is settling.
         if (RunStallWatchdog(targetObj, currentDist))
             return true;
+
+        // One server action at a time (2026-10-06, Plugins/Shared/ActionPacer.cs): no stance change,
+        // wield, attack or cast while the server is still answering the last action (a kit, a corpse
+        // use, a buff, the last stance change). On ACE a mode change cancels a pending use's walk
+        // and fails a cast in progress; that interleaving began every stuck-use stall on record.
+        if (!ActionPacer.MayStart(_host, "Combat", HealNeed.None, out _))
+        {
+            LastCombatSkipReason = "server-answering"; // D4 record-only
+            _tickWait = CombatLatencyTracker.Wait.Busy;
+            return true;
+        }
 
         // While a targeted combat cast is still resolving on the server, do NOT re-assert
         // stance/weapon here: EquipWeaponAndSetStance can emit ChangeCombatMode/UseObject,
@@ -2648,7 +2680,9 @@ public partial class CombatManager : IDisposable
                             _returnToPhysicalCombat = true;
                             _host.UseFor((uint)wandId, "Combat", "wield the wand to cast");
                             _lastEquipTime = DateTime.Now; // gate AttackWithMagic until wand is wielded
-                            _host.ChangeCombatMode(CombatMode.Magic);
+                            // Held by the pacing until the wield is answered; the wielded branch of
+                            // EquipWeaponAndSetStance sends it then (2026-10-06).
+                            _host.ChangeCombatModeFor(CombatMode.Magic, "Combat", "debuff: Magic mode after the wand");
                             lastAttackCmd = DateTime.Now;
                             _lastAttackCmdTargetId = activeTargetId;
                             return true;
@@ -2813,7 +2847,7 @@ public partial class CombatManager : IDisposable
                 // Same effect on the server as the wand heal: a mode change runs
                 // HandleActionCancelAttack. EquipWeaponAndSetStance flips back after its
                 // stance retry delay (~1 s with the flip backoff reset).
-                _host.ChangeCombatMode(CombatMode.NonCombat);
+                _host.ChangeCombatModeFor(CombatMode.NonCombat, "Combat/Stall", "stall watchdog: toggle the mode", force: true);
                 _stallToggleAt = now;
                 ResetStanceFlipBackoff();
                 lastStanceAttempt = now;
@@ -3721,9 +3755,9 @@ public partial class CombatManager : IDisposable
             ResetStanceFlipBackoff();
             return true;
         }
-        if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs())
+        if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs()
+            && _host.ChangeCombatModeFor(CombatMode.Melee, "Combat", "stance"))
         {
-            _host.ChangeCombatMode(CombatMode.Melee);
             lastStanceAttempt = DateTime.Now;
             NoteStanceFlipSent();
         }
@@ -3931,7 +3965,6 @@ public partial class CombatManager : IDisposable
                 _lastStanceRecoverAt = DateTime.Now;
                 _stanceReEquipAttempts++;
                 _host.Log($"[EquipDiag] STANCE STUCK {stuckMs:0}ms mode={CurrentCombatMode}≠{desiredMode} (wielded reads true) — re-equip attempt {_stanceReEquipAttempts}/{StanceReEquipMaxAttempts} 0x{targetWeaponId:X8}");
-                if (_host.HasForceResetBusyCount) _host.ForceResetBusyCount();
                 _host.UseFor((uint)targetWeaponId, "Combat", "stance stuck: equip again");
                 _lastEquipTime = DateTime.Now;
                 lastStanceAttempt = DateTime.MinValue; // let ChangeCombatMode re-fire next tick
@@ -3948,10 +3981,10 @@ public partial class CombatManager : IDisposable
                 _host.WriteToChat($"[RynthAi] Stance wedged: wand wielded but AC won't enter {(desiredMode == CombatMode.Magic ? "Magic" : "combat")} mode after {stuckMs / 1000:0}s. Re-equip stopped (was jamming item actions). Try /ra clearbusy, or relog if it persists.", 2);
             }
 
-            if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs())
+            if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs()
+                && _host.ChangeCombatModeFor(desiredMode, "Combat", "stance"))
             {
                 if (diagNow) { _lastEquipDiagAt = DateTime.Now; _host.Log($"[EquipDiag] wielded=true mode={CurrentCombatMode}→{desiredMode} (weapon=0x{targetWeaponId:X8} '{weaponObj.Name}' src={weaponSource}) — sending ChangeCombatMode"); }
-                _host.ChangeCombatMode(desiredMode);
                 lastStanceAttempt = DateTime.Now;
                 NoteStanceFlipSent();
             }
@@ -3998,9 +4031,9 @@ public partial class CombatManager : IDisposable
             // mode bare-handed (throttled) and send no wield.
             if (!allowWield)
             {
-                if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs())
+                if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs()
+                    && _host.ChangeCombatModeFor(desiredMode, "Combat", "stance"))
                 {
-                    _host.ChangeCombatMode(desiredMode);
                     lastStanceAttempt = DateTime.Now;
                     NoteStanceFlipSent();
                 }
@@ -4035,10 +4068,10 @@ public partial class CombatManager : IDisposable
             // nothing when the wand genuinely isn't wielded: ACE just denies it, and the
             // gated UseObject below still does the wielding. Mirrors the non-wand branch,
             // which has always sent both.
-            if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs())
+            if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs()
+                && _host.ChangeCombatModeFor(desiredMode, "Combat", "stance"))
             {
                 if (diagNow) _host.Log($"[EquipDiag] hand clear — ChangeCombatMode({desiredMode}) alongside wand equip (mode={CurrentCombatMode})");
-                _host.ChangeCombatMode(desiredMode);
                 lastStanceAttempt = DateTime.Now;
                 NoteStanceFlipSent();
             }
@@ -4092,13 +4125,10 @@ public partial class CombatManager : IDisposable
         //    OnCombatModeChange). Request both a mode change and an equip — these go in the
         //    main hand, which AC swaps in place (no held-slot collision). ChangeCombatMode
         //    succeeds if already wielded (fixes hot-reload next tick); UseObject equips it if not.
-        if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs())
-        {
-            if (diagNow) { _lastEquipDiagAt = DateTime.Now; _host.Log($"[EquipDiag] wielded=FALSE mode={CurrentCombatMode}→{desiredMode} (weapon=0x{targetWeaponId:X8} '{weaponObj.Name}' src={weaponSource} class={weaponObj.ObjectClass}) — ChangeCombatMode"); }
-            _host.ChangeCombatMode(desiredMode);
-            lastStanceAttempt = DateTime.Now;
-            NoteStanceFlipSent();
-        }
+        //    The wield goes first (2026-10-06): both went out within 3 ms (07:13:16.446/.453), a
+        //    mode change on top of an unanswered action. With the pacing on, the mode change waits
+        //    for the wield's answer (and once the weapon reads wielded, the wielded branch above
+        //    sends it); off, both still go in this tick, as before.
         if (allowWield && (DateTime.Now - _lastEquipTime).TotalMilliseconds > 2000
             && ClearOffhandFor(targetWeaponId, _curOffhandMode) == OffPrep.Ready   // a shield off before a two-hander / launcher
             && (desiredMode != CombatMode.Missile || PrepareAmmoFor(targetWeaponId) == AmmoPrep.Ready)
@@ -4108,6 +4138,13 @@ public partial class CombatManager : IDisposable
             _host.UseFor((uint)targetWeaponId, "Combat", "equip the weapon");
             MarkWieldSent(targetWeaponId, inHand);
             _lastEquipTime = DateTime.Now;
+        }
+        if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs()
+            && _host.ChangeCombatModeFor(desiredMode, "Combat", "stance"))
+        {
+            if (diagNow) { _lastEquipDiagAt = DateTime.Now; _host.Log($"[EquipDiag] wielded=FALSE mode={CurrentCombatMode}→{desiredMode} (weapon=0x{targetWeaponId:X8} '{weaponObj.Name}' src={weaponSource} class={weaponObj.ObjectClass}) — ChangeCombatMode"); }
+            lastStanceAttempt = DateTime.Now;
+            NoteStanceFlipSent();
         }
         return false;
     }
@@ -4225,9 +4262,9 @@ public partial class CombatManager : IDisposable
             // for good, even in Magic mode, so a Recall waypoint never cast and sat
             // out the whole portal timeout.
             if (CurrentCombatMode == CombatMode.Magic) { ResetStanceFlipBackoff(); return true; }
-            if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs())
+            if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs()
+                && _host.ChangeCombatModeFor(CombatMode.Magic, "Combat", "stance"))
             {
-                _host.ChangeCombatMode(CombatMode.Magic);
                 lastStanceAttempt = DateTime.Now;
                 NoteStanceFlipSent();
             }
@@ -4244,9 +4281,9 @@ public partial class CombatManager : IDisposable
         if (alreadyWielded)
         {
             if (CurrentCombatMode == CombatMode.Magic) { ResetWandSwapState(); ResetStanceFlipBackoff(); return true; }
-            if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs())
+            if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs()
+                && _host.ChangeCombatModeFor(CombatMode.Magic, "Combat", "stance"))
             {
-                _host.ChangeCombatMode(CombatMode.Magic);
                 lastStanceAttempt = DateTime.Now;
                 NoteStanceFlipSent();
             }
@@ -4770,7 +4807,7 @@ public partial class CombatManager : IDisposable
 
                 try
                 {
-                    _host.CastSpell((uint)activeTargetId, spellId);
+                    _host.CastSpellFor((uint)activeTargetId, spellId, "Combat", SpellTableStub.GetById(spellId)?.Name ?? $"spell {spellId}");
                     MarkCombatCastIssued();
                     _lastSpellCast = DateTime.Now;
                     _lastCastWasRing = false;
@@ -4823,7 +4860,7 @@ public partial class CombatManager : IDisposable
                       $"shape={ShapeName(castShape)} ring={isRing} warTier={warTier} voidTier={voidTier} target='{target.Name}'");
             try
             {
-                _host.CastSpell((uint)activeTargetId, offensiveSpellId);
+                _host.CastSpellFor((uint)activeTargetId, offensiveSpellId, "Combat", SpellTableStub.GetById(offensiveSpellId)?.Name ?? $"spell {offensiveSpellId}");
                 MarkCombatCastIssued();
                 SessionAttackCasts++;      // D6: offensive attack-cast tally for the casts-per-kill signal
                 CastsSinceLastKill++;      //     reset in OnKillNotification when a kill lands

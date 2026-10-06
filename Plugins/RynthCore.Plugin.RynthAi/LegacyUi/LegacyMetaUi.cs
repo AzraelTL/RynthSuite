@@ -46,7 +46,7 @@ internal sealed class LegacyMetaUi
     private string _statusMessage = "";
     private DateTime _statusTime = DateTime.MinValue;
 
-    private static readonly string MetaFolder = @"C:\Games\RynthSuite\RynthAi\MetaFiles";
+    private static readonly string MetaFolder = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "MetaFiles");
 
     /// <summary>Warnings from the most recent LoadMacroFile, so the Avalonia
     /// bridge can surface them too (it doesn't see the LoadedMeta).</summary>
@@ -697,6 +697,9 @@ internal sealed class LegacyMetaUi
                         break;
                     case MetaConditionType.VitaePHE:
                         condHint = "Vitae penalty % (e.g. 5)";
+                        break;
+                    case MetaConditionType.NoKillsWithinMinutes:
+                        condHint = "Minutes without a kill (e.g. 5 or 2.5)";
                         break;
                 }
             }

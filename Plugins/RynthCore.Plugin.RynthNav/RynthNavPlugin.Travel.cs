@@ -821,7 +821,9 @@ public sealed partial class RynthNavPlugin
         "/rnav route <place|coords> — plan a route (portals and recalls), no walking\n" +
         "/rnav atlas <search> — find places | fav [place] — favorite | recalls [on|off] | tie 1|2\n" +
         "/rnav goto <coords> | preview <coords> | portals on|off | stop | here | load | test | navdata\n" +
-        "/rnav avoid — show; avoid portals on|off|<m> | walls on|off|<m> | corners <m>";
+        "/rnav avoid — show; avoid portals on|off|<m> | walls on|off|<m> | corners <m>\n" +
+        "/rnav markers on|off | markers labels on|off | markers guide on|off — the trip on the ground\n" +
+        "/rnav saveroute [name] [overwrite] — save the last trip as a RynthAi nav route (NavProfiles)";
 
     /// <summary>One /rnav command. Tick thread.</summary>
     private void RunCommand(string raw, bool fromPanel)
@@ -863,6 +865,8 @@ public sealed partial class RynthNavPlugin
                 break;
             case "recalls": CmdRecalls(rest); break;
             case "tie": CmdTie(rest); break;
+            case "markers": CmdMarkers(rest); break;
+            case "saveroute": CmdSaveRoute(rest); break;
             case "arrive":
                 if (double.TryParse(rest, NumberStyles.Float, CultureInfo.InvariantCulture, out double yd) && yd >= 2 && yd <= 200)
                 { _arrow.ArriveUnits = yd; Say($"the arrow counts you as arrived within {yd:F0} yd"); }
@@ -937,6 +941,7 @@ public sealed partial class RynthNavPlugin
             AtlasLocation? portal = Entrance.PortalFor(_atlas, place, hasPos, pns, pew, out string why);
             if (portal == null) { Note("goto: " + why); return; }
             ns = portal.Ns; ew = portal.Ew; enter = place.Name; enterType = place.Type;
+            _nextEnterPortal = portal.Name;   // the portal object a saved nav route uses (RynthNavPlugin.SaveRoute.cs)
         }
         StartGoto(name, type, ns, ew, enter, enterType);   // StartWalk says "walking to ..." (or why it can't)
     }
@@ -1034,7 +1039,7 @@ public sealed partial class RynthNavPlugin
     /// <summary>Plans a route (portals and, unless off, recalls) and shows it in the panel. Tick thread.</summary>
     private List<RouteStep>? PlanAndShow(string name, double ns, double ew, out int used, out double est, out string refusal)
     {
-        TravelPlan.Result plan = PlanRoute(name, ns, ew, out _);
+        TravelPlan.Result plan = PlanRoute(name, ns, ew, out List<RecallOption> recalls);
         List<RouteStep>? steps = plan.Steps;
         used = plan.Teleports; est = plan.Est; refusal = plan.Refusal;
         _shownRoute = steps ?? new List<RouteStep> { new(ns, ew, false, false, "walk") };
@@ -1042,6 +1047,7 @@ public sealed partial class RynthNavPlugin
         _shownRouteEst = est;
         _shownRouteLive = false;
         _routeVersion++;
+        if (refusal.Length == 0) SetTrip(steps, name, ns, ew, recalls, "", live: false);
         return steps;
     }
 

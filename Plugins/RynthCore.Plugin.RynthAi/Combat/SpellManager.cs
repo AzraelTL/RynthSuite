@@ -174,6 +174,26 @@ public class SpellManager
         _ => "I"
     };
 
+    /// <summary>
+    /// The LOWEST known tier of <paramref name="baseSpellName"/> above the buff tier the skill
+    /// allows, 0 when none. For heals when nothing at or under the allowed tier is known: vitae
+    /// can drop Life Magic under a tier line while the character only knows higher tiers, and a
+    /// heal that may fizzle beats none (Drakkon died twice, 2026-10-06).
+    /// </summary>
+    public int GetSelfSpellIdAboveAllowedTier(string baseSpellName, AcSkillType magicSkill)
+    {
+        RefreshKnownSpells();
+        int maxTier = GetHighestBuffSpellTier(magicSkill);
+        string cleanBase = baseSpellName.Replace(" Self", "").Trim();
+        BaseNameAliases.TryGetValue(cleanBase, out string? alias);
+        for (int tier = maxTier + 1; tier <= 8; tier++)
+        {
+            if (TryGetTierId(cleanBase, tier, out int id)) return id;
+            if (alias != null && TryGetTierId(alias, tier, out int idAlias)) return idAlias;
+        }
+        return 0;
+    }
+
     public int GetDynamicSelfBuffId(string baseSpellName, AcSkillType magicSkill)
     {
         RefreshKnownSpells(); // keep the authoritative inventory current (throttled)

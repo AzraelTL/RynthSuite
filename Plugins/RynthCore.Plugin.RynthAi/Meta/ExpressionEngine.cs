@@ -62,7 +62,7 @@ internal sealed class ExpressionEngine
     // The three data paths are settable only so offline tests can point them at a scratch
     // folder before anything reads or writes them; the plugin never changes them.
     internal static string ItemGiverDir { get; set; }
-        = Path.Combine(@"C:\Games\RynthSuite\RynthAi", "ItemGiver");
+        = Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "ItemGiver");
 
     /// <summary>Millisecond tick for delayexec and the var-flush throttle. Tests swap it for a
     /// fake clock; the plugin never changes it.</summary>
@@ -107,8 +107,8 @@ internal sealed class ExpressionEngine
     private long _lastVarFlushMs;
     private string? _pvarPathCached;
     private const long VarFlushIntervalMs = 2000;
-    internal static string PvarsDir  { get; set; } = Path.Combine(@"C:\Games\RynthSuite\RynthAi", "pvars");
-    internal static string GvarsPath { get; set; } = Path.Combine(@"C:\Games\RynthSuite\RynthAi", "gvars.txt");
+    internal static string PvarsDir  { get; set; } = Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "pvars");
+    internal static string GvarsPath { get; set; } = Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "gvars.txt");
     private Dictionary<string, (Func<string> Get, Action<string> Set)>? _settingsMap;
 
     public IReadOnlyDictionary<string, string> Variables => _variables;
@@ -155,6 +155,11 @@ internal sealed class ExpressionEngine
 
     private CreatureProfileStore? _creatureStore;
     public void SetCreatureStore(CreatureProfileStore? store) => _creatureStore = store;
+
+    // secondssincelastkill[]: the plugin's kill clock. Null (not wired) reads as 0, i.e.
+    // "just killed", so a "no kills for a while" test never holds by mistake.
+    private KillClock? _killClock;
+    public void SetKillClock(KillClock? clock) => _killClock = clock;
 
     // ── Backward-compat shim ──────────────────────────────────────────────────
 
@@ -327,6 +332,8 @@ internal sealed class ExpressionEngine
             "getdatetimelocal"  => DateTime.Now.ToString(A(0)),
             "getdatetimeutc"    => DateTime.UtcNow.ToString(A(0)),
             "getunixtime"       => DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture),
+            // Whole seconds since our last kill; before the first, since the macro start (or login).
+            "secondssincelastkill" => (_killClock?.SecondsSinceLastKill() ?? 0).ToString(CultureInfo.InvariantCulture),
 
             // ── World object queries ──────────────────────────────────────────
             "wobjectfindnearestbytemplatetype"        => EvalWobjectFindNearestByTemplateType(A(0)),
@@ -2412,6 +2419,7 @@ internal sealed class ExpressionEngine
     {
         if (!TryParseWobjectHandle(arg, out uint uid, out _) || uid == 0) return "0";
         if (!_host.HasSelectItem) return "0";
+        RynthCore.Plugin.RynthAi.ItemInfo.SelfSelect.Mark(uid);
         _host.SelectItem(uid);
         return "0";
     }
@@ -2440,7 +2448,7 @@ internal sealed class ExpressionEngine
 
         if (!EnsureMagicModeForCast()) return "0";
 
-        _host.CastSpell(targetId, spellId);
+        _host.CastSpellFor(targetId, spellId, "Meta", $"spell {spellId} (meta)", asked: true);
         return "1";
     }
 
@@ -2486,7 +2494,7 @@ internal sealed class ExpressionEngine
         if (!_host.HasGetCurrentCombatMode)
         {
             // Can't read mode — best-effort flip and bail.
-            if (_host.HasChangeCombatMode) _host.ChangeCombatMode(CombatMode.Magic);
+            if (_host.HasChangeCombatMode) _host.ChangeCombatModeFor(CombatMode.Magic, "Meta", "meta cast: Magic mode", force: true);
             return false;
         }
 
@@ -2509,7 +2517,7 @@ internal sealed class ExpressionEngine
         if (wandId == 0 || !_host.HasUseObject)
         {
             // No wand (or no UseObject) — try bare-handed magic.
-            if (_host.HasChangeCombatMode) _host.ChangeCombatMode(CombatMode.Magic);
+            if (_host.HasChangeCombatMode) _host.ChangeCombatModeFor(CombatMode.Magic, "Meta", "meta cast: Magic mode", force: true);
             return false;
         }
 
@@ -2613,7 +2621,7 @@ internal sealed class ExpressionEngine
         if (_host.HasChangeCombatMode
             && (now - _castStanceLastFlipAt).TotalMilliseconds > CastStanceFlipGateMs)
         {
-            _host.ChangeCombatMode(CombatMode.Magic);
+            _host.ChangeCombatModeFor(CombatMode.Magic, "Meta", "meta cast: Magic mode", force: true);
             _castStanceLastFlipAt = now;
         }
         return false;
@@ -2717,7 +2725,7 @@ internal sealed class ExpressionEngine
         if (targetId == 0) targetId = _host.GetPlayerId();
         if (targetId == 0) return "2";
 
-        _host.CastSpell(targetId, spellId);
+        _host.CastSpellFor(targetId, spellId, "Meta", $"spell {spellId} (meta)", asked: true);
         return "1";
     }
 
@@ -2867,7 +2875,11 @@ internal sealed class ExpressionEngine
             _ => 0,
         };
         if (mode == 0) return "0";
-        return _host.ChangeCombatMode(mode) ? "1" : "0";
+        if (!_host.HasChangeCombatMode) return "0";
+        int seq = _host.HasUseDoneSeq ? _host.GetUseDoneSeq() : 0;
+        bool ok = _host.ChangeCombatMode(mode);
+        if (ok) ActionPacer.Begin(_host, PacedKind.CombatMode, 0, ActionPacer.ModeName(mode), "RynthAi/Meta (asked)", seq, mode);
+        return ok ? "1" : "0";
     }
 
     private string EvalGetBusyState()
@@ -3307,6 +3319,7 @@ internal sealed class ExpressionEngine
             ["StopLootingWhenPackFull"] = (() => B(s.StopLootingWhenPackFull), v => s.StopLootingWhenPackFull = ToDouble(v) != 0),
             ["LootOwnCorpse"] = (() => B(s.LootOwnCorpse), v => s.LootOwnCorpse = ToDouble(v) != 0),
             ["TravelToOwnCorpse"] = (() => B(s.TravelToOwnCorpse), v => s.TravelToOwnCorpse = ToDouble(v) != 0),
+            ["ItemInfoOnSelect"] = (() => B(s.ItemInfoOnSelect), v => s.ItemInfoOnSelect = ToDouble(v) != 0),
             ["StopMacroWhenPackFull"] = (() => B(s.StopMacroWhenPackFull), v => s.StopMacroWhenPackFull = ToDouble(v) != 0),
             ["SummonPets"]          = (() => B(s.SummonPets),          v => s.SummonPets          = ToDouble(v) != 0),
             ["MineOnly"]            = (() => B(s.MineOnly),            v => s.MineOnly            = ToDouble(v) != 0),
@@ -3371,6 +3384,8 @@ internal sealed class ExpressionEngine
             ["MaxMonRange"]         = (() => D(s.MaxMonRange),         v => { if (double.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out double d)) s.MaxMonRange = d; }),
             ["NavRingThickness"]    = (() => F(s.NavRingThickness),    v => { if (float.TryParse(v,  System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f))  s.NavRingThickness = f; }),
             ["NavLineThickness"]    = (() => F(s.NavLineThickness),    v => { if (float.TryParse(v,  System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f))  s.NavLineThickness = f; }),
+            ["NavLabelMode"]        = (() => I(s.NavLabelMode),        v => { if (int.TryParse(v, out int i)) s.NavLabelMode = NavLabelModes.Clamp(i); }),
+            ["NavGuideLine"]        = (() => B(s.NavGuideLine),        v => s.NavGuideLine    = ToDouble(v) != 0),
             ["CurrentNavPath"]      = (() => s.CurrentNavPath,         v => s.CurrentNavPath  = v),
             ["CurrentLootPath"]     = (() => s.CurrentLootPath,        v => s.CurrentLootPath = v),
             ["CurrentMetaPath"]     = (() => s.CurrentMetaPath,        v => s.CurrentMetaPath = v),

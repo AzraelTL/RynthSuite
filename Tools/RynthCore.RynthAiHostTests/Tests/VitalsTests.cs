@@ -23,6 +23,7 @@ internal static class VitalsTests
         r.Add("vitals: Stamina to Health follows its own health line and stamina floor", StaminaToHealthThresholds);
         r.Add("vitals: profiles without the Stamina to Health keys load today's 30 / 20", StaminaToHealthDefaults);
         r.Add("vitals: after a kit, nothing else heals until the kit's result line lands", KitResultWait);
+        r.Add("vitals: Heal Self known only above the tier Life Magic allows (vitae) is still cast", HealAboveAllowedTier);
         r.Add("vitals: low health wins the arbiter even on a busy tick; backs off when nothing can heal", HealthWinsArbiter);
         r.Add("vitals: 'You're too busy!' paces vital casts, and a long streak stops the character once", TooBusyVitals);
         // Drakkon's death, 2026-10-05 13:43:20 (ops\overnight\2026-10-05-death-fixes.md).
@@ -145,6 +146,29 @@ internal static class VitalsTests
         Check.True(BuffManager.IsKitResultLine("your movement disrupted healing!"), "disrupted line ends the wait");
         Check.True(BuffManager.IsKitResultLine("lucy mcjuicy is already at full health!"), "full-health line ends the wait");
         Check.False(BuffManager.IsKitResultLine("bob heals you for 40 health points."), "someone else's kit doesn't");
+    }
+
+    private static void HealAboveAllowedTier()
+    {
+        FakeHost.Reset();
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Magic;
+        int heal6 = SpellTable.Rows.First(r => r.Name == "Heal Self VI").Id;
+        FakeHost.Spellbook.Add((uint)heal6);              // the only Heal Self known
+        FakeHost.Skills[(Player, STypeLife)] = (120, 2);  // vitae: Life Magic under the tier 6 line
+        var host = FakeHost.Create();
+        var s = new LegacyUiSettings { HealAt = 60, TopOffHP = 60, RestamAt = 0, TopOffStam = 0, GetManaAt = 0, TopOffMana = 0, UsePotions = false };
+        var skills = new CharacterSkills(host);
+        skills.SetPlayerId(Player);
+        var sm = new SpellManager(host, s);
+        sm.InitializeNatively();
+        sm.SetCharacterSkills(skills);
+        Check.True(sm.GetHighestBuffSpellTier(AcSkillType.LifeMagic) < 6, "the rig: Life Magic 120 allows less than tier 6");
+        var vitals = new PlayerVitalsCache { MaxHealth = 100, CurrentHealth = 30, MaxStamina = 100, CurrentStamina = 100, MaxMana = 100, CurrentMana = 100 };
+        var b = new BuffManager(host, s, sm, vitals);
+        b.SetCharacterSkills(skills);
+        Check.True(b.CheckVitals(), "health 30% under Heal At 60%: the vitals step acts");
+        Check.True(FakeHost.Casts.Any(c => c.SpellId == heal6), "Heal Self VI is cast: " + string.Join(",", FakeHost.Casts.Select(c => c.SpellId)));
     }
 
     /// <summary>One CheckVitals on a fresh BuffManager; true when it cast a Stamina to Health spell.</summary>

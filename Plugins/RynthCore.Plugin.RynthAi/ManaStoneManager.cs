@@ -418,7 +418,6 @@ internal sealed class ManaStoneManager
             if (item == null) continue;
             if (IsManaStone(item)) continue;
             if (!IsOwnedByPlayer(item, playerId)) continue;
-            if (IsWandLike(item)) continue; // wands are never tap targets — keep this in sync with FindTapTarget
             if (_tapTargetCooldownUntil.TryGetValue(item.Id, out long until) && now < until) continue;
             if (_host.TryGetObjectIntProperty(unchecked((uint)item.Id), (uint)AcIntProperty.WieldedSlot, out int wield)
                 && wield != 0) continue;
@@ -649,13 +648,9 @@ internal sealed class ManaStoneManager
             if (IsManaStone(item)) continue;
             if (!IsOwnedByPlayer(item, playerId)) continue;
 
-            // Never tap a casting implement (wand/staff/orb). ACE refuses to
-            // drain mana out of these into a stone, so the tap can never complete
-            // and the loop spins forever (each attempt cancels movement + bumps
-            // busy). This is most often the character's OWN casting wand mis-read
-            // as a loose item — WieldedSlot can read 0 from a stale cache, so the
-            // equipped-skip below misses it. Mirrors CombatManager.IsWandObject.
-            if (IsWandLike(item)) continue;
+            // Wands, staves and orbs drain like any other item (ACE's ManaStone only refuses
+            // retained items). Only items looted for Mana Tap are candidates, and the wielded /
+            // listed-item / loot-kept checks below protect the character's own casters.
 
             // Skip items that recently failed to drain.
             if (_tapTargetCooldownUntil.TryGetValue(item.Id, out long until) && now < until)
@@ -682,11 +677,9 @@ internal sealed class ManaStoneManager
     }
 
     /// <summary>
-    /// True for casting implements (wand/staff/orb). ACE will not drain mana out
-    /// of these into a mana stone, so they must never be selected as a tap target
-    /// — otherwise the tap can never complete and loops forever. ObjectClass alone
-    /// is unreliable for unappraised items, so we fall back to the name, matching
-    /// CombatManager/BuffManager.IsWandObject.
+    /// True for casting implements (wand/staff/orb). They drain like any other item;
+    /// this is only a classifier. ObjectClass alone is unreliable for unappraised items,
+    /// so we fall back to the name, matching CombatManager/BuffManager.IsWandObject.
     /// </summary>
     internal static bool IsWandLike(WorldObject item)
         => item.ObjectClass == AcObjectClass.WandStaffOrb || IsWandName(item.Name);

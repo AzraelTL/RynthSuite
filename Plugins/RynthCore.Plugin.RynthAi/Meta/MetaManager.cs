@@ -144,6 +144,15 @@ internal sealed class MetaManager
         _expressions?.SetCreatureStore(store);
     }
 
+    // The plugin's kill clock (secondssincelastkill[], No Kills Within Minutes). Without one
+    // (never in the plugin) the condition is false and the function says 0: fail closed.
+    private KillClock? _killClock;
+    public void SetKillClock(KillClock? clock)
+    {
+        _killClock = clock;
+        _expressions?.SetKillClock(clock);
+    }
+
     public void SetPlayerId(uint id)
     {
         _playerId = id;
@@ -200,6 +209,7 @@ internal sealed class MetaManager
         engine.SetQuestTracker(_questTracker);
         engine.SetSettings(_settings);
         engine.SetCreatureStore(_creatureStore);
+        engine.SetKillClock(_killClock);
         return engine;
     }
 
@@ -727,6 +737,14 @@ internal sealed class MetaManager
             case MetaConditionType.NeedToBuff:
                 return _buffManager != null && _buffManager.NeedsAnyBuff();
 
+            // ── No kills within N minutes (RynthAi only) ──────────────────────
+            // The secondssincelastkill[] clock: our last kill (KillerNotification), or before
+            // the first one the last macro start / login. Bad or missing minutes never hold.
+            case MetaConditionType.NoKillsWithinMinutes:
+                return _killClock != null
+                    && KillClock.TryParseMinutes(rule.ConditionData, out double noKillMins)
+                    && _killClock.NoKillsFor(noKillMins);
+
             default: return false;
         }
     }
@@ -892,7 +910,7 @@ internal sealed class MetaManager
                     }
 
                     // Fallback: a standalone .nav file in NavProfiles.
-                    string navFolder = @"C:\Games\RynthSuite\RynthAi\NavProfiles";
+                    string navFolder = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "NavProfiles");
                     string fullPath = Path.Combine(navFolder, routeName + ".nav");
                     if (File.Exists(fullPath))
                     {
@@ -1091,7 +1109,7 @@ internal sealed class MetaManager
             parts[2].Equals("load", StringComparison.OrdinalIgnoreCase))
         {
             string name = string.Join(" ", parts, 3, parts.Length - 3);
-            string metaDir = @"C:\Games\RynthSuite\RynthAi\MetaFiles";
+            string metaDir = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "MetaFiles");
             string afPath = Path.Combine(metaDir, name + ".af");
             string metPath = Path.Combine(metaDir, name + ".met");
 
@@ -1155,7 +1173,7 @@ internal sealed class MetaManager
             string path = name;
             if (!File.Exists(path))
             {
-                string folder = @"C:\Games\RynthSuite\RynthAi\LootProfiles";
+                string folder = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "LootProfiles");
                 string stem = name.EndsWith(".utl", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
                     ? name : name + ".utl";
                 string candidate = Path.Combine(folder, stem);

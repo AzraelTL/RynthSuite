@@ -36,6 +36,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra attackable    — check if target is attackable");
         ChatLine("[RynthAi] /ra wielded       — show wielded items");
         ChatLine("[RynthAi] /ra dumpprops [0xId] — every property of the selection (else yourself)");
+        ChatLine("[RynthAi] /ra iteminfo [name] — the selected (or named) item's details, Mag-Tools style");
         ChatLine("[RynthAi] /ra mexec <expr>  — evaluate meta expression");
         ChatLine("[RynthAi] /ra listvars      — show session variables");
         ChatLine("[RynthAi] /ra listpvars     — show persistent variables");
@@ -68,6 +69,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra hazard add|del|list|near — mark current cell as lava/acid so patrol avoids it");
         ChatLine("[RynthAi] /ra jump[swzxc] [heading] [holdtime] — jump with optional face/direction (s=run w=fwd x=back z=strafeL c=strafeR)");
         ChatLine("[RynthAi] /ra corpseinfo    — show corpse range/open diagnostics");
+        ChatLine("[RynthAi] /ra pace          — what the server is still answering (one action at a time)");
         ChatLine("[RynthAi] /ra owncorpse [go|stop] — where your corpse is; travel back to it, or stop");
         ChatLine("[RynthAi] /ra corpsecheck   — explain whether a corpse would be looted");
         ChatLine("[RynthAi] /ra corpseopen    — force the nearest corpse open flow");
@@ -240,7 +242,7 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
-        bool ok = Host.CastSpell(_currentTargetId, spellId);
+        bool ok = Host.CastSpellFor(_currentTargetId, spellId, "Command", $"spell {spellId} (/ra cast)", asked: true);
         ChatLine($"[RynthAi] CastSpell(target=0x{_currentTargetId:X8}, spell={spellId}) => {ok}");
     }
 
@@ -2148,6 +2150,8 @@ public sealed partial class RynthAiPlugin
     private void HandleClearBusyCommand()
     {
         int before = Host.HasGetBusyState ? Host.GetBusyState() : -1;
+        // You asked for it: forget what the pacing waits on too (ActionPacer).
+        RynthCore.Plugin.Shared.ActionPacer.Forget("/ra clearbusy");
         if (Host.HasForceResetBusyCount)
             Host.ForceResetBusyCount();
         if (Host.HasStopCompletely)
@@ -2171,9 +2175,10 @@ public sealed partial class RynthAiPlugin
     {
         int before = Host.HasGetBusyState ? Host.GetBusyState() : -1;
         ChatLine("[RynthAi] PANIC — full AC state reset");
+        RynthCore.Plugin.Shared.ActionPacer.Forget("/ra panic");
 
         if (Host.HasCancelAttack)      Host.CancelAttack();
-        if (Host.HasChangeCombatMode)  Host.ChangeCombatMode(CombatMode.NonCombat);
+        if (Host.HasChangeCombatMode)  Host.ChangeCombatModeFor(CombatMode.NonCombat, "Command", "/ra panic", force: true);
         if (Host.HasStopCompletely)    Host.StopCompletelyBy("Command");
         if (Host.HasForceResetBusyCount) Host.ForceResetBusyCount();
         // The item-action lock itself is not the busy count: AC refuses every use,
@@ -2612,7 +2617,7 @@ public sealed partial class RynthAiPlugin
         string playerPart = argStr.Substring(toIdx + 4).Trim();
 
         // Resolve profile path — bare name resolved from ItemGiver dir, .utl extension added if needed
-        const string itemGiverDir = @"C:\Games\RynthSuite\RynthAi\ItemGiver";
+        string itemGiverDir = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "ItemGiver");
         string profilePath = System.IO.Path.IsPathRooted(profileArg)
             ? profileArg
             : System.IO.Path.Combine(itemGiverDir, profileArg);
@@ -2975,7 +2980,7 @@ public sealed partial class RynthAiPlugin
         sb.Append("\"routes\":[");
         try
         {
-            const string navFolder = @"C:\Games\RynthSuite\RynthAi\NavProfiles";
+            string navFolder = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "NavProfiles");
             if (System.IO.Directory.Exists(navFolder))
             {
                 var files = System.IO.Directory.GetFiles(navFolder, "*.nav");

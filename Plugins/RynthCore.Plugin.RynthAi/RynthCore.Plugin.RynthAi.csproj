@@ -39,6 +39,10 @@
     <Compile Include="..\Shared\UseAudit.cs" Link="Shared\UseAudit.cs" />
     <!-- Movement calls logged with the subsystem that sent them (stuck-cast diagnosis, 2026-10-05). -->
     <Compile Include="..\Shared\MoveAudit.cs" Link="Shared\MoveAudit.cs" />
+    <!-- One server action at a time, paced on the server's answers (stuck use/cast, 2026-10-06). -->
+    <Compile Include="..\Shared\ActionPacer.cs" Link="Shared\ActionPacer.cs" />
+    <!-- Text in the world on the Nav3D buffer (waypoint labels; RynthNav's path markers use it too). -->
+    <Compile Include="..\Shared\Nav3DText.cs" Link="Shared\Nav3DText.cs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -92,5 +96,10 @@
   <Target Name="RemoveBundledImGuiNativeFromPublish" AfterTargets="Publish" Condition="'$(PublishDir)' != ''">
     <Delete Files="$(PublishDir)cimgui.dll" Condition="Exists('$(PublishDir)cimgui.dll')" />
   </Target>
+
+  <ItemGroup>
+    <!-- Install-folder resolver (env, HKCU, HKLM, default C:\Games). Read only; same file as RynthCore src\Shared. -->
+    <Compile Include="..\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+  </ItemGroup>
 
 </Project>

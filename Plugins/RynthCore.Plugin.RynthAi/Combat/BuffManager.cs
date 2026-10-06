@@ -1117,6 +1117,18 @@ public class BuffManager : IDisposable
             return;
         }
 
+        // One server action at a time (2026-10-06, Plugins/Shared/ActionPacer.cs): no kit, potion,
+        // wand, stance change or cast while the server hasn't answered the last one (its UseDone;
+        // a buff's enchantment lands before that). Heals keep their priority (ActionPacer's heal
+        // rules). And not while RynthAi still has the character running: the arbiter's stop goes
+        // out this tick, the cast the next one (a stop mid-windup disturbs the cast).
+        if (!PacerAllows(out string paceWhy))
+        {
+            LastBuffSkipReason = "server answering the last action: " + paceWhy;
+            Hold("server answering the last action", paceWhy);
+            return;
+        }
+
         // Don't issue a cast while the previous cast GESTURE is still animating.
         // CanCastNow is the engine's CMotionInterp gesture gate (the REAL cast
         // gate). AC refuses a cast issued mid-gesture with a server-driven
@@ -1135,6 +1147,7 @@ public class BuffManager : IDisposable
         // everything else still waits for the count to drop.
         bool gateOpen = CastGateWatchdog.CanCastNow(_host.CanCastNow, s => _host.Log(s));
         bool busyHolds = BusyCount > 0
+            && !_pacerLetHealAhead   // the pacing let this heal go ahead of an unanswered corpse use (its rules)
             && (ActiveHealLine(_vitals.HealthPct, _vitals.StaminaPct, out _, out _).Length == 0 || BusyHoldsHeal());
         if (!gateOpen || busyHolds)
         {
@@ -1154,6 +1167,14 @@ public class BuffManager : IDisposable
         if (buffsHeldForRefresh)
         {
             Hold("login buff refresh");
+            return;
+        }
+
+        // Health floor: no buff while health is under a heal line that nothing could heal
+        // (Drakkon, 2026-10-06 04:51: recasting Swift Killer at 19% health, dead 10 s later).
+        if (_vitals.MaxHealth > 0 && HealthUnderAnyLine(_vitals.HealthPct, _vitals.StaminaPct))
+        {
+            Hold("health under a heal line");
             return;
         }
 
@@ -1409,6 +1430,16 @@ public class BuffManager : IDisposable
             if (!healed) { _vitalWhy = ""; healed = AttemptVitalCast("Heal Self"); }
             string spellWhy = _vitalWhy;
             if (!healed) { _vitalWhy = ""; healed = AttemptPotion("HealthPotion"); }
+            // Last resort: the kit Kit Min Success skipped. A low chance beats no heal at all
+            // (Drakkon, 2026-10-06: 29% kit skipped, no spell, no potion, dead 6 s later).
+            if (!healed && kitWhy.EndsWith("under Kit Min Success %", StringComparison.Ordinal))
+            {
+                string potionWhy = _vitalWhy;
+                _vitalWhy = "";
+                healed = AttemptHealthKitUse(ignoreMinSuccess: true);
+                if (healed) _host.Log("[RynthAi] Vitals: no spell or potion could heal; using the kit despite Kit Min Success %.");
+                else _vitalWhy = potionWhy;
+            }
             if (healed)
             {
                 _isHealingSelf = true;
@@ -1485,6 +1516,7 @@ public class BuffManager : IDisposable
         if ((DateTime.Now - _lastPendingEmergencyHealAt).TotalMilliseconds < 2500) return;
         if (IsAwaitingCastResolution() || BusyHoldsHeal() || KitPending()) return;
         if (!CastGateWatchdog.CanCastNow(_host.CanCastNow, s => _host.Log(s))) return;
+        if (!ActionPacer.MayStart(_host, "Buff", HealNeed.Emergency, out _)) return;
         if (AttemptHealthKitUse() || AttemptPotion("HealthPotion"))
         {
             _lastPendingEmergencyHealAt = DateTime.Now;
@@ -1541,6 +1573,18 @@ public class BuffManager : IDisposable
             return true;
         }
         int spellId = FindBestSpellId(baseName, AcSkillType.LifeMagic);
+        // A heal with nothing known at the allowed tiers: the lowest known tier above them.
+        // Vitae can drop Life Magic under a tier line while only higher tiers are known.
+        if (spellId == 0 && baseName is "Heal Self" or "Stamina to Health Self")
+        {
+            spellId = _spellManager.GetSelfSpellIdAboveAllowedTier(baseName, AcSkillType.LifeMagic);
+            if (spellId != 0 && (DateTime.Now - _lastAboveTierLog).TotalSeconds >= 30)
+            {
+                _lastAboveTierLog = DateTime.Now;
+                _host.Log($"[RynthAi] Vitals: no '{baseName}' at the tiers Life Magic allows now; " +
+                          $"trying {SpellTableStub.GetById(spellId)?.Name ?? spellId.ToString()} (may fizzle).");
+            }
+        }
         if (spellId == 0) return VitalNo($"no known '{baseName}' spell at the allowed tiers");
         // Parked after a hard server refusal (see OnChatWindowText) — the same
         // per-family cooldown the buff selectors honour.
@@ -1566,7 +1610,8 @@ public class BuffManager : IDisposable
         _pendingSpellId = spellId;
         _pendingVitalSpellId = spellId;   // instant: confirmed by chat, never by the registry
         _pendingVitalLabel = VitalLabel(baseName);
-        bool castOk = _host.CastSpell((uint)_host.GetPlayerId(), spellId);
+        bool castOk = _host.CastSpellFor((uint)_host.GetPlayerId(), spellId, "Buff",
+            SpellTableStub.GetById(spellId)?.Name ?? baseName);
         _lastCastAttempt = DateTime.Now;
         if (!castOk)
         {
@@ -1726,7 +1771,9 @@ public class BuffManager : IDisposable
     }
     private DateTime _lastPotionAt = DateTime.MinValue;
 
-    private bool AttemptHealthKitUse()
+    private DateTime _lastAboveTierLog = DateTime.MinValue;
+
+    private bool AttemptHealthKitUse(bool ignoreMinSuccess = false)
     {
         if (_worldObjectCache == null) return false;
         // VTank's kit options: skip kits in magic mode unless allowed; optionally
@@ -1745,10 +1792,10 @@ public class BuffManager : IDisposable
         if (KitRetryWait(out string kitWait)) return VitalNo(kitWait);
         // Too likely to fail on what's missing (KitMinSuccessPct): let the spell have it.
         uint missing = _vitals.MaxHealth > _vitals.CurrentHealth ? _vitals.MaxHealth - _vitals.CurrentHealth : 0;
-        if (!KitChanceOk(kit.Id, kit.Name ?? "", missing, _settings.PeaceModeForKits)) return VitalNo($"{kit.Name} under Kit Min Success %");
+        if (!ignoreMinSuccess && !KitChanceOk(kit.Id, kit.Name ?? "", missing, _settings.PeaceModeForKits)) return VitalNo($"{kit.Name} under Kit Min Success %");
         if (_settings.PeaceModeForKits && mode != CombatMode.NonCombat && _host.HasChangeCombatMode)
         {
-            _host.ChangeCombatMode(CombatMode.NonCombat);
+            _host.ChangeCombatModeFor(CombatMode.NonCombat, "Buff", "peace mode for the healing kit");
             _lastCastAttempt = DateTime.Now;
             _healWaitKind = "peace mode for the kit";
             return true;   // use the kit next tick, once in peace mode
@@ -1781,7 +1828,7 @@ public class BuffManager : IDisposable
         if (!KitChanceOk(kit.Id, kit.Name ?? "", missing, _settings.PeaceModeForKits)) return false;
         if (_settings.PeaceModeForKits && mode != CombatMode.NonCombat && _host.HasChangeCombatMode)
         {
-            _host.ChangeCombatMode(CombatMode.NonCombat);
+            _host.ChangeCombatModeFor(CombatMode.NonCombat, "Buff", "peace mode for the stamina kit");
             _lastCastAttempt = DateTime.Now;
             return true;   // use the kit next tick, once in peace mode
         }
@@ -2102,7 +2149,7 @@ public class BuffManager : IDisposable
             // buffed when it wasn't and never retried the known tier.
 
             if (diagnose) _host.Log($"[FR] CAST '{buffBaseName}' resolvedSpellId={spellId} (pending now set)");
-            bool castOk = _host.CastSpell((uint)_host.GetPlayerId(), spellId);
+            bool castOk = _host.CastSpellFor((uint)_host.GetPlayerId(), spellId, "Buff", spellInfo?.Name ?? buffBaseName);
             _lastCastAttempt = DateTime.Now;
             if (castOk) NoteCastIssued(spellId);
             if (castOk && buffFamily != 0 && spellInfo != null)
@@ -3364,6 +3411,50 @@ public class BuffManager : IDisposable
         _onCastResolved?.Invoke($"cast '{spellName}'");
     }
 
+    /// <summary>What a heal needs from the pacing now: none, a heal line, or Emergency Heal At.</summary>
+    internal HealNeed HealNeedNow()
+    {
+        if (_vitals.MaxHealth <= 0) return HealNeed.None;
+        int hp = _vitals.HealthPct;
+        int emergencyAt = _settings.EmergencyHealAt;
+        if (emergencyAt > 0 && hp <= emergencyAt) return HealNeed.Emergency;
+        return HealthUnderAnyLine(hp, _vitals.StaminaPct) ? HealNeed.Heal : HealNeed.None;
+    }
+
+    /// <summary>Times the vitals/buff step waited for the server's answer (tests, status).</summary>
+    internal int PacerHolds { get; private set; }
+
+    /// <summary>
+    /// The pacing gate of the vitals/buff step (see HeartbeatCore): false while the server is still
+    /// answering the last action (ActionPacer.MayStart, with the heal rules) or while RynthAi still
+    /// has the character running (the arbiter's stop goes out first).
+    /// </summary>
+    private bool _pacerLetHealAhead;
+
+    private bool PacerAllows(out string why)
+    {
+        why = "";
+        _pacerLetHealAhead = false;
+        if (!ActionPacer.Enabled) return true;
+        if (MoveAudit.OwnMovementActive)
+        {
+            why = "the character is still moving (the stop goes out first)";
+            PacerHolds++;
+            return false;
+        }
+        HealNeed need = HealNeedNow();
+        bool outstanding = ActionPacer.Current(_host) != null;
+        if (ActionPacer.MayStart(_host, "Buff", need, out why))
+        {
+            // A heal let ahead of an unanswered action: the busy count still counts that action,
+            // so the busy gate below must not hold the heal again.
+            _pacerLetHealAhead = outstanding && need != HealNeed.None;
+            return true;
+        }
+        PacerHolds++;
+        return false;
+    }
+
     /// <summary>Record that a cast just went out, so the next one waits for the
     /// server to report the action finished rather than a blind interval.</summary>
     private void NoteCastIssued(int spellId)
@@ -3491,6 +3582,7 @@ public class BuffManager : IDisposable
         var held = _cast.Open;
         string name = held?.Name ?? "?";
         double secs = _cast.HeldSeconds;
+        FlightRecorderSignal.Dump(_host, $"held cast nudge: '{name}' {secs:0.0} s");
         if (!_host.HasSetAutoRun)
         {
             _host.Log($"[CastSafe] '{name}' held open {secs:0.0} s after its incantation, but this engine has no SetAutoRun: no nudge.");
@@ -3740,9 +3832,9 @@ public class BuffManager : IDisposable
             // _lastBuffStanceAttempt), while buffing held the bot.
             int noWandShift = Math.Min(_buffStanceConsecutiveFails, 5);
             int noWandGateMs = Math.Min(1000 << noWandShift, 30000);
-            if ((DateTime.Now - _lastBuffStanceAttempt).TotalMilliseconds > noWandGateMs)
+            if ((DateTime.Now - _lastBuffStanceAttempt).TotalMilliseconds > noWandGateMs
+                && _host.ChangeCombatModeFor(CombatMode.Magic, "Buff", "no wand: Magic mode bare-handed"))
             {
-                _host.ChangeCombatMode(CombatMode.Magic);
                 NoteStanceRequest();
                 _lastBuffStanceAttempt = DateTime.Now;
                 _lastCastAttempt = DateTime.Now;
@@ -3924,9 +4016,9 @@ public class BuffManager : IDisposable
         if (shift > 5) shift = 5;
         int gateMs = 1000 << shift;        // 1s, 2s, 4s, 8s, 16s, 32s
         if (gateMs > 30000) gateMs = 30000; // cap at 30s
-        if ((DateTime.Now - _lastBuffStanceAttempt).TotalMilliseconds > gateMs)
+        if ((DateTime.Now - _lastBuffStanceAttempt).TotalMilliseconds > gateMs
+            && _host.ChangeCombatModeFor(CombatMode.Magic, "Buff", "wand wielded: Magic mode"))
         {
-            _host.ChangeCombatMode(CombatMode.Magic);
             NoteStanceRequest();
             _lastBuffStanceAttempt = DateTime.Now;
             _lastCastAttempt = DateTime.Now;

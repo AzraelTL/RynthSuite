@@ -17,6 +17,9 @@ internal static class Program
     /// <summary>Scratch folder next to the exe for files tests write. Emptied at start.</summary>
     public static string TempRoot { get; } = Path.Combine(AppContext.BaseDirectory, "scratch");
 
+    /// <summary>DungeonHazardStore's folder before Main pointed it at the scratch folder.</summary>
+    public static string LiveHazardFolder { get; private set; } = "";
+
     private static int Main(string[] args)
     {
         if (Directory.Exists(TempRoot)) Directory.Delete(TempRoot, recursive: true);
@@ -30,6 +33,9 @@ internal static class Program
         ExpressionEngine.ItemGiverDir = Path.Combine(TempRoot, "ItemGiver");
         // The dungeon map bake writes floor plans under C:\Games\RynthSuite\RynthAi\Maps.
         RynthCore.Plugin.RynthAi.Maps.DungeonMapBake.CacheDir = Path.Combine(TempRoot, "Maps");
+        // A sighted lava/acid hotspot is persisted under C:\Games\RynthSuite\RynthAi\DungeonHazards.
+        LiveHazardFolder = RynthCore.Plugin.RynthAi.DungeonHazardStore.Folder;
+        RynthCore.Plugin.RynthAi.DungeonHazardStore.Folder = Path.Combine(TempRoot, "DungeonHazards");
 
         // Spell names (item spells, spell expiry by name) come from the plugin's embedded table.
         SpellDatabase.Load();
@@ -39,8 +45,10 @@ internal static class Program
         VTankLootTests.Register(runner);
         ExpressionTests.Register(runner);
         MetaTests.Register(runner);
+        NoKillTests.Register(runner);
         MetaSchedulerTests.Register(runner);
         NavEngineTests.Register(runner);
+        NavReachTests.Register(runner);
         PatrolDoorwayTests.Register(runner);
         BuffTests.Register(runner);
         CombatMathTests.Register(runner);
@@ -53,6 +61,7 @@ internal static class Program
         LootSalvageTests.Register(runner);
         LootCorpseTests.Register(runner);
         OwnCorpseTests.Register(runner);
+        UseRefusalTests.Register(runner);
         VitalsTests.Register(runner);
         CastSafetyTests.Register(runner);
         HealLatencyTests.Register(runner);
@@ -64,6 +73,13 @@ internal static class Program
         LootAddItemTests.Register(runner);
         GiveTests.Register(runner);
         DungeonMapBakeTests.Register(runner);
+        MonsterEditorTests.Register(runner);
+        InstallPathsTests.Register(runner);
+        PetRefillTests.Register(runner);
+        WorldCacheTypedTests.Register(runner);
+        ItemInfoTests.Register(runner);
+        NavOverlayTests.Register(runner);
+        ActionPacingTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }

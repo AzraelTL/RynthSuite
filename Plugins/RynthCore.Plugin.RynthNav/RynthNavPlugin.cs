@@ -25,7 +25,7 @@ namespace RynthCore.Plugin.RynthNav;
 public sealed partial class RynthNavPlugin : RynthPluginBase
 {
     internal static readonly IntPtr NamePointer    = Marshal.StringToHGlobalAnsi("RynthNav");
-    internal const string PluginVersion = "0.6.5";
+    internal const string PluginVersion = "0.6.6";
     internal static readonly IntPtr VersionPointer = Marshal.StringToHGlobalAnsi(PluginVersion);
 
     // Where the tiles, portals.tsv, locations.json and the player's atlas.txt/recalls.txt live.
@@ -140,6 +140,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         _portalsEnabled = NavDataConfig.ReadSwitch("portals", false);
         _recallsEnabled = NavDataConfig.ReadSwitch("recalls", true);
         LoadAvoidSettings();
+        LoadMarkerSettings();
         Host.Log($"[RynthNav] Initialized v{PluginVersion} (tiled streaming + long-range goto + portal/recall routing + arrow + atlas). Panel: RynthNav. Tiles: {NavDataDir} ({NavConfig.Source})");
         InitTravel();
         LoadGraph();
@@ -180,6 +181,8 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         _tileRegions.Clear(); _tilePrints.Clear(); ResetCoarse();
         _chatOut.Clear();
         _goNote = "";
+        HideMarkers("logged out");
+        _trip = null; _tripPath = null;
         OnLogoutTravel();
     }
 
@@ -199,6 +202,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         TickTravel();
         ProcessRequests();
         ApplyMovement();
+        TickMarkers();
         UpdateGoLine();
         FlushChat();
     }
@@ -342,6 +346,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
             if (_gotoActive) _goNote = "stopped";   // the panel's status line (the d-pad and Stop say nothing in chat)
             _gotoActive = false; _route = null; _portalWait = false; if (_recallWait) EndRecall();
             ResetHub();
+            HideMarkers("cancelled");
         }
         if (load && _hasPose) RefreshTiles(CurrentLandblock);
         if (test) TestImpl();
@@ -427,9 +432,9 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
     {
         if (!_hasPose) { lock (_gate) _status = "no pose"; Note("goto: no player position yet"); return; }
         // A new goto (not the re-plan after "no route over land") may re-plan once again.
-        if (!landReplan) _landReplanned = false;
+        if (!landReplan) { _landReplanned = false; _enterPortal = enter.Length > 0 ? _nextEnterPortal : ""; _nextEnterPortal = ""; }
         // Whatever was running stops first: a refused goto must not leave the old one half-changed.
-        if (_gotoActive) { _gotoActive = false; _route = null; _portalWait = false; ResetHub(); Host.SetAutoRun(false); Host.StopCompletely(); }
+        if (_gotoActive) { _gotoActive = false; _route = null; _portalWait = false; ResetHub(); Host.SetAutoRun(false); Host.StopCompletely(); HideMarkers("a new goto"); }
         double twx = NavCoords.WorldX(tew), twy = NavCoords.WorldY(tns);
         int gLbX = (int)Math.Floor(twx / 192.0), gLbY = (int)Math.Floor(twy / 192.0);
         if (double.IsNaN(twx) || double.IsNaN(twy) || gLbX < 0 || gLbX > 255 || gLbY < 0 || gLbY > 255)
@@ -503,6 +508,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         if (_route == null && !File.Exists(Path.Combine(NavDataDir, $"nav_{goalLb:X4}.tile")))
             Say($"goto: the target's landblock 0x{goalLb:X4} has no tile; walking as far as the navmesh goes");
 
+        SetTrip(_route, name, tns, tew, recalls, enter, live: true);
         _gotoActive = true;
         _gotoName = name; _gotoType = type;
         _walkHaveLast = false;
@@ -790,6 +796,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         Say(status == "arrived" && _gotoName.Length > 0 ? $"goto: arrived at {_gotoName}" : $"goto: {status}");
         _goNote = status == "arrived" && _gotoName.Length > 0 ? $"arrived at {_gotoName}" : status;
         _enterName = ""; _enterType = "";
+        HideMarkers(status == "arrived" ? "arrived" : "the goto ended");
     }
 
     // At a portal entrance, waiting for the teleport. A portal ALWAYS changes the
