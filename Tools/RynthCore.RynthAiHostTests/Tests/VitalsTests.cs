@@ -22,6 +22,8 @@ internal static class VitalsTests
     {
         r.Add("vitals: Stamina to Health follows its own health line and stamina floor", StaminaToHealthThresholds);
         r.Add("vitals: profiles without the Stamina to Health keys load today's 30 / 20", StaminaToHealthDefaults);
+        r.Add("vitals: Re-stam To keeps a started recharge going to its line; off = one recharge as before", RestamTo);
+        r.Add("vitals: out of Magic stance a listed stamina potion goes before Revitalize; a caster casts first", StaminaPotionFirst);
         r.Add("vitals: after a kit, nothing else heals until the kit's result line lands", KitResultWait);
         r.Add("vitals: Heal Self known only above the tier Life Magic allows (vitae) is still cast", HealAboveAllowedTier);
         r.Add("vitals: low health wins the arbiter even on a busy tick; backs off when nothing can heal", HealthWinsArbiter);
@@ -208,6 +210,75 @@ internal static class VitalsTests
         bool cast = FakeHost.Casts.Any(c => c.SpellId == stamToHealth);
         Check.Eq(handled, cast, $"hp {healthPct} stam {staminaPct}: CheckVitals reports handled exactly when it cast");
         return cast;
+    }
+
+    // Tom, 2026-10-06: a melee character should drink its listed stamina potions before Revitalize
+    // (which means switching the weapon for the wand and back).
+    private static void StaminaPotionFirst()
+    {
+        const uint Tincture = 0x80001234;
+        foreach (int mode in new[] { CombatMode.Melee, CombatMode.Magic })
+        {
+            FakeHost.Reset();
+            FakeHost.WeaponCalls = true;
+            FakeHost.CombatModeValue = mode;
+            foreach (var row in SpellTable.Rows) FakeHost.Spellbook.Add((uint)row.Id);
+            FakeHost.Skills[(Player, STypeLife)] = (400, 2);
+            FakeHost.Names[Tincture] = "Stamina Tincture";
+            var host = FakeHost.Create();
+            var s = new LegacyUiSettings { IsMacroRunning = true, HealAt = 0, TopOffHP = 0, EmergencyHealAt = 0, StaminaToHealthAt = 0,
+                                           GetManaAt = 0, TopOffMana = 0, RestamAt = 30, TopOffStam = 95, UsePotions = true, EnableBuffing = false };
+            s.ConsumableRules.Add(new ConsumableRule { Id = unchecked((int)Tincture), Name = "Stamina Tincture", Type = "Stamina" });
+            var skills = new CharacterSkills(host);
+            skills.SetPlayerId(Player);
+            var sm = new SpellManager(host, s);
+            sm.InitializeNatively();
+            sm.SetCharacterSkills(skills);
+            var vitals = new PlayerVitalsCache { MaxHealth = 100, CurrentHealth = 100, MaxStamina = 100, CurrentStamina = 20, MaxMana = 100, CurrentMana = 100 };
+            var b = new BuffManager(host, s, sm, vitals);
+            b.SetCharacterSkills(skills);
+            b.SetWorldObjectCache(FakeHost.MakeCache(host, Player, new[] { Tincture }));
+            Check.True(b.CheckVitals(), $"mode {mode}: stamina 20% acts");
+            bool drank = FakeHost.Uses.Contains(Tincture);
+            if (mode == CombatMode.Melee)
+            {
+                Check.True(drank, "melee: the tincture is drunk");
+                Check.Eq(FakeHost.Casts.Count, 0, "melee: no Revitalize (no wand switch)");
+            }
+            else
+            {
+                Check.False(drank, "caster in Magic stance: no potion first");
+                Check.True(FakeHost.Casts.Count > 0, "caster: Revitalize is cast");
+            }
+        }
+    }
+
+    // Tom, 2026-10-06: one Revitalize often doesn't recover enough stamina.
+    private static void RestamTo()
+    {
+        var s = new LegacyUiSettings { RestamAt = 30, RestamTo = 0, TopOffStam = 95 };
+        bool run = false; int casts = 0;
+        Check.Eq(BuffManager.StaminaLine(true, 25, s, ref run, ref casts), 30, "off: Re-stam At");
+        Check.Eq(BuffManager.StaminaLine(true, 40, s, ref run, ref casts), 30, "off: at 40% no recharge");
+
+        s.RestamTo = 70;
+        Check.Eq(BuffManager.StaminaLine(true, 40, s, ref run, ref casts), 30, "above Re-stam At with no recharge started: nothing new");
+        Check.Eq(BuffManager.StaminaLine(true, 25, s, ref run, ref casts), 70, "under Re-stam At: recharge to 70");
+        casts++;
+        Check.Eq(BuffManager.StaminaLine(true, 45, s, ref run, ref casts), 70, "one cast got it to 45%: still recharging (the second cast)");
+        casts++;
+        Check.Eq(BuffManager.StaminaLine(true, 72, s, ref run, ref casts), 30, "reached 70: done");
+        Check.False(run, "the recharge ended");
+
+        // A recharge that never gains stops after the cap.
+        Check.Eq(BuffManager.StaminaLine(true, 20, s, ref run, ref casts), 70, "new recharge");
+        casts = BuffManager.RestamRunMaxCasts;
+        Check.Eq(BuffManager.StaminaLine(true, 35, s, ref run, ref casts), 30, "cap reached above Re-stam At: back to Re-stam At");
+
+        // Out of combat the top-off line applies, as before.
+        Check.Eq(BuffManager.StaminaLine(false, 50, s, ref run, ref casts), 95, "idle: Top Stam");
+        s.RestamTo = 20;
+        Check.Eq(BuffManager.StaminaLine(true, 25, s, ref run, ref casts), 30, "Re-stam To not above Re-stam At: ignored");
     }
 
     private static void StaminaToHealthThresholds()

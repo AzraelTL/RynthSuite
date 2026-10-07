@@ -922,6 +922,7 @@ public partial class CombatManager : IDisposable
     {
         int id = (int)objectId;
         _recentlyKilled.Remove(id);
+        _hitAt.Remove(id);
         _blacklistManager.ForgetTarget(id);
 
         if (id == activeTargetId || id == _lockedTargetId || id == _lastAttackedTargetId)
@@ -1201,20 +1202,36 @@ public partial class CombatManager : IDisposable
         bool critLine = text.IndexOf("critical", StringComparison.OrdinalIgnoreCase) >= 0;
         if (critLine) _lastCritChatAt = now;
 
-        if (!TryParseOutgoingDamage(text, out int amount)) return;
+        if (!CombatText.TryParseOutgoingHit(text, out string victim, out int amount)) return;
         bool crit = critLine || (now - _lastCritChatAt).TotalMilliseconds <= CRIT_WINDOW_MS;
 
-        // Attribute to the current fight; if it's already cleared (we one-shot and
-        // moved on before the damage line landed), fall back to the last-fight
-        // snapshot — same wcid as the bolt, so the crit/non-crit average is right.
-        bool cur  = _fightTargetWcid != 0;
-        uint wcid = cur ? _fightTargetWcid : _lastFightWcid;
+        // Which monster the line is about. One spell can hurt several (rings, walls, blasts,
+        // chain spells): each sends its own line naming its victim, and only the selected target
+        // gets health from the server. A line naming the fight target is the fight's; any other
+        // goes to the monster it names (CreditHitToOther), never to the fight target.
+        int victimId = ResolveHitVictim(victim, now);
+        bool cur = _fightTargetWcid != 0;
+        bool onFight = cur && (victimId != 0
+            ? victimId == _fightTargetId
+            : victim.Equals(_fightTargetName, StringComparison.OrdinalIgnoreCase));
+        // Fight already cleared (we one-shot and moved on before the line landed): the line
+        // belongs to the last fight when it names it.
+        bool onLastFight = !onFight && !cur && _lastFightWcid != 0
+            && victim.Equals(_lastFightName, StringComparison.OrdinalIgnoreCase);
 
         if (_dmgDbgCount < 15)
         {
             _dmgDbgCount++;
-            _host.Log($"[DmgDbg] amt={amount} crit={crit} wcid={wcid} mode={CurrentCombatMode} text='{text}'");
+            _host.Log($"[DmgDbg] amt={amount} crit={crit} victim='{victim}' id=0x{(uint)victimId:X8} fight={(onFight ? 1 : onLastFight ? 2 : 0)} mode={CurrentCombatMode} text='{text}'");
         }
+
+        if (!onFight && !onLastFight)
+        {
+            CreditHitToOther(victimId, victim, amount, crit);
+            return;
+        }
+
+        uint wcid = onFight ? _fightTargetWcid : _lastFightWcid;
 
         // MAGIC-ONLY: melee/missile get the structured 0x01B1 event (OnCombatDamage),
         // so parsing chat for them too would double-count.
@@ -1224,14 +1241,145 @@ public partial class CombatManager : IDisposable
         // line is the ONLY damage signal for casters — without accumulating it,
         // _fightDamage stayed 0: EvaluateKillShot path B always saw a full-HP
         // target and RecordKill(totalDamage:0) never learned HP pools.
-        if (cur)
+        if (onFight)
             _fightDamage += amount;
 
-        uint   weapon = cur ? _lastCastWeaponId : _lastFightWeaponId;
-        string nm     = cur ? _fightTargetName  : _lastFightName;
-        string elem   = cur ? _lastCastElement  : _lastFightElement;
-        int    tier   = cur ? _lastCastTier     : _lastFightTier;
+        uint   weapon = onFight ? _lastCastWeaponId : _lastFightWeaponId;
+        string nm     = onFight ? _fightTargetName  : _lastFightName;
+        string elem   = onFight ? _lastCastElement  : _lastFightElement;
+        int    tier   = onFight ? _lastCastTier     : _lastFightTier;
         _damageStore.RecordHit(weapon, wcid, nm, elem, tier, amount, crit);
+    }
+
+    // ── Hits on monsters other than the fight target ─────────────────────────
+    // A ring, wall, blast or chain spell hurts several monsters with one cast; each gets a
+    // damage line naming it. Same-named monsters (a swarm) are told apart by order: within one
+    // volley (lines no more than VolleyWindowMs apart) a monster is hit once, so the fight
+    // target takes the first line with its name and every further one goes to the nearest
+    // other monster of that name not yet hit in the volley.
+    private readonly Dictionary<int, DateTime> _hitAt = new();   // last line credited to each id
+    private const double VolleyWindowMs = 800;
+    private const double HitMemoryMs = 15000;                    // hits older than this are forgotten
+    private const double KillMatchRecentHitMs = 5000;            // a kill notice is matched to hits this recent
+
+    /// <summary>
+    /// The object a damage line naming <paramref name="name"/> is about, or 0 when no live monster
+    /// of that name is known. Stamps the hit so the next same-named line of the volley goes elsewhere.
+    /// </summary>
+    internal int ResolveHitVictim(string name, DateTime now)
+    {
+        if (string.IsNullOrEmpty(name)) return 0;
+        PruneHits(now);
+        int fight = _fightTargetId;
+        if (fight != 0 && !HitInVolley(fight, now)
+            && string.Equals(_worldFilter[fight]?.Name, name, StringComparison.OrdinalIgnoreCase))
+        {
+            _hitAt[fight] = now;
+            return fight;
+        }
+
+        int anchor = fight != 0 ? fight : unchecked((int)_playerId);
+        int best = 0, any = 0;
+        double bestD = double.MaxValue, anyD = double.MaxValue;
+        foreach (var wo in _worldFilter.GetLandscape())
+        {
+            if (wo.ObjectClass != AcObjectClass.Monster) continue;
+            if (!string.Equals(wo.Name, name, StringComparison.OrdinalIgnoreCase)) continue;
+            if (_worldFilter.GetHealthRatio(wo.Id) == 0f) continue;   // the server said dead
+            double d = anchor != 0 ? _worldFilter.Distance(anchor, wo.Id) : 0.0;
+            if (any == 0 || d < anyD) { any = wo.Id; anyD = d; }
+            if (wo.Id == fight || HitInVolley(wo.Id, now)) continue;
+            if (best == 0 || d < bestD) { best = wo.Id; bestD = d; }
+        }
+        int id = best != 0 ? best : any;
+        if (id != 0) _hitAt[id] = now;
+        return id;
+    }
+
+    private bool HitInVolley(int id, DateTime now)
+        => _hitAt.TryGetValue(id, out DateTime t) && (now - t).TotalMilliseconds <= VolleyWindowMs;
+
+    private readonly List<int> _hitPruneScratch = new();
+    private void PruneHits(DateTime now)
+    {
+        if (_hitAt.Count < 64) return;
+        _hitPruneScratch.Clear();
+        foreach (var kv in _hitAt)
+            if ((now - kv.Value).TotalMilliseconds > HitMemoryMs) _hitPruneScratch.Add(kv.Key);
+        foreach (int id in _hitPruneScratch) _hitAt.Remove(id);
+    }
+
+    /// <summary>
+    /// A hit on a monster that isn't the fight target (another target of a ring, wall or chain
+    /// spell): lower its health estimate (the server sends it none), count it as damage for the
+    /// blacklist, and learn the hit against its own monster type.
+    /// </summary>
+    private void CreditHitToOther(int victimId, string victim, int amount, bool crit)
+    {
+        uint wcid = 0;
+        if (victimId != 0)
+        {
+            if (_host.HasGetObjectWcid) _host.TryGetObjectWcid(unchecked((uint)victimId), out wcid);
+            double maxHp = ResolveMaxHpFor(victimId, wcid, victim);
+            _worldFilter.ApplyDamageEstimate(victimId, maxHp > 0 ? amount / maxHp : 0.0);
+            ReportDamageOnTarget(victimId);
+        }
+        if (wcid == 0) wcid = WcidForName(victim);
+        if (_damageStore != null && wcid != 0 && CurrentCombatMode == CombatMode.Magic)
+            _damageStore.RecordHit(_lastCastWeaponId, wcid, victim, _lastCastElement, _lastCastTier, amount, crit);
+    }
+
+    /// <summary>A monster's max health from what we know: the manual override, the engine's vitals,
+    /// the shared creature profiles, the learned damage-to-kill. 0 when none says.</summary>
+    private double ResolveMaxHpFor(int id, uint wcid, string name)
+    {
+        if (_damageStore != null && wcid != 0)
+        {
+            double manual = _damageStore.GetManualHp(wcid);
+            if (manual > 0) return manual;
+        }
+        if (_host.HasGetTargetVitals
+            && _host.TryGetTargetVitals(unchecked((uint)id), out _, out uint maxHealth, out _, out _, out _, out _)
+            && maxHealth > 0)
+            return maxHealth;
+        if (_creatureStore != null && !string.IsNullOrEmpty(name))
+        {
+            CreatureProfile? prof = null;
+            bool found = wcid != 0 ? _creatureStore.TryGet(name, wcid, out prof) : _creatureStore.TryGetByName(name, out prof);
+            if (found && prof != null && prof.MaxHealth > 0) return prof.MaxHealth;
+        }
+        if (_damageStore != null && wcid != 0)
+        {
+            double hp = _damageStore.GetLearnedHp(wcid);
+            if (hp > 0) return hp;
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// The monster a kill notice is about, among those we hit in the last few seconds (other than
+    /// <paramref name="exclude"/>): the longest name the message contains, then the most hurt,
+    /// then the most recently hit. 0 when none fits.
+    /// </summary>
+    private int FindRecentlyHitVictim(string deathMessage, int exclude, DateTime now)
+    {
+        int best = 0, bestLen = 0;
+        float bestHp = 2f;
+        DateTime bestAt = DateTime.MinValue;
+        foreach (var kv in _hitAt)
+        {
+            if (kv.Key == exclude || (now - kv.Value).TotalMilliseconds > KillMatchRecentHitMs) continue;
+            if (_recentlyKilled.ContainsKey(kv.Key)) continue;
+            string n = _worldFilter[kv.Key]?.Name ?? "";
+            if (n.Length == 0 || deathMessage.IndexOf(n, StringComparison.OrdinalIgnoreCase) < 0) continue;
+            float hp = _worldFilter.GetHealthRatio(kv.Key);
+            if (hp < 0f) hp = 1f;
+            bool better = n.Length > bestLen
+                || (n.Length == bestLen && (hp < bestHp || (hp == bestHp && kv.Value > bestAt)));
+            if (!better) continue;
+            best = kv.Key; bestLen = n.Length; bestHp = hp; bestAt = kv.Value;
+        }
+        return best;
     }
 
     /// <summary>
@@ -1241,56 +1389,13 @@ public partial class CombatManager : IDisposable
     ///       (ACEmulator's SpellProjectile.DamageTarget emits "for {amount} points with
     ///        {Spell.Name}" — NOT "points of <element> damage" — so the old retail-only
     ///        parser matched nothing on ACE and the Crit/NonCrit columns stayed empty.)
-    /// Returns false for incoming ("... you for N points ...") and non-damage
-    /// "points of &lt;vital&gt;" lines (heals / mana / stamina drains). Allocation-free (hot path).
+    /// Returns false for incoming lines ("... you for N points ...", "... your lower leg for ..."):
+    /// the sentence must start with "You" after any "Critical hit!"-style prefix. Also false for
+    /// non-damage "points of &lt;vital&gt;" lines (heals / mana / stamina drains).
+    /// Shared with RynthTracker (Plugins/Shared/CombatText.cs), which also reads the victim's name.
     /// </summary>
     internal static bool TryParseOutgoingDamage(string text, out int amount)
-    {
-        amount = 0;
-
-        // Anchor on the word "points" (shared by both wordings). The number is the run
-        // of digits immediately before it; the word right AFTER it disambiguates:
-        //   "points with ..."             → ACE damage cast (only the projectile msg uses this)
-        //   "points of ... damage"        → retail damage
-        //   "points of mana/stamina/..."  → vital drain/heal (no "damage") → reject
-        int pts = text.IndexOf("points", StringComparison.OrdinalIgnoreCase);
-        if (pts < 0) return false;
-
-        int w = pts + 6;                                   // first char after "points"
-        while (w < text.Length && text[w] == ' ') w++;
-        bool nextWith = WordAt(text, w, "with");
-        bool nextOf   = WordAt(text, w, "of");
-        bool isDamage = nextWith
-                     || (nextOf && text.IndexOf("damage", w, StringComparison.OrdinalIgnoreCase) >= 0);
-        if (!isDamage) return false;
-
-        // Incoming (we got hit) lines read "... you for N points ..." — not our damage.
-        if (text.IndexOf("you for", StringComparison.OrdinalIgnoreCase) >= 0) return false;
-
-        int i = pts - 1;
-        while (i >= 0 && text[i] == ' ') i--;
-        long val = 0, mult = 1; bool any = false;
-        while (i >= 0 && (char.IsDigit(text[i]) || text[i] == ','))
-        {
-            if (text[i] != ',') { val += (text[i] - '0') * mult; mult *= 10; any = true; }
-            i--;
-        }
-        if (!any || val <= 0 || val > 1_000_000) return false;
-        amount = (int)val;
-        return true;
-    }
-
-    /// <summary>Case-insensitive whole-word match of <paramref name="word"/> (passed lowercase)
-    /// at <paramref name="pos"/> in <paramref name="text"/>, bounded by end-of-string or a
-    /// non-letter. Allocation-free.</summary>
-    private static bool WordAt(string text, int pos, string word)
-    {
-        if (pos < 0 || pos + word.Length > text.Length) return false;
-        for (int k = 0; k < word.Length; k++)
-            if (char.ToLowerInvariant(text[pos + k]) != word[k]) return false;
-        int end = pos + word.Length;
-        return end >= text.Length || !char.IsLetter(text[end]);
-    }
+        => CombatText.TryParseOutgoingHit(text, out _, out amount);
 
     public void HandleChatForDebuffs(string text)
     {
@@ -1882,12 +1987,26 @@ public partial class CombatManager : IDisposable
         // a late death notice killed a neighbour. Dropping it also hid it from the scan for
         // 4 s, and with no other mob in range the bot went to peace mid-fight.
         bool noticeForSwappedMob = pendingKillId != 0 && pendingKillId != tid;
-        bool curAttacked = _fightTargetId != tid || _fightCastCount > 0 || _pendingOffensiveTargetId == tid;
-        if (tid != 0 && curMatches && (noticeForSwappedMob || !curAttacked))
+        // A damage line naming the target (ResolveHitVictim stamped it) is an attack too.
+        bool curAttacked = _fightTargetId != tid || _fightCastCount > 0 || _pendingOffensiveTargetId == tid
+                           || (tid != 0 && _hitAt.ContainsKey(tid));
+        // A ring, wall or chain spell kills neighbours too. The server's health for the fight
+        // target lands before its kill notice (ACE sends the 0 with the lethal hit), so a fight
+        // target the server still says is alive didn't die: the notice is a same-named
+        // neighbour's we hit in the last few seconds.
+        int otherVictim = (!curMatches || noticeForSwappedMob) ? 0 : FindRecentlyHitVictim(deathMessage, tid, nowKill);
+        float curHp = tid != 0 ? _worldFilter.GetHealthRatio(tid) : -1f;
+        bool curServerAlive = curHp > 0f && !_worldFilter.IsHealthEstimated(tid);
+        bool noticeForNeighbour = otherVictim != 0 && curServerAlive;
+        if (tid != 0 && curMatches && (noticeForSwappedMob || !curAttacked || noticeForNeighbour))
         {
             _host.Log($"[RynthAi] Kill notice names 0x{tid:X8} '{curName}' but " +
-                      (noticeForSwappedMob ? $"belongs to predicted kill 0x{pendingKillId:X8}" : "it hasn't been attacked yet") +
+                      (noticeForSwappedMob ? $"belongs to predicted kill 0x{pendingKillId:X8}"
+                       : noticeForNeighbour ? $"it is alive ({curHp:0.00}); a neighbour we hit died (0x{otherVictim:X8})"
+                       : "it hasn't been attacked yet") +
                       " — keeping the target");
+            if (noticeForNeighbour)
+                _recentlyKilled[otherVictim] = nowKill.AddMilliseconds(RECENTLY_KILLED_SUPPRESS_MS);
         }
         else if (tid != 0 && curMatches)
         {
@@ -1895,7 +2014,26 @@ public partial class CombatManager : IDisposable
             ForgetScanned(tid);
             DropTarget("killed (KillerNotification)");
         }
+        else if (pendingKillId == 0)
+        {
+            // Another monster died, not the fight target: one we hit with a ring, wall or chain.
+            // Keep the scan off it while its corpse forms.
+            int victim = FindRecentlyHitVictim(deathMessage, tid, nowKill);
+            if (victim != 0)
+                _recentlyKilled[victim] = nowKill.AddMilliseconds(RECENTLY_KILLED_SUPPRESS_MS);
+        }
     }
+
+    /// <summary>Test seam: engage <paramref name="targetId"/> as the fight target, as a target lock does.</summary>
+    internal void EngageForTest(int targetId)
+    {
+        activeTargetId = targetId;
+        _lockedTargetId = targetId;
+        BeginFight(targetId);
+    }
+
+    /// <summary>Test seam: true while the scan is kept off <paramref name="id"/> after a kill.</summary>
+    internal bool IsKillSuppressed(int id) => _recentlyKilled.ContainsKey(id);
 
     /// <summary>Record the just-stamped _lastFight* context into the recent-fights ring,
     /// keyed by the live object id (refreshed per hit, capped, TTL-pruned). Lets a kill that
@@ -2443,7 +2581,12 @@ public partial class CombatManager : IDisposable
         // wield, attack or cast while the server is still answering the last action (a kit, a corpse
         // use, a buff, the last stance change). On ACE a mode change cancels a pending use's walk
         // and fails a cast in progress; that interleaving began every stuck-use stall on record.
-        if (!ActionPacer.MayStart(_host, "Combat", HealNeed.None, out _))
+        // Melee/missile attack repeats skip the animation gate (gestureGate false): the server swings
+        // on its own timers, a swing can't land inside a use's server turn because the use above holds
+        // every attack until it is answered, and waiting for each swing animation would cost DPS. A
+        // stance change still waits (ChangeCombatModeFor), and so does everything in peace/magic.
+        bool attackRepeat = CurrentCombatMode == CombatMode.Melee || CurrentCombatMode == CombatMode.Missile;
+        if (!ActionPacer.MayStart(_host, "Combat", HealNeed.None, out _, gestureGate: !attackRepeat))
         {
             LastCombatSkipReason = "server-answering"; // D4 record-only
             _tickWait = CombatLatencyTracker.Wait.Busy;
@@ -4698,6 +4841,7 @@ public partial class CombatManager : IDisposable
             else
                 _host.MeleeAttack(targetId, acHeight, power);
 
+            RynthCore.Plugin.Shared.ActionPacer.NoteAttackSent();   // nothing else starts before this swing plays
             _serverAttackTargetId = activeTargetId;
             LastCombatSkipReason = "attack"; // D4 record-only: physical attack sent this tick
             return true;

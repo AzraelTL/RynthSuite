@@ -82,6 +82,9 @@ internal static unsafe class FakeHost
     public static readonly List<bool> AutoRunCalls = new();
     public static bool AutoRun;
     public static int Jumps;
+    /// <summary>Opt-in: wires TapJump (the keyboard jump, 0xF61B); calls land in <see cref="TapJumps"/>.</summary>
+    public static bool TapJumpCalls;
+    public static int TapJumps;
     public static int Turns;
     public static readonly List<(uint Target, int SpellId)> Casts = new();
     /// <summary>Opt-in: wires GiveObjectTo (AC's give action); every call lands in <see cref="Gives"/>.</summary>
@@ -193,7 +196,7 @@ internal static unsafe class FakeHost
         Vitals = default; BaseVitals = default; WorldName = ""; AccountName = "";
         HeadingDeg = 0; Wcids.Clear(); Spellbook.Clear(); PlayerIdValue = 0;
         Logs.Clear(); Chat.Clear(); ChatCommands.Clear();
-        AutoRunCalls.Clear(); AutoRun = false; Jumps = 0; Turns = 0; Casts.Clear(); StopCalls = false; Stops = 0; GiveCalls = false; Gives.Clear();
+        AutoRunCalls.Clear(); AutoRun = false; Jumps = 0; TapJumpCalls = false; TapJumps = 0; Turns = 0; Casts.Clear(); StopCalls = false; Stops = 0; GiveCalls = false; Gives.Clear();
         Uses.Clear(); IdRequests.Clear(); Moves.Clear(); Appraised.Clear(); WeaponCalls = false; CombatModeValue = 1;
         VTankFlags = -1; VTankSeq = 0; LogCostMicros = 0;
         ServerGates = false; UseDoneSeq = 0; CastBusy = 0; LastUseDoneError = 0; LastUseDoneCalls = false;
@@ -245,6 +248,8 @@ internal static unsafe class FakeHost
         api.SetAutoRunFn            = (IntPtr)(delegate* unmanaged[Cdecl]<int, int>)&SetAutoRun;
         api.TurnToHeadingFn         = (IntPtr)(delegate* unmanaged[Cdecl]<float, int>)&TurnToHeading;
         api.JumpNonAutonomousFn     = (IntPtr)(delegate* unmanaged[Cdecl]<float, int>)&JumpNonAutonomous;
+        if (TapJumpCalls)
+            api.TapJumpFn           = (IntPtr)(delegate* unmanaged[Cdecl]<int>)&TapJump;
         api.CastSpellFn             = (IntPtr)(delegate* unmanaged[Cdecl]<uint, int, int>)&CastSpell;
         if (StopCalls)
             api.StopCompletelyFn    = (IntPtr)(delegate* unmanaged[Cdecl]<int>)&StopCompletely;
@@ -613,6 +618,9 @@ internal static unsafe class FakeHost
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int JumpNonAutonomous(float extent) { Jumps++; return 1; }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int TapJump() { TapJumps++; return 1; }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int CastSpell(uint target, int spellId) { Casts.Add((target, spellId)); return 1; }

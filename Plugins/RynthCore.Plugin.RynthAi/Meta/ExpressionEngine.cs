@@ -3340,6 +3340,7 @@ internal sealed class ExpressionEngine
             ["MinBlastTargets"]     = (() => I(s.MinBlastTargets),      v => { if (int.TryParse(v, out int i)) s.MinBlastTargets   = i; }),
             ["HealAt"]              = (() => I(s.HealAt),              v => { if (int.TryParse(v, out int i)) s.HealAt           = i; }),
             ["RestamAt"]            = (() => I(s.RestamAt),            v => { if (int.TryParse(v, out int i)) s.RestamAt         = i; }),
+            ["RestamTo"]            = (() => I(s.RestamTo),            v => { if (int.TryParse(v, out int i)) s.RestamTo         = i; }),
             ["GetManaAt"]           = (() => I(s.GetManaAt),           v => { if (int.TryParse(v, out int i)) s.GetManaAt        = i; }),
             ["TopOffHP"]            = (() => I(s.TopOffHP),            v => { if (int.TryParse(v, out int i)) s.TopOffHP         = i; }),
             ["TopOffStam"]          = (() => I(s.TopOffStam),          v => { if (int.TryParse(v, out int i)) s.TopOffStam       = i; }),

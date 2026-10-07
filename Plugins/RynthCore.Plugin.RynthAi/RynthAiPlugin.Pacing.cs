@@ -51,7 +51,9 @@ public sealed partial class RynthAiPlugin
         get
         {
             int busy = _busyCount;
-            if (ActionPacer.Enabled && ActionPacer.Current(Host) != null) busy++;
+            if (ActionPacer.Enabled
+                && (ActionPacer.Current(Host) != null || ActionPacer.GestureHolds(Host, "Items", HealNeed.None, out _)))
+                busy++;   // an unanswered server action, or the character still animating (a pack move of a wielded item, a stone, a summon would start on top)
             return busy;
         }
     }

@@ -27,6 +27,16 @@
 //  A UseDone with an error (0x1D "too busy", ...) says nothing either way, and
 //  an open the server never answers is left to the corpse timeout as before.
 //  No game calls here: the controller acts on the verdicts.
+//
+//  The jump (2026-10-06 afternoon): the stuck state is the server's animation
+//  bookkeeping for the character (ACE: MotionInterp.PendingMotions/IsAnimating
+//  and the MotionTableManager queue never drain, so the server's turn to the
+//  corpse never starts and the use's callback never runs). Besides leaving the
+//  world, the only thing on ACE that empties those queues is the player's jump
+//  (Player.HandleActionJump: RemoveLinkAnimations drains the motion table queue,
+//  PendingMotions.Clear, IsAnimating = false; the jump also cancels the pending
+//  walk/turn). So the controller jumps at the clean stop, and once more before
+//  each probe after a back-off (TakeProbeJump).
 // ============================================================================
 
 using System;
@@ -73,6 +83,7 @@ internal sealed class UseRefusalWatch
     public int LastRefusedCorpse { get; private set; }
 
     private readonly HashSet<int> _refused = new();
+    private bool _probeJumpTaken;
     private bool _pending;
     private int _pendingId;
     private long _sentAt;
@@ -81,6 +92,16 @@ internal sealed class UseRefusalWatch
 
     /// <summary>While Stuck: no opens until the back-off ends (then one probe).</summary>
     public bool HoldsOpens(long now) => State == Phase.Stuck && now < BackoffUntil;
+
+    /// <summary>The back-off is over and the probe is next: true once per back-off, meaning
+    /// "jump first, then send the probe after the pause".</summary>
+    public bool TakeProbeJump(long now)
+    {
+        if (State != Phase.Stuck || now < BackoffUntil || _probeJumpTaken)
+            return false;
+        _probeJumpTaken = true;
+        return true;
+    }
 
     /// <summary>Call before sending the next open: the previous one, answered with nothing opened,
     /// counts as refused now (the next attempt came before its grace ran out). A verdict other than
@@ -154,6 +175,7 @@ internal sealed class UseRefusalWatch
         BackoffMs = 0;
         LastRefusedCorpse = 0;
         _refused.Clear();
+        _probeJumpTaken = false;
         _pending = false;
         _answeredAt = 0;
     }
@@ -178,11 +200,13 @@ internal sealed class UseRefusalWatch
                 State = Phase.Stuck;
                 BackoffMs = FirstBackoffMs;
                 BackoffUntil = now + BackoffMs;
+                _probeJumpTaken = false;
                 return Verdict.Stuck;
 
             default: // Stuck: a probe after the back-off
                 BackoffMs = Math.Min(MaxBackoffMs, Math.Max(FirstBackoffMs, BackoffMs * 2));
                 BackoffUntil = now + BackoffMs;
+                _probeJumpTaken = false;
                 return Verdict.StillStuck;
         }
     }

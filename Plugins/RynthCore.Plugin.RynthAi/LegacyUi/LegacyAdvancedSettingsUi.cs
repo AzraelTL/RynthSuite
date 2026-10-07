@@ -396,6 +396,9 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.SetNextItemWidth(120);
                 ImGui.SliderInt("Re-stam At", ref _settings.RestamAt, 0, 100);
                 ImGui.SetNextItemWidth(120);
+                ImGui.SliderInt("Re-stam To", ref _settings.RestamTo, 0, 100);
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Once a recharge starts under Re-stam At, keep recharging until stamina reaches this %.\n0 = one recharge, as before.");
+                ImGui.SetNextItemWidth(120);
                 ImGui.SliderInt("Get Mana At", ref _settings.GetManaAt, 0, 100);
 
                 ImGui.Spacing();

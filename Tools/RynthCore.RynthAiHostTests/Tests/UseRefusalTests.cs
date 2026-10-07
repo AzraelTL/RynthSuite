@@ -49,6 +49,10 @@ internal static class UseRefusalTests
         r.Add("move hold: off unless the plugin opts in (RynthNav, RynthLua unchanged)", MoveHoldOptIn);
         r.Add("idle peace: Combat's idle peace swap waits while looting has work", IdlePeaceHeldWhileLooting);
         r.Add("idle peace: looting has work = a corpse claimed, a corpse open, a corpse in range, or a use in flight", LootHoldsIdlePeaceInputs);
+        r.Add("use check jump: one jump per back-off, before the probe; none while normal or during the back-off", WatchProbeJump);
+        r.Add("use check jump (looting): the clean stop jumps (TapJump, not JumpNonAutonomous), the retry waits the pause, an open after it is logged as cleared", LootingStallJumpClears);
+        r.Add("use check jump (looting): still stuck after the jump -> back-off; the probe goes out only after a jump and the pause", LootingStallJumpBeforeProbe);
+        r.Add("use check jump: no jump while the server still owes an answer to a cast (a jump would fail it)", NoJumpWhilePacerOutstanding);
     }
 
     // ── UseRefusalWatch alone ─────────────────────────────────────────────────
@@ -535,5 +539,155 @@ internal static class UseRefusalTests
             Check.True(Holds(), "a corpse use in flight");
         });
         Check.False(Holds(), "all clear: no hold");
+    }
+
+    // ── The jump (2026-10-06 afternoon) ───────────────────────────────────────
+    // On ACE the player's jump (Player.HandleActionJump) is the one in-world action that empties the
+    // server's animation queues (the stuck state); the use check jumps at the clean stop and before
+    // each probe.
+
+    private static void WatchProbeJump()
+    {
+        var r = new Rig();
+        int a = unchecked((int)CorpseA), b = unchecked((int)CorpseB);
+        Check.False(r.W.TakeProbeJump(r.T), "normal: no jump");
+        r.RefusedOpen(a); r.RefusedOpen(a); r.RefusedOpen(a);
+        Check.False(r.W.TakeProbeJump(r.T), "retrying: no probe jump (the clean stop jumps itself)");
+        r.RefusedOpen(a);
+        Check.Eq(r.RefusedOpen(b), UseRefusalWatch.Verdict.Stuck, "stuck");
+        Check.False(r.W.TakeProbeJump(r.T), "during the back-off: no jump");
+        r.T = r.W.BackoffUntil;
+        Check.True(r.W.TakeProbeJump(r.T), "the back-off is over: jump before the probe");
+        Check.False(r.W.TakeProbeJump(r.T + 100), "once");
+        Check.Eq(r.RefusedOpen(b), UseRefusalWatch.Verdict.StillStuck, "the probe refused");
+        Check.False(r.W.TakeProbeJump(r.T), "a new back-off: no jump yet");
+        r.T = r.W.BackoffUntil;
+        Check.True(r.W.TakeProbeJump(r.T), "again once the longer back-off is over");
+        r.W.OnOpened(r.T);
+        Check.False(r.W.TakeProbeJump(r.T + UseRefusalWatch.MaxBackoffMs), "after an open: never");
+    }
+
+    /// <summary>The 14:29 server: every open is answered 60 ms later and nothing opens, until the
+    /// first open after a jump (when <paramref name="jumpClears"/>).</summary>
+    private static void StallServer(Bot bot, Func<long> now, Action<long> advance, bool jumpClears, int maxSteps, Func<bool> until)
+    {
+        long answerAt = 0; uint answerFor = 0;
+        for (int steps = 0; steps < maxSteps && !until(); steps++)
+        {
+            int uses = FakeHost.Uses.Count;
+            bot.Tick(BotActivity.Looting);
+            if (FakeHost.Uses.Count > uses) { answerAt = now() + 60; answerFor = FakeHost.Uses.Last(); }
+            advance(100);
+            if (answerAt != 0 && now() >= answerAt)
+            {
+                FakeHost.UseDone(0);
+                if (jumpClears && FakeHost.TapJumps > 0)
+                    bot.P.OnViewObjectContents(answerFor);
+                answerAt = 0;
+            }
+        }
+    }
+
+    private static void LootingStallJumpClears()
+    {
+        World();
+        FakeHost.TapJumpCalls = true;
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        WithClock((now, advance) =>
+        {
+            int usesAtJump = -1; long jumpAt = 0;
+            StallServer(bot, now, advance, jumpClears: false, maxSteps: 400, until: () =>
+            {
+                if (FakeHost.TapJumps > 0 && usesAtJump < 0) { usesAtJump = FakeHost.Uses.Count; jumpAt = now(); }
+                return usesAtJump >= 0;
+            });
+            Check.Eq(FakeHost.TapJumps, 1, "the clean stop jumps once");
+            Check.Eq(FakeHost.Jumps, 0, "with the keyboard jump, not JumpNonAutonomous (ACE ignores 0xF7C9)");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("one clean stop, a jump")), "logged");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("Use check: jump for the retry")), "the jump is logged");
+            Check.False(FakeHost.Logs.Any(l => l.Contains("Use check: facing")), "no facing turn when it jumps");
+
+            // The retry waits for the pause, then the server (cleared by the jump) opens it.
+            long retryAt = 0;
+            StallServer(bot, now, advance, jumpClears: true, maxSteps: 100, until: () =>
+            {
+                if (retryAt == 0 && FakeHost.Uses.Count > usesAtJump) retryAt = now();
+                return bot.Get<int>("_openedContainerId") != 0;
+            });
+            Check.True(retryAt != 0, "a retry went out");
+            Check.True(retryAt - jumpAt >= UseRefusalWatch.CleanStopPauseMs, $"after the pause ({retryAt - jumpAt} ms)");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("after the use check's jump - the jump cleared")), "the open after the jump is logged as the fix");
+            Check.Eq(ChatCount(StuckLine), 0, "the player is never told to relog");
+            Check.Eq(bot.Get<UseRefusalWatch>("_useRefusals").State, UseRefusalWatch.Phase.Normal, "back to normal");
+        });
+    }
+
+    private static void LootingStallJumpBeforeProbe()
+    {
+        World();
+        FakeHost.TapJumpCalls = true;
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        WithClock((now, advance) =>
+        {
+            StallServer(bot, now, advance, jumpClears: false, maxSteps: 600, until: () => ChatCount(StuckLine) > 0);
+            Check.Eq(ChatCount(StuckLine), 1, "the jump didn't help here: the player is told once");
+            Check.Eq(FakeHost.TapJumps, 1, "one jump so far (the clean stop)");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("the clean stop, the jump and retry didn't help")), "the verdict says the jump was tried");
+
+            var w = bot.Get<UseRefusalWatch>("_useRefusals");
+            int usesAtStuck = FakeHost.Uses.Count;
+            for (int i = 0; i < 2400; i++) { bot.Tick(BotActivity.Looting); advance(100); }   // 4 minutes
+            Check.Eq(FakeHost.TapJumps, 1, "no jump during the back-off");
+            Check.Eq(FakeHost.Uses.Count, usesAtStuck, "no opens during the back-off");
+
+            long probeJumpAt = 0;
+            for (int i = 0; i < 700 && FakeHost.Uses.Count == usesAtStuck; i++)
+            {
+                bot.Tick(BotActivity.Looting);
+                if (probeJumpAt == 0 && FakeHost.TapJumps == 2) probeJumpAt = now();
+                advance(100);
+            }
+            Check.Eq(FakeHost.TapJumps, 2, "a jump before the probe");
+            Check.Eq(FakeHost.Uses.Count, usesAtStuck + 1, "then the probe");
+            Check.True(now() - 100 - probeJumpAt >= UseRefusalWatch.CleanStopPauseMs, "the probe waits the pause after the jump");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("Use check: jump before the probe")), "logged");
+
+            // The jump cleared it: the probe opens.
+            bot.P.OnViewObjectContents(FakeHost.Uses.Last());
+            Check.Eq(ChatCount("Objects open again"), 1, "the player is told uses work again");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("the jump cleared")), "and the log says the jump did it");
+            Check.False(w.HoldsOpens(now()), "looting is back on");
+        });
+    }
+
+    private static void NoJumpWhilePacerOutstanding()
+    {
+        World();
+        FakeHost.TapJumpCalls = true;
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        long t = 10_000_000;
+        ActionPacer.Reset();
+        ActionPacer.Enabled = true;
+        ActionPacer.NowMs = () => t;
+        try
+        {
+            ActionPacer.Begin(host, PacedKind.Cast, 0, "Revitalize Self VI", "Buff", FakeHost.UseDoneSeq);
+            Check.False((bool)bot.Call("TryUseCheckJump", t, "test")!, "no jump while the cast is unanswered");
+            Check.Eq(FakeHost.TapJumps, 0, "nothing sent");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("Use check: no jump test - the server still owes an answer")), "logged");
+            FakeHost.UseDone(0);
+            t += 50;
+            Check.True((bool)bot.Call("TryUseCheckJump", t, "test")!, "answered: the jump goes");
+            Check.Eq(FakeHost.TapJumps, 1, "one jump");
+        }
+        finally
+        {
+            ActionPacer.Enabled = false;
+            ActionPacer.Reset();
+            ActionPacer.NowMs = () => Environment.TickCount64;
+        }
     }
 }

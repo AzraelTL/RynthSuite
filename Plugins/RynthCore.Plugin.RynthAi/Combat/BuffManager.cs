@@ -1423,7 +1423,7 @@ public class BuffManager : IDisposable
         bool inCombat = _combatManager?.HasCloseThreat(System.Math.Max(1, _settings.MonsterRange)) == true;
         int hpThreshold   = inCombat ? _settings.HealAt    : _settings.TopOffHP;
         int manaThreshold = inCombat ? _settings.GetManaAt : _settings.TopOffMana;
-        int stamThreshold = inCombat ? _settings.RestamAt  : _settings.TopOffStam;
+        int stamThreshold = StaminaLine(inCombat, curStamPct, _settings, ref _restamRun, ref _restamRunCasts);
 
         // A flag is set only when something was actually done about the vital.
         // WantsVitalRecharge holds the arbiter on Buffing, above combat and nav, so
@@ -1479,14 +1479,52 @@ public class BuffManager : IDisposable
         }
         // Stamina kits first, like healing kits for health: Lucy carried Greater Stamina Kits
         // and cast Revitalize/Robustification instead, because stamina never looked for a kit.
-        if (curStamPct < stamThreshold && (AttemptStaminaKitUse() || AttemptVitalCast("Revitalize Self")
-                                           || AttemptPotion("StaminaPotion", "Stamina")))
+        // Melee first (Tom, 2026-10-06): out of Magic stance, Revitalize means switching the weapon
+        // for the wand and back (slow, and the 10-06 stalls began at those switches), so a stamina
+        // potion listed in Consumables goes before it. A potion drunk under 2.5 s ago: no Revitalize
+        // on top of it. In Magic stance (a caster) Revitalize stays first.
+        bool potionFirst = CurrentCombatMode != CombatMode.Magic;
+        if (curStamPct < stamThreshold)
         {
-            _isRechargingStamina = true;
-            return true;
+            bool potionJustDrunk = potionFirst && _settings.UsePotions
+                && (DateTime.Now - _lastPotionAt).TotalMilliseconds < 2500
+                && HasListedPotion("StaminaPotion", "Stamina");
+            if (!potionJustDrunk
+                && (AttemptStaminaKitUse()
+                    || (potionFirst && AttemptPotion(true, "StaminaPotion", "Stamina"))
+                    || AttemptVitalCast("Revitalize Self")
+                    || AttemptPotion("StaminaPotion", "Stamina")))
+            {
+                _isRechargingStamina = true;
+                if (_restamRun) _restamRunCasts++;
+                return true;
+            }
         }
 
         return false;
+    }
+
+    // Re-stam To (2026-10-06): a recharge started under Re-stam At carries on until stamina
+    // reaches Re-stam To; one Revitalize often doesn't get far. Capped so a recharge that
+    // never gains can't loop: it ends after RestamRunMaxCasts.
+    private bool _restamRun;
+    private int _restamRunCasts;
+    internal const int RestamRunMaxCasts = 4;
+
+    /// <summary>The stamina % to recharge under now (see the fields above).</summary>
+    internal static int StaminaLine(bool inCombat, int stamPct, LegacyUiSettings s, ref bool run, ref int casts)
+    {
+        if (!inCombat) { run = false; return s.TopOffStam; }
+        if (s.RestamTo <= s.RestamAt) { run = false; return s.RestamAt; }
+        if (stamPct < s.RestamAt)
+        {
+            if (!run) { run = true; casts = 0; }
+        }
+        else if (stamPct >= s.RestamTo || casts >= RestamRunMaxCasts)
+        {
+            run = false;
+        }
+        return run ? s.RestamTo : s.RestamAt;
     }
 
     /// <summary>True when Stamina To Health At / Min Stamina allow Stamina to Health Self now.</summary>
@@ -1644,7 +1682,21 @@ public class BuffManager : IDisposable
     /// Drinks the first potion of <paramref name="types"/> from the Items panel.
     /// "Stamina" is the older name for stamina potions. Off with UsePotions.
     /// </summary>
-    private bool AttemptPotion(params string[] types)
+    private bool AttemptPotion(params string[] types) => AttemptPotion(false, types);
+
+    /// <summary>A potion of one of <paramref name="types"/> listed in Consumables and in the pack.</summary>
+    private bool HasListedPotion(params string[] types)
+    {
+        if (_worldObjectCache == null) return false;
+        foreach (var rule in _settings.ConsumableRules)
+            if (Array.FindIndex(types, t => t.Equals(rule.Type, StringComparison.OrdinalIgnoreCase)) >= 0
+                && _worldObjectCache[rule.Id] != null)
+                return true;
+        return false;
+    }
+
+    /// <summary><paramref name="listedOnly"/>: only the Consumables list, not any potion in the pack.</summary>
+    private bool AttemptPotion(bool listedOnly, params string[] types)
     {
         if (!_settings.UsePotions || _worldObjectCache == null) return VitalNo("Use Potions is off");
         if ((DateTime.Now - _lastPotionAt).TotalMilliseconds < 2500) return VitalNo("one drunk under 2.5 s ago");
@@ -1660,6 +1712,7 @@ public class BuffManager : IDisposable
             if (IsHealthPotionType(types)) _healLatency.HealSent(Now, rule.Name);
             return true;
         }
+        if (listedOnly) return VitalNo("none listed in Consumables");
         // Nothing on the Items panel: anything in the pack of that kind (Field Rations
         // weren't used unless someone added them by hand, 2026-09-29).
         foreach (var wo in _worldObjectCache.GetDirectInventory(forceRefresh: false))

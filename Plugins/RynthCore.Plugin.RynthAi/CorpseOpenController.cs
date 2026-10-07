@@ -97,6 +97,8 @@ public sealed partial class RynthAiPlugin
     private bool _currentLootItemMovePending;
     private bool _corpseAutorunActive;
     private int _currentLootItemMoveAttempts;
+    private long _currentLootItemStillSince;
+    private long _pickupAnimSince;
     private string _currentLootItemActionLabel = string.Empty;
     private string _currentLootItemName = string.Empty;
     private bool _currentLootItemIsSalvage;
@@ -400,6 +402,11 @@ public sealed partial class RynthAiPlugin
         LootDiag($"[RynthAi] Corpse loot: opened container 0x{objectId:X8}.");
         _consecutiveLootTimeouts = 0; // a successful open proves AC is responsive again
         _lootWedgeAnnounced = false;
+        if (_useCheckJumpAt != 0)
+        {
+            Log($"[RynthAi] Use check: 0x{objectId:X8} opened {CorpseNowMs - _useCheckJumpAt} ms after the use check's jump - the jump cleared the server's stuck turn.");
+            _useCheckJumpAt = 0;
+        }
         ApplyUseRefusalVerdict(_useRefusals.OnOpened(CorpseNowMs), CorpseNowMs);
         if (switchedTarget)
             LootDiag($"[RynthAi] Corpse loot: switching active corpse target from 0x{(uint)_targetCorpseId:X8} to 0x{objectId:X8}.");
@@ -1376,6 +1383,11 @@ public sealed partial class RynthAiPlugin
                 return;
             }
 
+            // The last pickup's bend-down still plays: the engine holds a move sent now until
+            // it ends, so wait and send it then.
+            if (PickupAnimating(CorpseNowMs))
+                return;
+
             ChatLine($"[RynthAi] Loot rule: {matchItemName} -> [{matchActionLabel}] {matchRuleLabel}");
             _currentLootItemId = firstMatchId;
             RynthCore.Plugin.RynthAi.ItemInfo.SelfSelect.Mark(unchecked((uint)firstMatchId));
@@ -1448,6 +1460,28 @@ public sealed partial class RynthAiPlugin
         }
     }
 
+    /// <summary>Longest a pickup waits on the motion queue (the engine's own hold is 2.5 s).</summary>
+    internal const long PickupAnimMaxMs = 3000;
+
+    /// <summary>
+    /// The character still has motions queued (the engine's cast gate, GetCastBusyState):
+    /// the bend-down of the last pickup is playing. False after PickupAnimMaxMs of it, so a
+    /// stuck queue can't stop looting, and on an engine without the gate.
+    /// </summary>
+    private bool PickupAnimating(long now)
+    {
+        bool busy;
+        try { busy = Host.HasGetCastBusyState && Host.GetCastBusyState() != 0; } catch { busy = false; }
+        if (!busy)
+        {
+            _pickupAnimSince = 0;
+            return false;
+        }
+        if (_pickupAnimSince == 0)
+            _pickupAnimSince = now;
+        return now - _pickupAnimSince < PickupAnimMaxMs;
+    }
+
     private void TickPendingCorpsePickup(LegacyUiSettings settings)
     {
         if (_objectCache == null || _openedContainerId == 0 || _currentLootItemId == 0)
@@ -1475,9 +1509,20 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
-        // Item still on corpse — wait before retrying the UseObject.
+        // Item still on corpse — wait before retrying the UseObject. The window counts from
+        // when the character is still: while a pickup animation plays the engine holds the
+        // move, and a retry timed from the send gave up on items whose move had not gone
+        // out yet (2026-10-07: moves ran ~2.2 s late, 3 tries at 0.5 s skipped the item).
+        if (PickupAnimating(now))
+        {
+            _currentLootItemStillSince = 0;
+            return;
+        }
+        if (_currentLootItemStillSince == 0)
+            _currentLootItemStillSince = now;
         long verifyWindowMs = Math.Max(150, settings.LootRetryTimeoutMs);
-        if (now - _currentLootItemMoveRequestedAt < verifyWindowMs)
+        long windowStart = Math.Max(_currentLootItemMoveRequestedAt, _currentLootItemStillSince);
+        if (now - windowStart < verifyWindowMs)
             return;
 
         if (_currentLootItemMoveAttempts >= 3)
@@ -2293,6 +2338,7 @@ public sealed partial class RynthAiPlugin
         _currentLootItemMovePending = false;
         _currentLootItemMoveRequestedAt = 0;
         _currentLootItemMoveAttempts = 0;
+        _currentLootItemStillSince = 0;
         _currentLootItemActionLabel = string.Empty;
         _currentLootItemName = string.Empty;
         _currentLootItemIsSalvage = false;
@@ -2394,6 +2440,16 @@ public sealed partial class RynthAiPlugin
                 ApplyUseRefusalVerdict(verdict, now);
                 return false;
             }
+
+            // The back-off is over and this is the probe: jump first (clears the server's stuck
+            // animation queue, see UseRefusalWatch), send the probe after the pause.
+            if (_useRefusals.TakeProbeJump(now) && TryUseCheckJump(now, "before the probe"))
+            {
+                _lootHaltUntil = Math.Max(_lootHaltUntil, now + UseRefusalWatch.CleanStopPauseMs);
+                _lastCorpseOpenAttemptAt = 0;
+                _corpseTargetSince = now;
+                return false;
+            }
         }
 
         _lastOpenAttemptCorpseId = corpseId;
@@ -2429,17 +2485,20 @@ public sealed partial class RynthAiPlugin
             case UseRefusalWatch.Verdict.CleanStopAndRetry:
             {
                 FlightRecorderSignal.Dump(Host, "use check: corpse opens answered but not opened");
-                Log($"[RynthAi] Use check: {_useRefusals.Refusals} corpse opens in a row were answered by the server but nothing opened ({RefusedList()}) - one clean stop, a {UseRefusalWatch.CleanStopPauseMs} ms pause, then one more try.");
+                Log($"[RynthAi] Use check: {_useRefusals.Refusals} corpse opens in a row were answered by the server but nothing opened ({RefusedList()}) - one clean stop, a jump, a {UseRefusalWatch.CleanStopPauseMs} ms pause, then one more try.");
                 Host.SetAutoRunBy("Loot/UseCheck", false);
                 if (Host.HasStopCompletely)
                     Host.StopCompletelyBy("Loot/UseCheck");
                 _corpseAutorunActive = false;
                 _corpseApproachTurnsActive = false;
-                // Face the corpse for the retry. Since 2026-10-04 the bot leaves the turn to the
-                // server; if the server can't turn the character any more, a corpse already in
-                // front may still open (mid-stall, 06:28:19, a use by hand with the macro off
+                // The jump is the fix (see UseRefusalWatch): it empties the server's animation
+                // queues and cancels the stuck turn; the retry then gets a fresh server turn.
+                bool jumped = TryUseCheckJump(now, "for the retry");
+                // Without a jump: face the corpse for the retry. Since 2026-10-04 the bot leaves the
+                // turn to the server; if the server can't turn the character any more, a corpse already
+                // in front may still open (mid-stall, 06:28:19, a use by hand with the macro off
                 // opened one - the only open in those 13 minutes; whether it was faced isn't logged).
-                if (_targetCorpseId != 0 && Host.HasTurnToHeading
+                if (!jumped && _targetCorpseId != 0 && Host.HasTurnToHeading
                     && TryGetHeadingToObject(_targetCorpseId, out double faceDeg, out double faceErr, out _)
                     && faceErr > 2.0)
                 {
@@ -2465,7 +2524,8 @@ public sealed partial class RynthAiPlugin
             case UseRefusalWatch.Verdict.Stuck:
             {
                 FlightRecorderSignal.Dump(Host, "use check: server refuses every use");
-                Log($"[RynthAi] Use check: the server answers every use but nothing opens ({_useRefusals.Refusals} refusals on {RefusedList()}), the clean stop and retry didn't help - looting paused {_useRefusals.BackoffMs / 60_000} min, then one corpse is tried again.");
+                Log($"[RynthAi] Use check: the server answers every use but nothing opens ({_useRefusals.Refusals} refusals on {RefusedList()}), the clean stop{(_useCheckJumpAt != 0 ? ", the jump" : "")} and retry didn't help - looting paused {_useRefusals.BackoffMs / 60_000} min, then one corpse is tried again{(Host.HasTapJump ? " after a jump" : "")}.");
+                _useCheckJumpAt = 0;
                 if (!_useStuckAnnounced)
                 {
                     _useStuckAnnounced = true;
@@ -2475,7 +2535,8 @@ public sealed partial class RynthAiPlugin
                 break;
             }
             case UseRefusalWatch.Verdict.StillStuck:
-                Log($"[RynthAi] Use check: still refused - next try in {_useRefusals.BackoffMs / 60_000} min.");
+                Log($"[RynthAi] Use check: still refused{(_useCheckJumpAt != 0 ? " after the jump" : "")} - next try in {_useRefusals.BackoffMs / 60_000} min.");
+                _useCheckJumpAt = 0;
                 ResetCorpseTarget();
                 break;
             case UseRefusalWatch.Verdict.Recovered:
@@ -2485,6 +2546,35 @@ public sealed partial class RynthAiPlugin
                 _useStuckAnnounced = false;
                 break;
         }
+    }
+
+    /// <summary>When the use check last jumped (0 = not since the last open).</summary>
+    private long _useCheckJumpAt;
+
+    /// <summary>
+    /// One jump in place for the use check. On ACE the jump (0xF61B, the keyboard path: TapJump)
+    /// is the only in-world action that empties the server's animation queues for the character
+    /// (Player.HandleActionJump: RemoveLinkAnimations drains MotionTableManager.PendingAnimations,
+    /// MotionInterp.PendingMotions.Clear(), IsAnimating = false) and it cancels the stuck walk/turn
+    /// (GameActionJump -> StopExistingMoveToChains2). JumpNonAutonomous (0xF7C9) is not used: ACE
+    /// has no handler for it. Not while the pacer has an action out (a jump in Magic stance fails a
+    /// cast on the server).
+    /// </summary>
+    private bool TryUseCheckJump(long now, string why)
+    {
+        if (!Host.HasTapJump)
+            return false;
+        if (ActionPacer.Outstanding(Host, out var pending) && pending != null)
+        {
+            Log($"[RynthAi] Use check: no jump {why} - the server still owes an answer to {ActionPacer.Describe(pending.Kind, pending.Label)}.");
+            return false;
+        }
+        Host.SetAutoRunBy("Loot/UseCheck", false);
+        bool ok = Host.TapJump();
+        if (ok)
+            _useCheckJumpAt = now;
+        Log($"[RynthAi] Use check: jump {why} (clears the server's stuck animation queue; a relog was the only other fix) ok={ok}.");
+        return ok;
     }
 
     private string RefusedList() =>
@@ -2511,6 +2601,7 @@ public sealed partial class RynthAiPlugin
     private void ResetUseRefusalState()
     {
         _useRefusals.Reset();
+        _useCheckJumpAt = 0;
         _useStuckAnnounced = false;
         _lootWedgeAnnounced = false;
         _consecutiveLootTimeouts = 0;

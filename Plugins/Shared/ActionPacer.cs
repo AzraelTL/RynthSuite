@@ -25,10 +25,30 @@
 //    * While one is outstanding, RynthAi starts no other one (MayStart; mode changes
 //      are refused right at ChangeCombatModeFor) and moves or turns the character
 //      only to stop real movement (MoveAudit asks HoldsMovement).
-//    * Heals keep their priority: a heal may go ahead of a corpse/door use the server
-//      hasn't answered after HealAfterWorldUseMs (EmergencyAfterWorldUseMs at
-//      Emergency Heal At), and one heal may follow a cast whose result is already in
-//      (the server queues one cast behind the recoil).
+//    * Heals keep some priority: at Emergency Heal At a heal may go ahead of a corpse/door
+//      use the server hasn't answered after EmergencyAfterWorldUseMs, and one heal may
+//      follow a cast whose result is already in (the server queues one cast behind the
+//      recoil). A heal under the plain Heal line waits for the use's answer (2026-10-06,
+//      below: an action during the use's server turn stops that turn for good).
+//    * And nothing starts while the character is still animating: the client's own motion
+//      queue (CMotionInterp pending motions, the engine's cast gate: GetCastBusyState) must
+//      be empty, for uses, kits, potions, casts, stance changes, wields and the item
+//      managers' moves (GestureHolds). Melee/missile attack repeats are exempt (MayStart
+//      with gestureGate false). Time limit GestureHoldMaxMs (GestureEmergencyMaxMs for an
+//      emergency heal), logged, like Combat/CastGateWatchdog for casts.
+//
+//  Why the animation gate (2026-10-06 afternoon, ops/overnight/2026-10-06-turnto-stall.md,
+//  replayed through ACE's own physics code): on ACE a use in reach is finished by the
+//  server's MoveToManager turning the character (TurnRight on the server's copy of the
+//  motion state). Every server motion for the character (a swing, a kit, a cast gesture,
+//  a stance) is applied with MotionInterp.apply_raw_movement, which rewrites the
+//  interpreted TurnCommand from the raw state (none) and so stops that TurnRight; the
+//  MoveToManager is never told (its FailProgressCount is counted but never acted on) and
+//  stays Initialized, which keeps the player "moving or animating", so Player_Tick never
+//  runs the use's callback either. The use is answered only when the next use fails it:
+//  "UseDone with no error, nothing opens", the stall's signature. Starting nothing while
+//  the character animates, and nothing while a use's turn is unanswered, keeps every
+//  server motion out of every server turn.
 //
 //  Opt-in (Enabled, RynthAi sets it at Init); off = every call goes through as before.
 //  Linked into RynthAi only. UseAudit reports its sends through UseAudit.AfterSend.
@@ -98,9 +118,14 @@ internal static class ActionPacer
     public const long ModeSettleMs = 800;
     /// <summary>A wield that reads done: a short settle for the wield motion.</summary>
     public const long WieldSettleMs = 150;
-    /// <summary>A heal may go ahead of a door/corpse use unanswered this long (the server cancels the walk cleanly).</summary>
-    public const long HealAfterWorldUseMs = 1000;
+    /// <summary>At Emergency Heal At a heal may go ahead of a door/corpse use unanswered this long. It stops
+    /// the server's walk/turn to that object (the use is then answered by the next one); a plain heal waits.</summary>
     public const long EmergencyAfterWorldUseMs = 300;
+    /// <summary>The client's motion queue reading busy this long is taken as stuck: the action goes (logged).
+    /// Same backstop as Combat/CastGateWatchdog (no real gesture, stance or swing lasts this long).</summary>
+    public const long GestureHoldMaxMs = 4000;
+    /// <summary>An emergency heal waits for the character's animation at most this long.</summary>
+    public const long GestureEmergencyMaxMs = 1500;
     /// <summary>A heal behind a stance change: once the client has read the new mode this long.</summary>
     public const long HealAfterModeReadMs = 300;
     /// <summary>An engine without UseDone: an action counts as answered after this (no real pacing).</summary>
@@ -112,6 +137,10 @@ internal static class ActionPacer
     // Counters for /ra pace and the periodic summary.
     private static long _started, _answered, _timedOut, _sentOverOutstanding, _modeRefused, _modeSkipped;
     private static long _heldStarts, _heldMoves, _healsAhead;
+    private static long _gestureHolds, _gestureLimits;
+    private static long _gestureBusySince;      // when the client's motion queue was first seen busy (0 = clear)
+    private static bool _gestureOverride;       // the hold limit passed: open until the queue reads clear
+    private static readonly HashSet<string> _gestureLogged = new();
     private static long _maxWaitMs;
     private static string _maxWaitWhat = "";
     private static readonly Dictionary<string, int> _holdsByWho = new();
@@ -126,6 +155,8 @@ internal static class ActionPacer
     public static long HeldStarts => _heldStarts;
     public static long HeldMoves => _heldMoves;
     public static long HealsAhead => _healsAhead;
+    public static long GestureHoldCount => _gestureHolds;
+    public static long GestureLimits => _gestureLimits;
 
     /// <summary>Back to a fresh load (Init, logout, tests). Enabled is left as it is.</summary>
     public static void Reset()
@@ -135,6 +166,11 @@ internal static class ActionPacer
             _cur = null;
             _started = _answered = _timedOut = _sentOverOutstanding = _modeRefused = _modeSkipped = 0;
             _heldStarts = _heldMoves = _healsAhead = 0;
+            _gestureHolds = _gestureLimits = 0;
+            _swingSentMs = 0; _swingSeenBusy = false; _swingHolds = 0; _swingLogged.Clear();
+            _gestureBusySince = 0;
+            _gestureOverride = false;
+            _gestureLogged.Clear();
             _maxWaitMs = 0;
             _maxWaitWhat = "";
             _holdsByWho.Clear();
@@ -279,10 +315,20 @@ internal static class ActionPacer
 
     /// <summary>
     /// May <paramref name="who"/> send a use, a cast or a mode change now? False (with why) while
-    /// another action waits for the server, except the heal rules in the file header. One log
-    /// line per outstanding action and subsystem.
+    /// another action waits for the server, except the heal rules in the file header, and while
+    /// the character is still animating (<see cref="GestureHolds"/>; skipped with
+    /// <paramref name="gestureGate"/> false: melee/missile attack repeats). One log line per
+    /// outstanding action (or animation) and subsystem.
     /// </summary>
-    public static bool MayStart(RynthCoreHost host, string who, HealNeed heal, out string why)
+    public static bool MayStart(RynthCoreHost host, string who, HealNeed heal, out string why, bool gestureGate = true)
+    {
+        if (!Enabled) { why = ""; return true; }
+        if (!OutstandingAllows(host, who, heal, out why)) return false;
+        if (gestureGate && GestureHolds(host, who, heal, out why)) return false;
+        return true;
+    }
+
+    private static bool OutstandingAllows(RynthCoreHost host, string who, HealNeed heal, out string why)
     {
         why = "";
         PacedAction? a = Current(host);
@@ -291,8 +337,7 @@ internal static class ActionPacer
 
         if (heal != HealNeed.None)
         {
-            if (a.Kind == PacedKind.WorldUse
-                && age >= (heal == HealNeed.Emergency ? EmergencyAfterWorldUseMs : HealAfterWorldUseMs))
+            if (a.Kind == PacedKind.WorldUse && heal == HealNeed.Emergency && age >= EmergencyAfterWorldUseMs)
             {
                 lock (Gate) _healsAhead++;
                 Log(host, $"[Pace] {who}: the heal goes ahead of {Describe(a.Kind, a.Label)} (unanswered for {age} ms)");
@@ -322,6 +367,117 @@ internal static class ActionPacer
         }
         if (log) Log(host, $"[Pace] {who} waits: {why}");
         return false;
+    }
+
+    /// <summary>
+    /// True (with why) while the character is still animating: the client's own motion queue
+    /// (CMotionInterp pending motions, read by the engine as GetCastBusyState) is not empty.
+    /// The client animates exactly the motions the server sends for the character, a moment
+    /// after the server applies them, so an empty queue means the server's copy is done too.
+    /// Past GestureHoldMaxMs (GestureEmergencyMaxMs for an emergency heal) the action goes,
+    /// logged once per busy spell. No opinion (false) on an engine without the gate.
+    /// </summary>
+    public static bool GestureHolds(RynthCoreHost host, string who, HealNeed heal, out string why)
+    {
+        why = "";
+        if (!Enabled) return false;
+        bool busy;
+        try { busy = host.HasGetCastBusyState && host.GetCastBusyState() != 0; } catch { busy = false; }
+        long now = NowMs();
+        if (SwingHolds(host, who, heal, busy, now, out why)) return true;
+        string? line = null;
+        lock (Gate)
+        {
+            if (!busy)
+            {
+                if (_gestureOverride)
+                    line = "[Pace] the character's animation queue reads clear again";
+                _gestureBusySince = 0;
+                _gestureOverride = false;
+                _gestureLogged.Clear();
+            }
+            else
+            {
+                if (_gestureBusySince == 0) _gestureBusySince = now;
+                long age = now - _gestureBusySince;
+                if (!_gestureOverride && age >= GestureHoldMaxMs)
+                {
+                    _gestureOverride = true;
+                    _gestureLimits++;
+                    line = $"[Pace] {who}: the character's animation queue has read busy for {age} ms - taken as stuck, going on";
+                }
+                if (_gestureOverride)
+                {
+                    busy = false;
+                }
+                else if (heal == HealNeed.Emergency && age >= GestureEmergencyMaxMs)
+                {
+                    _gestureLimits++;
+                    line = $"[Pace] {who}: emergency heal after {age} ms of animation - going on";
+                    busy = false;
+                }
+                else
+                {
+                    _gestureHolds++;
+                    _holdsByWho[who] = _holdsByWho.TryGetValue(who, out int n) ? n + 1 : 1;
+                    why = $"the character is still animating ({age} ms)";
+                    if (_gestureLogged.Add(who))
+                        line = $"[Pace] {who} waits: {why}";
+                }
+            }
+        }
+        if (line != null) Log(host, line);
+        return busy;
+    }
+
+    // A swing sent but not animating yet (Drakkon 2026-10-06 16:45:37): the wand's use went 110 ms
+    // after a MeleeAttack, before the swing showed in the client's motion queue, so the motion gate
+    // let it through; the switch landed on the swing the server was starting and the next cast was
+    // held open. After CombatManager sends an attack, nothing else starts until the client's motion
+    // queue has read busy and then clear (the swing played), or SwingStartMaxMs passes.
+    public const long SwingStartMaxMs = 1500;
+    public const long SwingEmergencyMaxMs = 500;
+    private static long _swingSentMs;
+    private static bool _swingSeenBusy;
+    private static long _swingHolds;
+    private static readonly HashSet<string> _swingLogged = new();
+    public static long SwingHoldCount => _swingHolds;
+
+    /// <summary>CombatManager sent a melee or missile attack.</summary>
+    public static void NoteAttackSent()
+    {
+        lock (Gate)
+        {
+            _swingSentMs = NowMs();
+            _swingSeenBusy = false;
+            _swingLogged.Clear();
+        }
+    }
+
+    private static bool SwingHolds(RynthCoreHost host, string who, HealNeed heal, bool busy, long now, out string why)
+    {
+        why = "";
+        string? line = null;
+        bool hold = false;
+        lock (Gate)
+        {
+            if (_swingSentMs == 0) return false;
+            long age = now - _swingSentMs;
+            if (busy) _swingSeenBusy = true;
+            if ((_swingSeenBusy && !busy) || age >= SwingStartMaxMs)
+            {
+                _swingSentMs = 0;
+            }
+            else if (!_swingSeenBusy && !(heal == HealNeed.Emergency && age >= SwingEmergencyMaxMs))
+            {
+                hold = true;
+                _swingHolds++;
+                why = $"a swing sent {age} ms ago hasn't started animating yet";
+                if (_swingLogged.Add(who)) line = $"[Pace] {who} waits: {why}";
+            }
+        }
+        if (line != null) Log(host, line);
+        return hold;
     }
 
     /// <summary>
@@ -403,6 +559,7 @@ internal static class ActionPacer
             lines.Add($"  Sent {_started}, answered {_answered}, no answer in time {_timedOut}{(_lastTimeout.Length > 0 ? $" (last: {_lastTimeout})" : "")}");
             lines.Add($"  Starts held {_heldStarts}, moves held {_heldMoves}, heals let ahead {_healsAhead}, sent over an unanswered one {_sentOverOutstanding}");
             lines.Add($"  Mode changes refused while waiting {_modeRefused}, skipped (already in that mode) {_modeSkipped}");
+            lines.Add($"  Held while the character was animating {_gestureHolds}, animation time limits {_gestureLimits}");
             if (_maxWaitMs > 0) lines.Add($"  Longest wait seen: {_maxWaitMs} ms ({_maxWaitWhat})");
             if (_holdsByWho.Count > 0)
             {
@@ -460,6 +617,11 @@ internal static class ActionPacer
                 }
                 if (log)
                     Log(host, $"[Pace] {who}: change to {ModeName(mode)} mode held ({why}): {Describe(a.Kind, a.Label)} sent {NowMs() - a.SentMs} ms ago by {a.Who} has no answer yet (a mode change now would cancel it on the server)");
+                return false;
+            }
+            if (GestureHolds(host, "mode:" + who, HealNeed.None, out _))
+            {
+                lock (Gate) _modeRefused++;
                 return false;
             }
         }

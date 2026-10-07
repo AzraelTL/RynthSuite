@@ -64,6 +64,7 @@ internal static class Program
         OwnCorpseTests.Register(runner);
         UseRefusalTests.Register(runner);
         VitalsTests.Register(runner);
+        MultiTargetTests.Register(runner);
         CastSafetyTests.Register(runner);
         HealLatencyTests.Register(runner);
         BlastTests.Register(runner);

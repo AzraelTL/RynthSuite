@@ -965,6 +965,7 @@ internal sealed class LegacyDashboardRenderer
                 StopLootingWhenPackFull    = s.StopLootingWhenPackFull,
                 StopMacroWhenPackFull      = s.StopMacroWhenPackFull,
                 RestamAt                   = s.RestamAt,
+                RestamTo                   = s.RestamTo,
                 GetManaAt                  = s.GetManaAt,
                 TopOffHP                   = s.TopOffHP,
                 TopOffStam                 = s.TopOffStam,
@@ -1172,6 +1173,7 @@ internal sealed class LegacyDashboardRenderer
             s.StopLootingWhenPackFull    = p.StopLootingWhenPackFull;
             s.StopMacroWhenPackFull      = p.StopMacroWhenPackFull;
             s.RestamAt                   = p.RestamAt;
+            s.RestamTo                   = p.RestamTo ?? 0;
             s.GetManaAt                  = p.GetManaAt;
             s.TopOffHP                   = p.TopOffHP;
             s.TopOffStam                 = p.TopOffStam;
@@ -1630,6 +1632,7 @@ internal sealed class LegacyDashboardRenderer
         dst.StopLootingWhenPackFull  = tmp.StopLootingWhenPackFull;
         dst.StopMacroWhenPackFull    = tmp.StopMacroWhenPackFull;
         dst.RestamAt                 = tmp.RestamAt;
+        dst.RestamTo                 = tmp.RestamTo;
         dst.GetManaAt                = tmp.GetManaAt;
         dst.TopOffHP                 = tmp.TopOffHP;
         dst.TopOffStam               = tmp.TopOffStam;

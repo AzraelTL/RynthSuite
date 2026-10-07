@@ -43,6 +43,12 @@ public class WorldObjectCache
     private readonly HashSet<int> _landscape = new();   // has physics position
     private readonly HashSet<int> _inventory = new();   // no physics position
     private readonly Dictionary<int, float> _healthRatios = new(); // last known health ratio per object (0-1)
+    // Ids whose ratio is an estimate from our own damage lines (a ring, wall or chain spell's other
+    // targets: the server sends health only for the selected target). A real health update replaces
+    // the estimate and takes the id out of this set.
+    private readonly HashSet<int> _estimatedHealth = new();
+    /// <summary>The lowest an estimate goes: 0 means dead to every reader, and only the server says that.</summary>
+    internal const float EstimatedHealthFloor = 0.01f;
 
     // OnCreateObject IDs pending classification
     private readonly Queue<uint> _pending = new();
@@ -199,6 +205,7 @@ public class WorldObjectCache
         _creatures.Remove(sid);
         _landscape.Remove(sid);
         _healthRatios.Remove(sid);
+        _estimatedHealth.Remove(sid);
         _classifyRetry.Remove(id);
         _slowRetry.Remove(id);
         _reclassifySkipState.Remove(id);
@@ -234,6 +241,37 @@ public class WorldObjectCache
             return _healthRatios.TryGetValue(id, out float v) ? v : -1f;
     }
 
+    /// <summary>
+    /// Lowers a creature's health by our own hit when the server sends it no health of its own: the
+    /// other targets of a ring, wall or chain spell (ACE pushes health only for the selected target).
+    /// <paramref name="fraction"/> is damage / max health, or 0 when the max is unknown, which only
+    /// marks the creature as hurt (0.99). Never goes to 0 (dead is the server's call: the kill
+    /// notice, a health update or the corpse) and never raises a known value. A real health update
+    /// overwrites the estimate.
+    /// </summary>
+    public void ApplyDamageEstimate(int id, double fraction)
+    {
+        lock (_gate)
+        {
+            if (_playerId != 0 && unchecked((uint)id) == _playerId) return;
+            float cur = _healthRatios.TryGetValue(id, out float v) ? v : 1f;
+            if (cur <= 0f) return;
+            float next = fraction > 0
+                ? (float)Math.Max(EstimatedHealthFloor, cur - fraction)
+                : Math.Min(cur, 0.99f);
+            if (next >= cur && _healthRatios.ContainsKey(id)) return;
+            _healthRatios[id] = next;
+            _estimatedHealth.Add(id);
+        }
+    }
+
+    /// <summary>True when <paramref name="id"/>'s health ratio is our estimate rather than the server's.</summary>
+    public bool IsHealthEstimated(int id)
+    {
+        lock (_gate)
+            return _estimatedHealth.Contains(id);
+    }
+
     public void OnUpdateHealth(uint id, float healthRatio)
     {
         lock (_gate)
@@ -243,6 +281,7 @@ public class WorldObjectCache
 
         int sid = (int)id;
         _healthRatios[sid] = Math.Clamp(healthRatio, 0f, 1f);
+        _estimatedHealth.Remove(sid);   // the server's number replaces any estimate
 
         if (!_creatures.Add(sid))
             return; // creature already known — ratio updated above, nothing more to do

@@ -871,7 +871,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         ["TargetNoProgressTimeoutSec"] = (0, 300), ["GiveQueueIntervalMs"] = (50, 2000),
         ["BowArcVelocity"] = (10, 60), ["CrossbowArcVelocity"] = (10, 80), ["AtlatlArcVelocity"] = (10, 60), ["MagicArcVelocity"] = (10, 60), ["MissileArcClearance"] = (0, 3),
         ["HealAt"] = (0, 100), ["EmergencyHealAt"] = (0, 100),
-        ["StaminaToHealthAt"] = (0, 100), ["StaminaToHealthMinStamina"] = (0, 100), ["RestamAt"] = (0, 100), ["GetManaAt"] = (0, 100),
+        ["StaminaToHealthAt"] = (0, 100), ["StaminaToHealthMinStamina"] = (0, 100), ["RestamAt"] = (0, 100), ["RestamTo"] = (0, 100), ["GetManaAt"] = (0, 100),
         ["TopOffHP"] = (0, 100), ["TopOffStam"] = (0, 100), ["TopOffMana"] = (0, 100),
         ["HealOthersAt"] = (0, 100), ["RestamOthersAt"] = (0, 100), ["InfuseOthersAt"] = (0, 100),
         ["MeleeAttackPower"] = (-1, 100), ["MissileAttackPower"] = (-1, 100),

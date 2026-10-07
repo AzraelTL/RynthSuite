@@ -131,6 +131,11 @@ public sealed class LegacyUiSettings
     public bool StopLootingWhenPackFull = true;
     public bool StopMacroWhenPackFull = false;
     public int RestamAt = 30;
+    /// <summary>
+    /// In combat, once stamina drops under Re-stam At, keep recharging until it reaches this %
+    /// (one Revitalize often doesn't get far). 0, or not above Re-stam At = one recharge, as before.
+    /// </summary>
+    public int RestamTo = 0;
     public int GetManaAt = 40;
     public int TopOffHP = 95;
     public int TopOffStam = 95;
@@ -796,6 +801,7 @@ public sealed class SettingsBridgePayload
     public bool StopLootingWhenPackFull { get; set; }
     public bool StopMacroWhenPackFull { get; set; }
     public int RestamAt { get; set; }
+    public int? RestamTo { get; set; }
     public int GetManaAt { get; set; }
     public int TopOffHP { get; set; }
     public int TopOffStam { get; set; }
