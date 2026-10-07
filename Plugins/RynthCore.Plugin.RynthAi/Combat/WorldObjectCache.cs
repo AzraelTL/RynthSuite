@@ -1136,8 +1136,62 @@ public class WorldObjectCache
         uint uid = unchecked((uint)id);
         if (stype == DecalTypeKey)
             return _host.HasGetObjectWcid && _host.TryGetObjectWcid(uid, out uint wcid) ? unchecked((int)wcid) : defaultValue;
+        if ((stype & 0xFFFFFF00u) == DecalTypeKey)
+            return GetDecalLongKey(uid, stype, defaultValue);
         if (!_host.HasGetObjectIntProperty) return defaultValue;
         return _host.TryGetObjectIntProperty(uid, stype, out int v) ? v : defaultValue;
+    }
+
+    /// <summary>
+    /// Decal's other synthetic LongValueKeys (0x0D000001-0x0D00002A, Decal.Adapter's numbering),
+    /// read as the game property each one is. VTank profiles use them: LootSnobV4 has 336 rules on
+    /// MaxDamage and 109 on Coverage. They were read as STypeInt ids, which no object has, so
+    /// they were always 0 and those rules never matched (until 2026-10-07). Icons are the
+    /// portal.dat index without its 0x06000000 base, as Decal gives them. Keys with no property
+    /// here (landblock, monarch, physics flags, spell counts) answer the default.
+    /// </summary>
+    private int GetDecalLongKey(uint uid, uint key, int defaultValue)
+    {
+        switch (key)
+        {
+            case 0x0D000001: return DecalIcon(uid, 8, defaultValue);    // Icon
+            case 0x0D000008: { uint s = GetDataIdProperty(unchecked((int)uid), 28); return s != 0 ? unchecked((int)s) : defaultValue; } // AssociatedSpell
+            case 0x0D000029: return DecalIcon(uid, 50, defaultValue);   // IconOverlay
+            case 0x0D00002A: return DecalIcon(uid, 52, defaultValue);   // IconUnderlay
+        }
+        uint stype = DecalIntStype(key);
+        if (stype == 0 || !_host.HasGetObjectIntProperty) return defaultValue;
+        return _host.TryGetObjectIntProperty(uid, stype, out int v) ? v : defaultValue;
+    }
+
+    /// <summary>The STypeInt a Decal synthetic long key is, or 0 (not an int property).</summary>
+    public static uint DecalIntStype(uint key) => key switch
+    {
+        0x0D000004 => 6,     // ItemSlots      -> ItemsCapacity
+        0x0D000005 => 7,     // PackSlots      -> ContainersCapacity
+        0x0D000006 => 12,    // StackCount     -> StackSize
+        0x0D000007 => 11,    // StackMax       -> MaxStackSize
+        0x0D00000B => 10,    // WieldingSlot   -> CurrentWieldedLocation
+        0x0D00000D => 4,     // Coverage       -> ClothingPriority
+        0x0D00000E => 9,     // EquipableSlots -> ValidLocations
+        0x0D00000F => 51,    // EquipType      -> CombatUse
+        0x0D000010 => 18,    // IconOutline    -> UiEffects
+        0x0D000011 => 50,    // MissileType    -> AmmoType
+        0x0D000012 => 16,    // UsageMask      -> ItemUseable
+        0x0D000014 => 152,   // HookMask       -> HookItemType
+        0x0D000015 => 151,   // HookType
+        0x0D00001A => 1,     // Category       -> ItemType
+        0x0D00001F => 49,    // WeapSpeed      -> WeaponTime
+        0x0D000020 => 48,    // EquipSkill     -> WeaponSkill
+        0x0D000021 => 45,    // DamageType
+        0x0D000022 => 44,    // MaxDamage      -> Damage (the appraisal's weapon profile)
+        _ => 0,
+    };
+
+    private int DecalIcon(uint uid, uint did, int defaultValue)
+    {
+        uint v = GetDataIdProperty(unchecked((int)uid), did);
+        return v != 0 ? unchecked((int)(v & 0x00FFFFFFu)) : defaultValue;
     }
 
     /// <summary>
