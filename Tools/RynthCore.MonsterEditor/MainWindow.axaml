@@ -124,6 +124,14 @@
                     </DataTemplate></DataGridTemplateColumn.CellTemplate>
                 </DataGridTemplateColumn>
 
+                <DataGridTemplateColumn Header="Wl" Width="26" CanUserResize="False" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Classes="light" Content="Wl"
+                                      IsChecked="{Binding UseWall, Mode=TwoWay}"
+                                      ToolTip.Tip="Wall — War wall spells (a row of projectiles straight ahead; turns to face the target first). Needs Wall Range in the settings."/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
                 <!-- Name -->
                 <DataGridTemplateColumn Header="Name" Width="*" MinWidth="100">
                     <DataGridTemplateColumn.CellTemplate><DataTemplate>

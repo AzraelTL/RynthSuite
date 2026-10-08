@@ -114,13 +114,14 @@ public sealed partial class RynthNavPlugin
         long now = NowMs;
         if (landblockChanged && _hasPose)
         {
-            try { _tileHere = File.Exists(Path.Combine(NavDataDir, $"nav_{CurrentLandblock:X4}.tile")) ? 1 : 0; } catch { _tileHere = -1; }
+            // A dungeon's tile is its landblock's surface: no navmesh here (RynthNavPlugin.InDungeon).
+            try { _tileHere = !InDungeon(_cellId) && File.Exists(Path.Combine(NavDataDir, $"nav_{CurrentLandblock:X4}.tile")) ? 1 : 0; } catch { _tileHere = -1; }
         }
         if (now < _nextInfoMs || now - Interlocked.Read(ref _lastStatusPollMs) > PanelPollWindowMs) return;
         _nextInfoMs = now + InfoRefreshMs;
         if (Interlocked.Exchange(ref _infoBusy, 1) != 0) return;
         uint lb = CurrentLandblock;
-        bool hasPose = _hasPose;
+        bool hasPose = _hasPose, dungeon = InDungeon(_cellId);
         Task.Run(() =>
         {
             try
@@ -129,7 +130,7 @@ public sealed partial class RynthNavPlugin
                 if (Directory.Exists(NavDataDir))
                     foreach (string _ in Directory.EnumerateFiles(NavDataDir, "nav_*.tile")) n++;
                 _tilesOnDisk = n;
-                if (hasPose) _tileHere = File.Exists(Path.Combine(NavDataDir, $"nav_{lb:X4}.tile")) ? 1 : 0;
+                if (hasPose) _tileHere = !dungeon && File.Exists(Path.Combine(NavDataDir, $"nav_{lb:X4}.tile")) ? 1 : 0;
             }
             catch { }
             finally { Interlocked.Exchange(ref _infoBusy, 0); }

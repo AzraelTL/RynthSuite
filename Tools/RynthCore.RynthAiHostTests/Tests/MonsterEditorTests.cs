@@ -43,7 +43,7 @@ internal static class MonsterEditorTests
             Name = "Olthoi", Category = "Olthoi nest", MatchExpression = "getcharintprop[25]>=200",
             Priority = 3, DamageType = "Acid", WeaponId = 0x50001234, Fester = true, Broadside = true,
             GravityWell = true, Imperil = true, Yield = true, Vuln = true, UseArc = true, UseRing = true,
-            UseStreak = true, UseBolt = false, UseBlast = true, ExVuln = "Fire", OffhandId = 2,
+            UseStreak = true, UseBolt = false, UseBlast = true, UseWall = true, ExVuln = "Fire", OffhandId = 2,
             PetDamage = "Cold", CustomDebuffs = "Corrosion Vulnerability Other, Fire Vulnerability Other VII",
         },
         new PluginRule { Name = "", Category = "Expression only", MatchExpression = "wobjectfindnearestbytemplatetype[1]" },

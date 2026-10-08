@@ -344,7 +344,7 @@ internal static class AfFileWriter
             5543 => "Neftet Recall",
             6321 => "Rynthid Recall",
             6322 => "Viridian Rise Recall",
-            _    => $"Spell {spellId}"
+            _    => NavPoint.RecallName(spellId)
         };
     }
 }

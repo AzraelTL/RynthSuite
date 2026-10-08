@@ -1840,6 +1840,24 @@ public class WorldObjectCache
         get { lock (_gate) return _hazardVersion; }
     }
 
+    /// <summary>
+    /// A dungeon cell the character took hotspot damage in ("You suffer 32 damage from acid!"):
+    /// registered and persisted like a sighted hazard, so the patrol reroutes around it now and
+    /// on every later visit. Outdoor cells (a 24 m land cell) are never registered. True when new.
+    /// </summary>
+    public bool RegisterDamageHazardCell(uint cellId, string source)
+    {
+        if (cellId == 0 || (cellId & 0xFFFF) < 0x0100) return false;
+        lock (_gate)
+        {
+            if (!_hazardCells.Add(cellId)) return false;
+            _hazardVersion++;
+        }
+        DungeonHazardStore.Append(cellId >> 16, cellId);
+        _host.Log($"[Hazard] took {source} damage in cell 0x{cellId:X8} (persisted)");
+        return true;
+    }
+
     public bool IsHazardCell(uint cellId)
     {
         lock (_gate)

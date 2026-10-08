@@ -51,6 +51,7 @@ internal static class LootCorpseTests
         r.Add("corpse close: an abandoned open corpse is closed once", AbandonedCorpseClosed);
         r.Add("corpse close: stopping the macro mid-loot closes the open corpse, not marked completed", MacroStopClosesCorpse);
         r.Add("loot pacing: a pickup waits for the last bend-down, and no retry is timed while it plays", PickupWaitsForAnimation);
+        r.Add("corpse close: not while the last item is between the corpse and the pack - it closes once the item is in the inventory", CloseWaitsForInventory);
     }
 
     // ── World set-up ──────────────────────────────────────────────────────────
@@ -484,6 +485,26 @@ internal static class LootCorpseTests
         Check.Eq(FakeHost.ExternalMoves.Count(m => m.Id == Gem), 1, "the retry window counts from when the character is still");
         TickFor(bot, 500);
         Check.Eq(FakeHost.ExternalMoves.Count(m => m.Id == Gem), 2, "then one retry");
+    }
+
+    // 2026-10-07: the client takes an item off the corpse list as soon as the move is sent; the
+    // corpse was closed then, and the character picked the item up after the corpse closed.
+    private static void CloseWaitsForInventory()
+    {
+        var bot = OpenCorpseAndSendPickup(closeSupported: true);
+        FakeHost.Containers[Gem] = 0x7FFFFFF0;   // off the corpse, not in a pack yet
+        TickFor(bot, 1500);
+        Check.Eq(FakeHost.Closes.Count, 0, "not closed while the item is on its way");
+        Check.False(Completed(bot), "not completed either");
+
+        FakeHost.Containers[Gem] = Player;       // in the main pack
+        for (int i = 0; i < 200 && FakeHost.Closes.Count == 0; i++)
+        {
+            bot.Tick(BotActivity.Looting);
+            Thread.Sleep(10);
+        }
+        Check.Eq(FakeHost.Closes.Count, 1, "closed once the item is in the inventory");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("pickup confirmed")), "and the pickup confirmed");
     }
 
     private static void TickFor(Bot bot, int ms)

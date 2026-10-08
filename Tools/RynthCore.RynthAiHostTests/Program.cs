@@ -69,6 +69,7 @@ internal static class Program
         HealLatencyTests.Register(runner);
         BlastTests.Register(runner);
         ArcWhenClearTests.Register(runner);
+        WallTests.Register(runner);
         UseAtLoginTests.Register(runner);
         LearnSpellsTests.Register(runner);
         AttackLatencyTests.Register(runner);
@@ -82,6 +83,9 @@ internal static class Program
         ItemInfoTests.Register(runner);
         NavOverlayTests.Register(runner);
         ActionPacingTests.Register(runner);
+        HazardEscapeTests.Register(runner);
+        ManaStoneChoiceTests.Register(runner);
+        CustomDebuffTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }

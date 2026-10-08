@@ -184,6 +184,14 @@ internal sealed class LegacyAdvancedSettingsUi
         catch { return false; }
     }
 
+    /// <summary>One cell of the Protections and Banes grid: ticked = cast it.</summary>
+    private void BuffToggle((string Buff, string Label) toggle)
+    {
+        bool on = !_settings.IsBuffDisabled(toggle.Buff);
+        if (ImGui.Checkbox($"{toggle.Label}##buff_{toggle.Buff}", ref on))
+            _settings.SetBuffEnabled(toggle.Buff, on);
+    }
+
     private void RenderTabContent(int tabIndex)
     {
         if (tabIndex < 0 || tabIndex >= _settings.AdvancedTabs.Length)
@@ -265,6 +273,9 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Checkbox("Patrol On Login", ref _settings.PatrolOnLogin);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Automatically starts dungeon patrol when RynthAi loads.");
+                ImGui.Checkbox("Escape Acid and Lava", ref _settings.EscapeHazards);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("When acid or lava hurts you, stop everything (combat, buffs, healing, looting)\nand walk back out the way you came. The spot is remembered so the patrol avoids it.\nTurn off for a character that walks through acid on purpose.");
                 ImGui.Checkbox("Enable Raycasting", ref _settings.EnableRaycasting);
 
                 ImGui.Separator();
@@ -496,12 +507,12 @@ internal sealed class LegacyAdvancedSettingsUi
                         "Below 200ms may cause fizzles or dropped casts on laggy servers.");
 
                 ImGui.SetNextItemWidth(180);
-                ImGui.SliderInt("Attack Spell Delay (ms)", ref _settings.AttackSpellIntervalMs, 250, 5000);
+                ImGui.SliderInt("Attack Spell Delay (ms)", ref _settings.AttackSpellIntervalMs, 0, 5000);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip(
-                        "Delay between offensive (war/void) COMBAT casts only.\n" +
-                        "Spacing casts ~1-2s (1500ms default) stops back-to-back\n" +
-                        "\"You're too busy!\" refusals that drop casts and cost kills.\n" +
+                        "Least time between offensive (war/void) COMBAT casts at one target.\n" +
+                        "The next cast also waits until the last one is finished (the server's\n" +
+                        "answer and the casting animation), so 0 = cast again as soon as it is.\n" +
                         "Does NOT affect buffing speed.");
 
                 ImGui.Spacing();
@@ -515,6 +526,12 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.InputInt("Min Blast Targets", ref _settings.MinBlastTargets);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("If this many monsters are within ring range, ring spells are used instead of arc/bolt/streak.");
+                ImGui.InputInt("Wall Range (0 = off)", ref _settings.WallRange);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Monster rules with Wall on cast their element's wall spell when enough monsters\n" +
+                                     "are within this many yards in the wall's path toward the target.\n" +
+                                     "The character turns to face the target first. 0 = no walls.");
+                ImGui.InputInt("Min Wall Targets", ref _settings.MinWallTargets);
 
                 ImGui.Spacing();
                 ImGui.Separator();
@@ -726,6 +743,31 @@ internal sealed class LegacyAdvancedSettingsUi
                         "Cast your own buff even when worn gear already gives that buff.\n" +
                         "For servers with buff augments, where your own cast is stronger or\n" +
                         "lasts longer. On by default: on retail it costs a few extra casts.");
+
+                ImGui.Spacing();
+                ImGui.Separator();
+                ImGui.Text("Protections and Banes");
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(
+                        "Untick a protection or bane to stop the bot casting it.\n" +
+                        "Unticked buffs are skipped and never hold the bot in Buffing.\n" +
+                        "All on by default.");
+                if (ImGui.BeginTable("##protsBanes", 2, ImGuiTableFlags.SizingStretchSame))
+                {
+                    ImGui.TableSetupColumn("Protections");
+                    ImGui.TableSetupColumn("Banes");
+                    ImGui.TableHeadersRow();
+                    int rows = Math.Max(BuffManager.ToggleProtections.Length, BuffManager.ToggleBanes.Length);
+                    for (int i = 0; i < rows; i++)
+                    {
+                        ImGui.TableNextRow();
+                        ImGui.TableSetColumnIndex(0);
+                        if (i < BuffManager.ToggleProtections.Length) BuffToggle(BuffManager.ToggleProtections[i]);
+                        ImGui.TableSetColumnIndex(1);
+                        if (i < BuffManager.ToggleBanes.Length) BuffToggle(BuffManager.ToggleBanes[i]);
+                    }
+                    ImGui.EndTable();
+                }
 
                 ImGui.Spacing();
                 ImGui.Separator();

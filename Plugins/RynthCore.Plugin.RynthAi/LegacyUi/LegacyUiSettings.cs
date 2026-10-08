@@ -159,6 +159,12 @@ public sealed class LegacyUiSettings
     // degrees) toward the target; otherwise its other shape. 0 = off: Blast is just a shape.
     public int BlastRange = 0;
     public int MinBlastTargets = 3;
+    // Wall spells (2026-10-08): with WallRange > 0, a rule with Wall on casts its element's wall
+    // (Slithering Flames, Os' Wall...) when MinWallTargets monsters are within WallRange in the
+    // wall's path toward the target, turning to face the target first (a wall flies along the
+    // caster's facing). Below a due ring, above a due blast. 0 = off: no walls at all.
+    public int WallRange = 0;
+    public int MinWallTargets = 3;
     // Nav point reach (VTank "Follow/Nav Min Distance"), yards: how close nav gets to each
     // nav point before moving on to the next, and how close Follow gets to its leader.
     // Metas set it as FollowNavMin (yards) or VTank's NavCloseStopRange (landblock units,
@@ -202,6 +208,13 @@ public sealed class LegacyUiSettings
     /// </summary>
     public bool LootOwnCorpse = true;
     /// <summary>
+    /// Out of acid or lava at once (RynthAiPlugin.HazardEscape.cs): the first hotspot hit stops
+    /// everything and walks back out, and the spot becomes a hazard the patrol avoids. On by
+    /// default (2026-10-07); off for characters that walk through acid on purpose (then the spot
+    /// isn't learned either). A profile saved before this setting loads it as on.
+    /// </summary>
+    public bool EscapeHazards = true;
+    /// <summary>
     /// After a death and respawn, travel back to where you died (RynthNav, outdoors only), fight
     /// on the way as usual, recover the corpse, then carry on. Off by default.
     /// </summary>
@@ -237,6 +250,35 @@ public sealed class LegacyUiSettings
     /// as on for good (the behaviour before 2026-10-05).
     /// </summary>
     public bool CastBuffsOverItemBuffs = true;
+    /// <summary>
+    /// Buff base names the player unticked in Buffing settings (the Protections and Banes grid,
+    /// e.g. "Fire Protection Self", "Flame Bane"): left out of the buff list, so never cast and
+    /// never waited on. Empty = every buff on, which is also what a profile saved before this
+    /// setting existed loads as. Replaced, not edited in place (SetBuffEnabled), so a reader
+    /// holding the old list never sees it change under it.
+    /// </summary>
+    public List<string> DisabledBuffs
+    {
+        get => _disabledBuffs;
+        set => _disabledBuffs = value ?? new List<string>();
+    }
+    private List<string> _disabledBuffs = new();
+
+    public bool IsBuffDisabled(string buffBaseName)
+    {
+        foreach (string b in _disabledBuffs)
+            if (string.Equals(b, buffBaseName, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    public void SetBuffEnabled(string buffBaseName, bool enabled)
+    {
+        if (enabled == !IsBuffDisabled(buffBaseName)) return;
+        var next = new List<string>(_disabledBuffs);
+        if (enabled) next.RemoveAll(b => string.Equals(b, buffBaseName, StringComparison.OrdinalIgnoreCase));
+        else next.Add(buffBaseName);
+        _disabledBuffs = next;
+    }
     public bool StartMacroOnLogin;
     public bool PatrolOnLogin;
     /// <summary>
@@ -631,6 +673,10 @@ public sealed class MonsterRule
     /// <summary>Blast spells (Flame Blast, Frost Blast...: a spread of projectiles). Off in files
     /// from before 2026-10-03. Wins over Bolt when both are on; see CombatManager.PickBaseShape.</summary>
     public bool UseBlast { get; set; }
+    /// <summary>Wall spells (Slithering Flames, Os' Wall...: a row of projectiles flying straight
+    /// ahead). An override like the ring, cast only with Wall Range on and enough monsters in the
+    /// wall's path; a wall-only rule casts Bolt between walls. Off in files from before 2026-10-08.</summary>
+    public bool UseWall { get; set; }
     public string ExVuln { get; set; } = "None";
     /// <summary>The off hand for this rule: 0 = the global setting (OffhandDefault), 1 Auto,
     /// 2 Shield, 3 Offhand weapon, 4 None (OffhandRules.Rule*); any other value is a listed
@@ -822,11 +868,16 @@ public sealed class SettingsBridgePayload
 
     // Spell Combat
     public int SpellCastIntervalMs { get; set; }
-    public int AttackSpellIntervalMs { get; set; }
+    // Nullable since 0 became a real value (2026-10-08): a file without it keeps the default.
+    public int? AttackSpellIntervalMs { get; set; }
     public bool CastDispelSelf { get; set; }
     public int MinRingTargets { get; set; }
     public int BlastRange { get; set; }
     public int MinBlastTargets { get; set; } = 3;   // absent from an older engine: keep the default
+    // Walls (2026-10-08): null = sent by an engine without the Wall Range control, which then
+    // leaves the plugin's own values alone (a profile's or a meta's) instead of zeroing them.
+    public int? WallRange { get; set; }
+    public int? MinWallTargets { get; set; }
     public int MinSkillLevelTier1 { get; set; }
     public int MinSkillLevelTier2 { get; set; }
     public int MinSkillLevelTier3 { get; set; }
@@ -883,6 +934,8 @@ public sealed class SettingsBridgePayload
     // Nullable: an engine that predates the setting doesn't send it, and a save from its
     // Settings face must leave the setting alone rather than force it either way.
     public bool? CastBuffsOverItemBuffs { get; set; }
+    // Null (absent) likewise leaves the unticked prots/banes alone; an empty list ticks them all.
+    public List<string>? DisabledBuffs { get; set; }
     public int BuffMinSkillLevelTier1 { get; set; }
     public int BuffMinSkillLevelTier2 { get; set; }
     public int BuffMinSkillLevelTier3 { get; set; }
@@ -908,6 +961,7 @@ public sealed class SettingsBridgePayload
     // Nullable, as CastBuffsOverItemBuffs: an engine that predates them doesn't send them,
     // and its save must leave them alone.
     public bool? LootOwnCorpse { get; set; }
+    public bool? EscapeHazards { get; set; }
     public bool? TravelToOwnCorpse { get; set; }
     public bool? ItemInfoOnSelect { get; set; }
     public bool EnableAutostack { get; set; }

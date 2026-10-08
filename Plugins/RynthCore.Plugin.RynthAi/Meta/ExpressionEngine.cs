@@ -349,7 +349,8 @@ internal sealed class ExpressionEngine
             "wobjectfindallinventorybynamerx"         => EvalWobjectFindAllInventoryByNameRx(Tmpl(0)),
             "wobjectfindininventorybyname"             => EvalWobjectFindInInventoryByName(Tmpl(0)),
             "wobjectfindininventorybynamerx"          => EvalWobjectFindInInventoryByNameRx(Tmpl(0)),
-            "wobjectfindalllandscapebytemplatetype"   => EvalWobjectFindAllLandscapeByTemplateType(A(0)),
+            "wobjectfindalllandscapebyobjectclass"    => EvalWobjectFindAllLandscapeByObjectClass(A(0)),
+            "wobjectfindalllandscapebytemplatetype"   =>EvalWobjectFindAllLandscapeByTemplateType(A(0)),
             "wobjectfindalllandscapebynamerx"         => EvalWobjectFindAllLandscapeByNameRx(Tmpl(0)),
             "wobjectfindallbycontainer"               => EvalWobjectFindAllByContainer(A(0)),
             "wobjectgetselection"          => EvalWobjectGetSelection(),
@@ -1642,6 +1643,24 @@ internal sealed class ExpressionEngine
         return NewList(items);
     }
 
+    private string EvalWobjectFindAllLandscapeByObjectClass(string arg)
+    {
+        if (_worldObjectCache == null) return "[]";
+        if (!int.TryParse(arg.Trim(), out int targetClass)) return "[]";
+
+        var items = new List<string>();
+        var seen = new System.Collections.Generic.HashSet<int>();
+        void Check(WorldObject wo)
+        {
+            if (!seen.Add(wo.Id)) return;
+            if (ResolveEffectiveObjectClass(wo) == targetClass)
+                items.Add(MakeWobjectHandle(unchecked((uint)wo.Id), wo.Name));
+        }
+        foreach (var wo in _worldObjectCache.GetLandscapeObjects()) Check(wo);
+        foreach (var wo in _worldObjectCache.GetLandscape()) Check(wo);
+        return NewList(items);
+    }
+
     private string EvalWobjectFindAllLandscapeByTemplateType(string arg)
     {
         if (_worldObjectCache == null || !_host.HasGetObjectWcid) return "[]";
@@ -2420,8 +2439,7 @@ internal sealed class ExpressionEngine
         if (!TryParseWobjectHandle(arg, out uint uid, out _) || uid == 0) return "0";
         if (!_host.HasSelectItem) return "0";
         RynthCore.Plugin.RynthAi.ItemInfo.SelfSelect.Mark(uid);
-        _host.SelectItem(uid);
-        return "0";
+        return _host.SelectItem(uid) ? "1" : "0";
     }
 
     private string EvalActionTryUseItem(string arg)
@@ -3318,6 +3336,7 @@ internal sealed class ExpressionEngine
             ["StopMacroOnNoComponents"] = (() => B(s.StopMacroOnNoComponents), v => s.StopMacroOnNoComponents = ToDouble(v) != 0),
             ["StopLootingWhenPackFull"] = (() => B(s.StopLootingWhenPackFull), v => s.StopLootingWhenPackFull = ToDouble(v) != 0),
             ["LootOwnCorpse"] = (() => B(s.LootOwnCorpse), v => s.LootOwnCorpse = ToDouble(v) != 0),
+            ["EscapeHazards"] = (() => B(s.EscapeHazards), v => s.EscapeHazards = ToDouble(v) != 0),
             ["TravelToOwnCorpse"] = (() => B(s.TravelToOwnCorpse), v => s.TravelToOwnCorpse = ToDouble(v) != 0),
             ["ItemInfoOnSelect"] = (() => B(s.ItemInfoOnSelect), v => s.ItemInfoOnSelect = ToDouble(v) != 0),
             ["StopMacroWhenPackFull"] = (() => B(s.StopMacroWhenPackFull), v => s.StopMacroWhenPackFull = ToDouble(v) != 0),
@@ -3338,6 +3357,8 @@ internal sealed class ExpressionEngine
             ["MinRingTargets"]      = (() => I(s.MinRingTargets),      v => { if (int.TryParse(v, out int i)) s.MinRingTargets   = i; }),
             ["BlastRange"]          = (() => I(s.BlastRange),      v => { if (int.TryParse(v, out int i)) s.BlastRange   = i; }),
             ["MinBlastTargets"]     = (() => I(s.MinBlastTargets),      v => { if (int.TryParse(v, out int i)) s.MinBlastTargets   = i; }),
+            ["WallRange"]           = (() => I(s.WallRange),           v => { if (int.TryParse(v, out int i)) s.WallRange        = i; }),
+            ["MinWallTargets"]      = (() => I(s.MinWallTargets),      v => { if (int.TryParse(v, out int i)) s.MinWallTargets   = i; }),
             ["HealAt"]              = (() => I(s.HealAt),              v => { if (int.TryParse(v, out int i)) s.HealAt           = i; }),
             ["RestamAt"]            = (() => I(s.RestamAt),            v => { if (int.TryParse(v, out int i)) s.RestamAt         = i; }),
             ["RestamTo"]            = (() => I(s.RestamTo),            v => { if (int.TryParse(v, out int i)) s.RestamTo         = i; }),

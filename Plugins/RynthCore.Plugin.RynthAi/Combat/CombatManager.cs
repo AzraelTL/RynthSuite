@@ -184,6 +184,60 @@ public partial class CombatManager : IDisposable
     private DateTime _faceSettledAt = DateTime.MinValue;
     private const double FACE_SETTLE_MS   = 140.0;   // let the turn-stop reach the server (≥ one 30Hz tick) before the cast packet
 
+    // ── Wall facing (2026-10-08) ─────────────────────────────────────────────
+    // A wall is untargeted: ACE launches it along the caster's facing and never turns the caster
+    // for it (see CountMonstersInWallPath). So before a wall the bot turns the character itself:
+    // an instant heading snap (TurnToHeading) when it is more than WallFaceToleranceDeg off the
+    // target, then no cast until WallFaceSettleMs later so the server has the new heading. The
+    // snap changes only the client's heading; the client tells the server in its next position
+    // event, which goes out at most once per second while the position or heading keeps
+    // changing (CommandInterpreter::ShouldSendPositionEvent 0x006B5520; the 1.0 s interval is set
+    // in the constructor 0x006B4D80), so the settle covers a full second plus a frame. Only ever
+    // inside AttackWithMagic, i.e. after the cadence guard and the gesture gate: never while a
+    // cast is resolving, and nothing turns during the wall's windup. Targeted shapes are unchanged.
+    // Always face the target exactly before a wall (owner, 2026-10-08: "for walls he always has to
+    // turn to the target"): a wall flies straight, so a few degrees off misses at range. Only a
+    // facing within WallFaceToleranceDeg casts without a turn.
+    internal const double WallFaceToleranceDeg = 1.0;
+    internal const double WallFaceSettleMs     = 1100.0;
+    // After the settle the wall goes if the target is still within this of the snapped heading;
+    // further (it moved during the second) the bot turns again, at most WallFaceMaxSnaps times
+    // per wall, then casts anyway rather than chase a running monster forever.
+    internal const double WallFaceDriftDeg     = 5.0;   // the most allowed (close in)
+    internal const int    WallFaceMaxSnaps     = 3;
+    // How far to the side of the wall's centre line the target may have moved during the settle
+    // (metres): at 70 yd, 5 degrees is 6 m off - wider than half the wall (owner, 2026-10-08).
+    internal const double WallAimSlackMeters   = 1.8;
+
+    /// <summary>The drift allowed after the settle for a target this far away: the angle that puts
+    /// it <see cref="WallAimSlackMeters"/> to the side, between the tolerance and WallFaceDriftDeg.</summary>
+    internal static double WallDriftAllowedDeg(double distanceMeters)
+    {
+        if (distanceMeters <= 0.1) return WallFaceDriftDeg;
+        double deg = Math.Atan2(WallAimSlackMeters, distanceMeters) * 180.0 / Math.PI;
+        return Math.Clamp(deg, WallFaceToleranceDeg, WallFaceDriftDeg);
+    }
+
+    private double WallDriftAllowedDeg(int targetId)
+    {
+        try
+        {
+            if (_host.TryGetPlayerPose(out _, out float px, out float py, out _, out _, out _, out _, out _)
+                && _host.TryGetObjectPosition((uint)targetId, out _, out float tx, out float ty, out _))
+                return WallDriftAllowedDeg(Math.Sqrt((tx - px) * (tx - px) + (ty - py) * (ty - py)));
+        }
+        catch { }
+        return WallFaceToleranceDeg;
+    }
+    private int _wallFaceSnaps;
+    private int _wallFaceTarget;
+    private DateTime _wallFaceAt = DateTime.MinValue;
+    // Set by AttackWithMagic when it held a wall for its turn: Think then ends the tick without
+    // counting it as an attack (no attack interval starts, so the wall goes once settled).
+    private bool _wallFaceHeld;
+    /// <summary>Tests: the clock the wall facing reads.</summary>
+    internal Func<DateTime> WallClock { get; set; } = () => DateTime.Now;
+
     // ── Magic cast cadence guard ────────────────────────────────────────────
     // Don't issue the next combat cast until the previous one's server windup
     // has resolved (a UseDone arrived, or a hard timeout). Re-casting into the
@@ -214,7 +268,7 @@ public partial class CombatManager : IDisposable
     private DateTime _lastNoSpellChatAt = DateTime.MinValue;
     private readonly Dictionary<string, DateTime> _ringMissingChatAt = new(StringComparer.OrdinalIgnoreCase);
     private const double NoSpellChatIntervalMs = 30_000;
-    private bool _lastCastWasRing = false;
+    private bool _lastCastWasRing = false;   // the last attack hit an area: a ring, or a wall (2026-10-08)
     private const double ATTACK_SPELL_COOLDOWN_MS = 100.0;
 
     private bool _returnToPhysicalCombat = false;
@@ -535,6 +589,7 @@ public partial class CombatManager : IDisposable
         public int Id;
         public double Distance;
         public double Angle;   // absolute facing error to target, degrees (0 = directly ahead)
+        public double Bearing; // heading from the player to it, degrees (0 = north, clockwise); NaN = unknown
         public string Name;
     }
 
@@ -860,16 +915,18 @@ public partial class CombatManager : IDisposable
             }
 
             double angle = 180.0;
+            double bearing = double.NaN;
             if (hasPose && hasMobPos) // the mob's position was read for the distance above
             {
                 double desired = Math.Atan2(tx - ppx, ty - ppy) * (180.0 / Math.PI);
                 if (desired < 0) desired += 360.0;
+                bearing = desired;
                 double err = desired - playerHeadingDeg;
                 while (err > 180.0) err -= 360.0;
                 while (err < -180.0) err += 360.0;
                 angle = Math.Abs(err);
             }
-            _scannedTargets.Add(new ScannedTarget { Id = wo.Id, Distance = dist, Angle = angle, Name = wo.Name });
+            _scannedTargets.Add(new ScannedTarget { Id = wo.Id, Distance = dist, Angle = angle, Bearing = bearing, Name = wo.Name });
         }
 
         // Primary: closest first. Tiebreaker within 0.5yd: smallest facing angle first.
@@ -1023,8 +1080,22 @@ public partial class CombatManager : IDisposable
         { "Yield",     new[] { "Magic Yield Other",               "Yield" } },
     };
 
-    // Shape index into the SpellShapes / VoidSpellShapes rows.
-    internal const int ShapeArc = 0, ShapeRing = 1, ShapeStreak = 2, ShapeBolt = 3, ShapeBlast = 4;
+    // Shape index into the SpellShapes / VoidSpellShapes rows. ShapeWall (2026-10-08) has no row:
+    // walls have no tiered base names and are found by spell category (WallCategories).
+    internal const int ShapeArc = 0, ShapeRing = 1, ShapeStreak = 2, ShapeBolt = 3, ShapeBlast = 4, ShapeWall = 5;
+
+    // Wall spells per element: ACE SpellCategory AcidWall 229, BludgeoningWall 230, ColdWall 231,
+    // ElectricWall 232, FireWall 233, PiercingWall 234, SlashingWall 235 (column 3 of SpellData.txt).
+    // Retail has one per element (Blistering Creeper, Hammering Crawler, Foon-Ki's Glacial Floe,
+    // Os' Wall, Slithering Flames, Spike Strafe, Bed of Blades: power 200, so level 5 by ACE's
+    // server formula); the categories also hold other spells (Demon's Tongues, Burning Earth, the
+    // "... Whip" spells) that a character on some server may know, so a wall is picked by category,
+    // not by name. Void (Nether) has no walls.
+    private static readonly Dictionary<string, int> WallCategories = new(StringComparer.OrdinalIgnoreCase)
+    {
+        { "Acid", 229 }, { "Bludgeon", 230 }, { "Cold", 231 }, { "Lightning", 232 },
+        { "Fire", 233 }, { "Pierce", 234 }, { "Blade", 235 }, { "Slash", 235 },
+    };
 
     // Base names per element, by shape: Arc, Ring, Streak, Bolt, Blast. Every non-ring base has
     // "{base} I".."VI" (blasts: III-VI only, retail has no blast I/II) and "Incantation of {base}"
@@ -2290,6 +2361,9 @@ public partial class CombatManager : IDisposable
     /// the full interval anyway.</summary>
     internal const double NewTargetCastFloorMs = 300;
 
+    /// <summary>The least Attack Spell Delay on an engine without the server gates.</summary>
+    internal const double NoGatesAttackFloorMs = 250;
+
     /// <summary>True when <see cref="BusyCount"/> is positive only because AC lowered it inline at a
     /// server UseDone the busy hook can't see (see <see cref="CombatBusyGate"/>).</summary>
     internal bool BusyIsLeftover()
@@ -2314,7 +2388,12 @@ public partial class CombatManager : IDisposable
     internal static double AttackIntervalMs(int combatMode, int attackSpellIntervalMs, bool hasServerGates, bool newTarget)
     {
         if (combatMode != CombatMode.Magic) return 1000.0;
-        double interval = attackSpellIntervalMs > 0 ? attackSpellIntervalMs : 1500;
+        // 0 is allowed (2026-10-08): no delay of its own, the server gates (UseDone and the cast
+        // gesture) alone hold the next cast until the last one is done. A file without the setting
+        // keeps 1500 (the payload is nullable). An engine without those gates keeps a 250 ms floor,
+        // the old slider minimum, so casts can't be sent back to back into "You're too busy!".
+        double interval = attackSpellIntervalMs >= 0 ? attackSpellIntervalMs : 1500;
+        if (!hasServerGates) interval = Math.Max(interval, NoGatesAttackFloorMs);
         if (newTarget && hasServerGates) return Math.Min(interval, NewTargetCastFloorMs);
         return interval;
     }
@@ -2687,6 +2766,9 @@ public partial class CombatManager : IDisposable
             // MELEE the same: ACE's HandleActionTargetedMeleeAttack_Inner rotates to the
             // target (past melee_max_angle) before the swing, so the servo made the same
             // swing-spin-swing with a knife in an Olthoi swarm (2026-09-29, Lucy).
+            // The one exception is a WALL spell (2026-10-08): untargeted, so the server doesn't
+            // turn for it. AttackWithMagic snaps the heading before a wall (HoldForWallFacing),
+            // behind the cadence guard above, and never during a windup.
             if (CurrentCombatMode == CombatMode.Magic || CurrentCombatMode == CombatMode.Missile
                 || CurrentCombatMode == CombatMode.Melee)
             {
@@ -2774,6 +2856,15 @@ public partial class CombatManager : IDisposable
                 }
 
                 AttackWithMagic(targetObj);
+
+                // A wall held for its turn (2026-10-08): nothing was sent but a heading snap. End
+                // the tick here so it doesn't count as an attack: the attack interval doesn't start
+                // and the wall goes the first tick after the settle (HoldForWallFacing).
+                if (_wallFaceHeld)
+                {
+                    _tickWait = CombatLatencyTracker.Wait.Face;
+                    return true;
+                }
 
                 // Don't restore the physical weapon on top of a cast just issued this tick
                 // (AttackWithMagic → MarkCombatCastIssued): the UseObject + re-equip below would
@@ -4625,6 +4716,64 @@ public partial class CombatManager : IDisposable
         catch { }
     }
 
+    /// <summary>
+    /// Before a wall at <paramref name="targetId"/>: true = don't cast this tick. Facing within
+    /// <see cref="WallFaceToleranceDeg"/>: false, cast (no turn). Further off: snap the heading to
+    /// the target and hold for <see cref="WallFaceSettleMs"/>, then cast, unless the target has
+    /// since drifted more than <see cref="WallFaceDriftDeg"/> off (then snap again).
+    /// </summary>
+    internal bool HoldForWallFacing(int targetId)
+    {
+        DateTime now = WallClock();
+        if (_wallFaceAt != DateTime.MinValue && _wallFaceTarget == targetId)
+        {
+            if ((now - _wallFaceAt).TotalMilliseconds < WallFaceSettleMs) return true;   // the server catching up
+            _wallFaceAt = DateTime.MinValue;
+            if (GetFacingError(targetId) <= WallDriftAllowedDeg(targetId) || _wallFaceSnaps >= WallFaceMaxSnaps)
+            {
+                _wallFaceSnaps = 0;
+                return false;                                                              // turned and settled: cast
+            }
+        }
+        else _wallFaceSnaps = 0;
+        _wallFaceAt = DateTime.MinValue;
+
+        if (!TryGetHeadingTo(targetId, out double desiredDeg, out double error)) return false;   // can't tell: cast as is
+        if (error <= WallFaceToleranceDeg) return false;
+        if (!_host.HasTurnToHeading) return false;     // FindBestShapedSpell doesn't pick a wall then
+        if (!_host.TurnToHeadingBy("Combat", (float)desiredDeg)) return true;   // held by the pacer: next tick
+        _wallFaceTarget = targetId;
+        _wallFaceAt = now;
+        _wallFaceSnaps++;
+        _host.Log($"[CombatCast] wall: facing 0x{(uint)targetId:X8} first ({error:0} deg off), casting in {WallFaceSettleMs:0} ms");
+        return true;
+    }
+
+    /// <summary>The heading from the player to <paramref name="targetId"/> (0 = north, clockwise)
+    /// and how far the player's facing is off it (absolute degrees).</summary>
+    private bool TryGetHeadingTo(int targetId, out double desiredDeg, out double absError)
+    {
+        desiredDeg = 0; absError = 180.0;
+        try
+        {
+            if (!_host.TryGetPlayerPose(out _, out float px, out float py, out _,
+                    out float qw, out _, out _, out float qz))
+                return false;
+            if (!_host.TryGetObjectPosition((uint)targetId, out _, out float tx, out float ty, out _))
+                return false;
+            desiredDeg = Math.Atan2(tx - px, ty - py) * (180.0 / Math.PI);
+            if (desiredDeg < 0) desiredDeg += 360.0;
+            double physYawDeg = 2.0 * Math.Atan2(qz, qw) * (180.0 / Math.PI);
+            double currentDeg = ((-physYawDeg) % 360.0 + 720.0) % 360.0;
+            double error = desiredDeg - currentDeg;
+            while (error > 180.0) error -= 360.0;
+            while (error < -180.0) error += 360.0;
+            absError = Math.Abs(error);
+            return true;
+        }
+        catch { return false; }
+    }
+
     private void ClearCombatTurnMotions()
     {
         _host.SetMotionBy("Combat", MotionTurnRight, false);
@@ -4888,6 +5037,7 @@ public partial class CombatManager : IDisposable
 
     private void AttackWithMagic(WorldObject target)
     {
+        _wallFaceHeld = false;
         if (_spellManager == null || target == null) return;
 
         // Hard safety veto: never cast offensive magic at something AC's combat
@@ -4988,7 +5138,7 @@ public partial class CombatManager : IDisposable
 
         if (rule != null && PickBaseShape(rule) < 0)
         {
-            _host.Log($"[CombatCast] rule '{rule.Name}' has no attack shapes enabled (UseArc/Ring/Streak/Bolt/Blast all false) — no offensive cast");
+            _host.Log($"[CombatCast] rule '{rule.Name}' has no attack shapes enabled (UseArc/Ring/Streak/Bolt/Blast/Wall all false) — no offensive cast");
             LastCombatSkipReason = "no-attack-shapes"; // D4 record-only
             return;
         }
@@ -5013,6 +5163,16 @@ public partial class CombatManager : IDisposable
             }
         }
         LogArcChoice(rule, target, castShape);
+        // A wall flies along the caster's facing and the server doesn't turn the caster for it:
+        // face the target first and let the new heading reach the server (2026-10-08).
+        if (offensiveSpellId != 0 && castShape == ShapeWall && HoldForWallFacing(activeTargetId))
+        {
+            _wallFaceHeld = true;
+            LastCombatSkipReason = "wall-face"; // D4 record-only
+            return;
+        }
+        // A ring or a wall hits several monsters: its damage isn't the fight target's alone.
+        bool multiTarget = isRing || castShape == ShapeWall;
         if (offensiveSpellId != 0)
         {
             LastCombatSkipReason = "cast"; // D4 record-only: offensive cast issued this tick
@@ -5028,7 +5188,8 @@ public partial class CombatManager : IDisposable
                 SessionAttackCasts++;      // D6: offensive attack-cast tally for the casts-per-kill signal
                 CastsSinceLastKill++;      //     reset in OnKillNotification when a kill lands
                 _lastSpellCast = DateTime.Now;
-                _lastCastWasRing = isRing;
+                _lastCastWasRing = multiTarget;   // walls too: area casts (2026-10-08)
+                _wallFaceAt = DateTime.MinValue;  // the next wall checks its facing afresh
                 // _offensiveCastThisCycle is NOT set here anymore — a cast
                 // attempt that the server refuses (e.g. "You're too busy!")
                 // must not count toward the blacklist miss streak. The
@@ -5051,10 +5212,16 @@ public partial class CombatManager : IDisposable
                 // castable tier (which made every magic kill record tier 8). Fall back to the
                 // old max-tier only if the level can't be derived, so it never regresses to blank.
                 int castLevel = SpellTableStub.GetById(offensiveSpellId)?.Level ?? 0;
+                // Walls have no tier in their names: their level from their power (2026-10-08).
+                if (castLevel <= 0 && SpellDatabase.TryGetCategoryAndPower(offensiveSpellId, out _, out int castPower))
+                    castLevel = SpellDatabase.LevelFromPower(castPower);
                 int castTierMag = castLevel > 0 ? castLevel : Math.Max(warTier, voidTier);
                 // Ring spells are stored as a NEGATIVE tier so the Damage tab can render them as
                 // "R<level>" (e.g. a level-2 ring = -2 -> "R2"); non-ring stays positive; 0 = none.
-                _lastCastTier     = isRing ? -castTierMag : castTierMag;
+                // Walls are filed with the rings (2026-10-08): an area cast's kills and casts-to-kill
+                // must not mix with the single-target tier of the same level. (The Damage tab shows
+                // them as "R<level>" until it has a label of its own for walls.)
+                _lastCastTier     = multiTarget ? -castTierMag : castTierMag;
                 // Record the latest tier used vs this monster so the Damage tab's collapsed row
                 // reflects it immediately (covers ring casts, which skip RecordHit).
                 if (_fightTargetWcid != 0) _damageStore?.NoteCast(_fightTargetWcid, _lastCastTier, _fightTargetName);
@@ -5071,7 +5238,7 @@ public partial class CombatManager : IDisposable
                     _lastFightCount    = _fightCastCount;
                     StampRecentFight();
                 }
-                EvaluateKillShot(_lastCastWeaponId, element, _lastCastTier, isRing);
+                EvaluateKillShot(_lastCastWeaponId, element, _lastCastTier, multiTarget);
             }
             catch { }
         }
@@ -5214,7 +5381,11 @@ public partial class CombatManager : IDisposable
         name = name.Trim();
         int id = TrySpellByName(name);
         if (id != 0) return id;
-        int maxTier = Math.Max(EffectiveMaxTier(AcSkillType.CreatureEnchantment), EffectiveMaxTier(AcSkillType.LifeMagic));
+        // Void too (2026-10-08): "Corruption" with Corruption V and VII known cast V, because only
+        // Creature and Life set the cap and the search started below VII. Debuffs come from these
+        // three schools; a level the character doesn't know is never picked.
+        int maxTier = Math.Max(Math.Max(EffectiveMaxTier(AcSkillType.CreatureEnchantment), EffectiveMaxTier(AcSkillType.LifeMagic)),
+                               EffectiveMaxTier(AcSkillType.VoidMagic));
         if (maxTier >= 8) { id = TrySpellByName($"Incantation of {name}"); if (id != 0) { tier = 8; return id; } }
         for (int t = Math.Min(maxTier, 7); t >= 1; t--)
         {
@@ -5345,7 +5516,8 @@ public partial class CombatManager : IDisposable
     /// <summary>
     /// The base shape a rule asks for when no ring is due: Arc, then Streak, then Blast, then
     /// Bolt (the first one on wins; Blast beats Bolt so turning Blast on next to the default Bolt
-    /// does something). A ring-only rule casts Bolt between rings. -1 = no shape on at all.
+    /// does something). A ring-only rule casts Bolt between rings, and a wall-only rule (or ring and
+    /// wall only) Bolt between walls. -1 = no shape on at all.
     /// </summary>
     internal static int PickBaseShape(MonsterRule? rule)
     {
@@ -5354,7 +5526,7 @@ public partial class CombatManager : IDisposable
         if (rule.UseStreak) return ShapeStreak;
         if (rule.UseBlast)  return ShapeBlast;
         if (rule.UseBolt)   return ShapeBolt;
-        return rule.UseRing ? ShapeBolt : -1;
+        return rule.UseRing || rule.UseWall ? ShapeBolt : -1;
     }
 
     /// <summary>
@@ -5385,9 +5557,83 @@ public partial class CombatManager : IDisposable
         return count;
     }
 
+    // ── Wall spells (2026-10-08) ─────────────────────────────────────────────────
+    // A wall is 10 projectiles in a block 5 wide and 2 high (ACE spell table: dims 5x1x2, padding
+    // 0.8, created 2 m ahead of the caster) that fly straight along the caster's facing: it is an
+    // UNTARGETED spell (the client sends CastUntargetedSpell for it even with a target selected,
+    // and ACE launches it along the caster's forward vector), so the server never turns the caster
+    // to the target as it does for bolts and blasts. Its swath is therefore a corridor a few metres
+    // wide, not a fan: monsters are counted when they are ahead of the caster, within the range,
+    // and within WallHalfWidth of the line to the target (the target included). We turn to face
+    // the target before the cast (HoldForWallFacing), so that line is where the wall goes.
+    internal const double WallHalfWidth = 4.0;
+
+    /// <summary>Tests: the wall-path count instead of the scan (the scan needs a live world).</summary>
+    internal Func<int>? WallPathCountOverride { get; set; }
+
+    /// <summary>Monsters (the target included) in a wall's path toward <paramref name="targetId"/>:
+    /// ahead of the caster, within <paramref name="rangeYards"/>, and within <see cref="WallHalfWidth"/>
+    /// of the line to the target. From the combat scan: LOS-clear and attackable. 0 when the target
+    /// isn't in the scan (its bearing is unknown).</summary>
+    private int CountMonstersInWallPath(double rangeYards, int targetId)
+    {
+        if (WallPathCountOverride != null) return WallPathCountOverride();
+        double toTarget = double.NaN;
+        foreach (var c in _scannedTargets)
+            if (c.Id == targetId) { toTarget = c.Bearing; break; }
+        if (double.IsNaN(toTarget)) return 0;
+        int count = 0;
+        foreach (var c in _scannedTargets)
+        {
+            if (c.Distance > rangeYards || double.IsNaN(c.Bearing) || _recentlyKilled.ContainsKey(c.Id)) continue;
+            if (InWallPath(c.Distance, c.Bearing - toTarget)) count++;
+        }
+        return count;
+    }
+
+    /// <summary>Is a monster <paramref name="distance"/> away, <paramref name="offDeg"/> degrees off the
+    /// line to the target, in the wall's path: ahead of the caster and within <see cref="WallHalfWidth"/>
+    /// of that line.</summary>
+    internal static bool InWallPath(double distance, double offDeg)
+    {
+        double rad = offDeg * (Math.PI / 180.0);
+        double ahead = distance * Math.Cos(rad);
+        double aside = Math.Abs(distance * Math.Sin(rad));
+        return ahead >= 0 && aside <= WallHalfWidth;
+    }
+
+    /// <summary>
+    /// The wall of <paramref name="element"/> to cast: among the known spells of its wall category
+    /// (<see cref="WallCategories"/>), the highest level the War tier allows (the level by ACE's
+    /// server formula from the spell's power, <see cref="SpellDatabase.LevelFromPower"/>: the same
+    /// tier limit the tiered shapes use), then the highest power, then the lowest id (the retail
+    /// wall). 0 = none: Nether, an element without walls, War untrained, or no wall known.
+    /// </summary>
+    internal int FindBestWallSpell(string element)
+    {
+        if (_spellManager == null || !_spellManager.IsKnownSnapshotWarm) return 0;   // cold: don't guess
+        if (!WallCategories.TryGetValue(element, out int category)) return 0;
+        if (_charSkills != null && _charSkills[AcSkillType.WarMagic].Training < 2) return 0;
+        int maxTier = EffectiveMaxTier(AcSkillType.WarMagic);
+        int best = 0, bestLevel = 0, bestPower = -1;
+        foreach (int id in SpellDatabase.IdsInCategory(category))
+        {
+            if (!_spellManager.IsKnownSpellId(id)) continue;
+            SpellDatabase.TryGetCategoryAndPower(id, out _, out int power);
+            int level = SpellDatabase.LevelFromPower(power);
+            if (level < 1 || level > maxTier) continue;
+            if (level > bestLevel || (level == bestLevel && power > bestPower))
+            {
+                best = id; bestLevel = level; bestPower = power;
+            }
+        }
+        return best;
+    }
+
     internal static string ShapeName(int shape) => shape switch
     {
-        ShapeArc => "Arc", ShapeRing => "Ring", ShapeStreak => "Streak", ShapeBolt => "Bolt", ShapeBlast => "Blast", _ => "?",
+        ShapeArc => "Arc", ShapeRing => "Ring", ShapeStreak => "Streak", ShapeBolt => "Bolt", ShapeBlast => "Blast",
+        ShapeWall => "Wall", _ => "?",
     };
 
     /// <summary>
@@ -5441,16 +5687,24 @@ public partial class CombatManager : IDisposable
     ///   2. Blast override (Blast Range on): Blast when its fan count is met, else the rule's
     ///      other shape (<paramref name="blastConditional"/>, <paramref name="blastFanMet"/>);
     ///   3. Ring override (Ring Range on): Ring when its count is met (<paramref name="ringDue"/>);
+    ///   3b. Wall override (Wall Range on, 2026-10-08): Wall when its path count is met and a wall
+    ///      is known (<paramref name="wallDue"/>), unless a ring is due. So with several due: Ring,
+    ///      then Wall, then Blast, then the base shape. A ring hits all around and needs no turn;
+    ///      a wall reaches further along a line but costs a turn, and outdoes a blast's 3 bolts;
     ///   4. Arc when clear: an Arc whose flight path to the target is blocked (a wall, or a
     ///      ceiling the arc rises into) gives way to the rule's other shape: Streak, then Blast
     ///      (when Blast isn't conditional), then Bolt. An Arc-only rule casts Bolt, as a ring-only
     ///      rule does between rings.
-    /// <paramref name="arcBlocked"/> is asked only in step 4, so a ring or a non-arc rule costs
-    /// no ray test; null (no test, or it can't tell: raycasting off or not ready) casts the Arc
-    /// as before. <paramref name="arcGaveWay"/> says step 4 replaced the Arc.
+    /// <paramref name="arcBlocked"/> is asked only in step 4, so a ring, a wall or a non-arc rule
+    /// costs no ray test; null (no test, or it can't tell: raycasting off or not ready) casts the
+    /// Arc as before. <paramref name="arcGaveWay"/> says step 4 replaced the Arc.
     /// </summary>
     internal static int ChooseCastShape(MonsterRule? rule, bool blastConditional, bool blastFanMet, bool ringDue,
         Func<bool?>? arcBlocked, out bool arcGaveWay)
+        => ChooseCastShape(rule, blastConditional, blastFanMet, ringDue, wallDue: false, arcBlocked, out arcGaveWay);
+
+    internal static int ChooseCastShape(MonsterRule? rule, bool blastConditional, bool blastFanMet, bool ringDue,
+        bool wallDue, Func<bool?>? arcBlocked, out bool arcGaveWay)
     {
         arcGaveWay = false;
         int shape = PickBaseShape(rule);
@@ -5459,6 +5713,8 @@ public partial class CombatManager : IDisposable
             shape = blastFanMet ? ShapeBlast : PickBaseShapeWithoutBlast(rule);
         if (ringDue)
             return ShapeRing;
+        if (wallDue)
+            return ShapeWall;
         if (shape == ShapeArc && arcBlocked != null && arcBlocked() == true)
         {
             arcGaveWay = true;
@@ -5549,7 +5805,7 @@ public partial class CombatManager : IDisposable
             _host.Log($"[CombatCast] rule '{rule.Name}': Arc when its flight path is clear, else {other}" +
                       (_settings.EnableRaycasting ? "" : " (raycasting off: arcs are always cast)"));
         }
-        if (castShape == ShapeRing) return;   // the ring override won: no arc question this cast
+        if (castShape == ShapeRing || castShape == ShapeWall) return;   // an override won: no arc question this cast
         string state = _lastShapeArcGaveWay
             ? $"arc blocked ({(ArcBlockedOverride != null ? "test" : DescribeArcBlock(in _arcVerdictDetail))}): {(castShape >= 0 ? ShapeName(castShape) : "nothing")} instead"
             : "arc clear";
@@ -5596,9 +5852,30 @@ public partial class CombatManager : IDisposable
         bool ringDue = rule != null && rule.UseRing && _settings.RingRange > 0
             && CountMonstersInRange(_settings.RingRange) >= Math.Max(1, _settings.MinRingTargets);
 
-        int shapeIdx = ChooseCastShape(rule, blastConditional, blastFanMet, ringDue,
+        // Wall override (Wall Range on): a wall when enough monsters are in its path toward the
+        // target and the character knows a wall of this element (none for Nether). Asked only for a
+        // real cast (an element probe has no target, so no path), and only when no ring is due.
+        // Without the host's heading snap the character can't be turned, so a wall is cast only
+        // when it already faces the target.
+        int wallId = 0;
+        bool wallDue = false;
+        if (!ringDue && arcTargetId != 0 && rule != null && rule.UseWall && _settings.WallRange > 0
+            && CountMonstersInWallPath(_settings.WallRange, arcTargetId) >= Math.Max(1, _settings.MinWallTargets)
+            && (_host.HasTurnToHeading || GetFacingError(arcTargetId) <= WallFaceToleranceDeg))
+        {
+            wallId = FindBestWallSpell(element);
+            wallDue = wallId != 0;
+        }
+
+        int shapeIdx = ChooseCastShape(rule, blastConditional, blastFanMet, ringDue, wallDue,
             arcTargetId != 0 ? () => IsArcBlockedTo(arcTargetId) : null, out bool arcGaveWay);
         if (arcTargetId != 0) _lastShapeArcGaveWay = arcGaveWay;
+
+        if (shapeIdx == ShapeWall)
+        {
+            castShape = ShapeWall;
+            return wallId;
+        }
 
         if (!TryGetShapeBase(element, shapeIdx, useVoid, out string baseName, out string? t7, out bool forcedWar)) return 0;
         if (forcedWar) skill = AcSkillType.WarMagic;

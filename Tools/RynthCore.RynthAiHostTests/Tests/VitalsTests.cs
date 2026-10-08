@@ -28,6 +28,7 @@ internal static class VitalsTests
         r.Add("vitals: Heal Self known only above the tier Life Magic allows (vitae) is still cast", HealAboveAllowedTier);
         r.Add("vitals: low health wins the arbiter even on a busy tick; backs off when nothing can heal", HealthWinsArbiter);
         r.Add("vitals: 'You're too busy!' paces vital casts, and a long streak stops the character once", TooBusyVitals);
+        r.Add("vitals: no components for the top level - the next lower level is cast, not the same one again", NoComponentsFallsBack);
         // Drakkon's death, 2026-10-05 13:43:20 (ops\overnight\2026-10-05-death-fixes.md).
         r.Add("vitals: a hot reload's login refresh trusts its first read; a real login waits for two equal reads", HotReloadRefresh);
         r.Add("vitals: RynthAi tells the engine a reload is unsafe while engaged, under a heal line or casting", ReloadBlockerReport);
@@ -67,6 +68,42 @@ internal static class VitalsTests
         Check.Eq(FakeHost.Stops, 1, "4 refusals in a row: one StopCompletely to clear the stuck gesture");
         for (int i = 0; i < 4; i++) b.OnChatWindowText("You're too busy!", 26);
         Check.Eq(FakeHost.Stops, 1, "only once per streak");
+    }
+
+    // 2026-10-08: with no components for the highest Stamina to Mana / Revitalize / Heal the
+    // character knew, RynthAi kept retrying that one level; it parked the whole family, then
+    // tried the same level again. Now that level is passed over and the next lower one is cast.
+    private static void NoComponentsFallsBack()
+    {
+        FakeHost.Reset();
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Magic;
+        foreach (var row in SpellTable.Rows) FakeHost.Spellbook.Add((uint)row.Id);
+        FakeHost.Skills[(Player, STypeLife)] = (400, 2);
+        var host = FakeHost.Create();
+        var s = new LegacyUiSettings { IsMacroRunning = true, HealAt = 0, TopOffHP = 0, EmergencyHealAt = 0, StaminaToHealthAt = 0,
+                                       GetManaAt = 50, TopOffMana = 50, RestamAt = 0, TopOffStam = 0, UsePotions = false };
+        var skills = new CharacterSkills(host);
+        skills.SetPlayerId(Player);
+        var sm = new SpellManager(host, s);
+        sm.InitializeNatively();
+        sm.SetCharacterSkills(skills);
+        var vitals = new PlayerVitalsCache { MaxHealth = 100, CurrentHealth = 100, MaxStamina = 100, CurrentStamina = 100, MaxMana = 100, CurrentMana = 10 };
+        var b = new BuffManager(host, s, sm, vitals);
+        b.SetCharacterSkills(skills);
+
+        Check.True(b.CheckVitals(), "10% mana: Stamina to Mana is cast");
+        int top = FakeHost.Casts[^1].SpellId;
+        b.OnChatWindowText("You don't have all the components for this spell.", 0);
+        for (int i = 0; i < 50 && FakeHost.Casts.Count < 2; i++)
+        {
+            b.CheckVitals();
+            System.Threading.Thread.Sleep(20);
+        }
+        Check.Eq(FakeHost.Casts.Count, 2, "a second cast goes out");
+        int next = FakeHost.Casts[^1].SpellId;
+        Check.True(next != top, $"a different level ({SpellTableStub.GetById(top)?.Name} -> {SpellTableStub.GetById(next)?.Name})");
+        Check.True(SpellTableStub.GetById(next)?.Family == SpellTableStub.GetById(top)?.Family, "the same spell, one level down");
     }
 
     // 2026-10-04, "nav and looting have priority over healing, almost dying in packs": the

@@ -131,6 +131,12 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     // Give queue — drained one item per tick with a cooldown (interval comes from settings)
     private readonly Queue<(uint itemId, uint targetId, int stackSize)> _pendingGives = new();
     private DateTime _lastGiveAt = DateTime.MinValue;
+    // The give the server hasn't answered yet (0 = none): the next one waits for it.
+    private uint _giveInFlightId, _giveInFlightTarget;
+    private int _giveInFlightAmount, _giveInFlightStack, _giveInFlightTries;
+    private long _giveInFlightAt;
+    private const long GiveConfirmMs = 3000;
+    private const int GiveMaxTries = 2;
     private RynthCore.Loot.LootProfile? _nativeLootProfile;
     private string _nativeLootProfilePath = string.Empty;
     private DateTime _nativeLootProfileTime = DateTime.MinValue;
@@ -677,6 +683,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         {
             _inventoryManager  = new InventoryManager(Host, _dashboard.Settings, _objectCache);
             _manaStoneManager  = new ManaStoneManager(Host, _dashboard.Settings, _objectCache);
+            LegacyUi.NavPoint.SpellNameLookup = id => SpellTableStub.GetById(id)?.Name;   // recall steps by name
             _manaStoneManager.IsLootKept = IsKeptByLootProfile;
             _petManager        = new PetManager(Host, _dashboard.Settings, _objectCache, _combatManager, _charSkills);
             _combatManager.SummonOut = () => _petManager?.CurrentSummon();
@@ -877,7 +884,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         ["MeleeAttackPower"] = (-1, 100), ["MissileAttackPower"] = (-1, 100),
         ["MeleeAttackHeight"] = (0, 2), ["MissileAttackHeight"] = (0, 2),
         ["PetMinMonsters"] = (1, 20),
-        ["SpellCastIntervalMs"] = (100, 1500), ["AttackSpellIntervalMs"] = (250, 5000), ["MinRingTargets"] = (1, 20), ["MinBlastTargets"] = (1, 20), ["BlastRange"] = (0, 100),
+        ["SpellCastIntervalMs"] = (100, 1500), ["AttackSpellIntervalMs"] = (0, 5000), ["MinRingTargets"] = (1, 20), ["MinBlastTargets"] = (1, 20), ["BlastRange"] = (0, 100), ["MinWallTargets"] = (1, 20), ["WallRange"] = (0, 100),
         ["MinSkillLevelTier1"] = (1, 500), ["MinSkillLevelTier2"] = (1, 500), ["MinSkillLevelTier3"] = (1, 500), ["MinSkillLevelTier4"] = (1, 500),
         ["MinSkillLevelTier5"] = (1, 500), ["MinSkillLevelTier6"] = (1, 500), ["MinSkillLevelTier7"] = (1, 500), ["MinSkillLevelTier8"] = (1, 500),
         ["MonsterRange"] = (1, 200), ["MonsterDisengageRange"] = (0, 200), ["RingRange"] = (1, 50), ["ApproachRange"] = (1, 50),
@@ -1476,6 +1483,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 // finally below still submits the nav markers.
                 if (HoldForDeath())
                     return;
+                // Standing in acid or lava: nothing but getting out (RynthAiPlugin.HazardEscape.cs).
+                RecordHazardTrail();
+                if (HoldForHazardEscape())
+                    return;
 
                 if (diag) Host.Log("[RynthAi] OnTick: before CheckBusyTimeout");
                 CheckBusyTimeout();
@@ -2035,6 +2046,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         try { mmEat = MetaScheduleChat(text); } catch { }
         if (mmEat) eat = 1;
         else _dashboard?.PushChatLine(text, chatType);
+        try { NoteHotspotChat(text, chatType); } catch (Exception ex) { Host.Log($"[RynthAi] Hazard chat check failed: {ex.Message}"); }
         _buffManager?.OnChatWindowText(text, chatType);
         _manaStoneManager?.OnChatWindowText(text);
         _petManager?.OnChatWindowText(text);
@@ -3007,13 +3019,48 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     {
         int count = _pendingGives.Count;
         _pendingGives.Clear();
+        _giveInFlightId = 0;
         ChatLine(count > 0
             ? $"[RynthAi] Give queue cancelled ({count} item(s) remaining)."
             : "[RynthAi] Give queue is already empty.");
     }
 
+    /// <summary>
+    /// One give at a time, each after the server has taken the last: the item has left the
+    /// inventory (or its stack shrank, for part of a stack). The queue used to send a give
+    /// every 150 ms; the server takes one give at a time and answers the rest "too busy",
+    /// so /ub give handed over one item and dropped the rest (2026-10-08). A give with no
+    /// answer in GiveConfirmMs is sent once more, then skipped.
+    /// </summary>
     private void DrainGiveQueue()
     {
+        long now = Environment.TickCount64;
+        if (_giveInFlightId != 0)
+        {
+            if (GiveLanded())
+            {
+                _giveInFlightId = 0;
+                _lastGiveAt = DateTime.UtcNow;
+                if (_pendingGives.Count == 0)
+                    ChatLine("[RynthAi] Give queue complete.");
+            }
+            else if (now - _giveInFlightAt < GiveConfirmMs)
+                return;
+            else if (_giveInFlightTries < GiveMaxTries)
+            {
+                GiveItem(_giveInFlightId, _giveInFlightTarget, _giveInFlightAmount, _giveInFlightStack);
+                _giveInFlightTries++;
+                _giveInFlightAt = now;
+                return;
+            }
+            else
+            {
+                ChatLine($"[RynthAi] Give: the server didn't take 0x{_giveInFlightId:X8} - skipping it.");
+                _giveInFlightId = 0;
+                if (_pendingGives.Count == 0) return;
+            }
+        }
+
         if (_pendingGives.Count == 0) return;
         int intervalMs = _dashboard?.Settings.GiveQueueIntervalMs ?? 150;
         if ((DateTime.UtcNow - _lastGiveAt).TotalMilliseconds < intervalMs) return;
@@ -3024,9 +3071,21 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         int whole = _objectCache?[unchecked((int)itemId)] is WorldObject wo ? Math.Max(1, wo.Values(LongValueKey.StackCount, 1)) : stackSize;
         GiveItem(itemId, targetId, stackSize, whole);
         _lastGiveAt = DateTime.UtcNow;
+        _giveInFlightId = itemId;
+        _giveInFlightTarget = targetId;
+        _giveInFlightAmount = stackSize;
+        _giveInFlightStack = whole;
+        _giveInFlightTries = 1;
+        _giveInFlightAt = now;
+    }
 
-        if (_pendingGives.Count == 0)
-            ChatLine("[RynthAi] Give queue complete.");
+    /// <summary>The in-flight give went through: the item left the inventory, or part of its stack did.</summary>
+    private bool GiveLanded()
+    {
+        if (_objectCache?[unchecked((int)_giveInFlightId)] is not WorldObject wo) return true;
+        if (!InPlayerInventory(wo.Container)) return true;
+        return _giveInFlightAmount < _giveInFlightStack
+               && Math.Max(1, wo.Values(LongValueKey.StackCount, 1)) < _giveInFlightStack;
     }
 
     /// <summary>

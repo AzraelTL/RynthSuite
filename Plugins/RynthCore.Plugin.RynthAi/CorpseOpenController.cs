@@ -98,6 +98,8 @@ public sealed partial class RynthAiPlugin
     private bool _corpseAutorunActive;
     private int _currentLootItemMoveAttempts;
     private long _currentLootItemStillSince;
+    private long _currentLootItemLeftAt;
+    private bool _currentLootItemSawAnim;
     private long _pickupAnimSince;
     private string _currentLootItemActionLabel = string.Empty;
     private string _currentLootItemName = string.Empty;
@@ -1285,7 +1287,9 @@ public sealed partial class RynthAiPlugin
                     pendingDataCount++;
                     continue;
                 }
-                // Still nameless well past the window — skip this item.
+                // Still nameless well past the window — skip this item (and say so: it used to
+                // leave nothing in the log, so a missed item couldn't be traced).
+                LootDiag($"[LootEval] 0x{(uint)item.Id:X8} on 0x{(uint)corpseId:X8} still has no name after the wait (value={item.Values(19, 0)} type=0x{item.Values(1, 0):X} wcid={item.Values(unchecked((int)WorldObjectCache.DecalTypeKey), 0)}) -> left");
                 _processedCorpseItems.Add(item.Id);
                 continue;
             }
@@ -1325,7 +1329,7 @@ public sealed partial class RynthAiPlugin
             // once the assess window expires, so an unappraised item can match a
             // rule it should not. If keeps correlate with appraised=False, that
             // is the cause.
-            LootDiag($"[LootEval] '{item.Name}' cls={item.ObjectClass} appraised={hasAppraisalData} timedOut={assessTimedOut} -> " +
+            LootDiag($"[LootEval] '{item.Name}' cls={item.ObjectClass} id=0x{(uint)item.Id:X8} value={item.Values(19, 0)} stack={item.Values(12, 0)} type=0x{item.Values(1, 0):X} wcid={item.Values(unchecked((int)WorldObjectCache.DecalTypeKey), 0)} appraised={hasAppraisalData} timedOut={assessTimedOut} -> " +
                      (classified ? $"KEEP [{actionLabel}] rule='{ruleLabel}'" : "leave"));
 
             if (classified)
@@ -1463,6 +1467,20 @@ public sealed partial class RynthAiPlugin
     /// <summary>Longest a pickup waits on the motion queue (the engine's own hold is 2.5 s).</summary>
     internal const long PickupAnimMaxMs = 3000;
 
+    /// <summary>After the item leaves the corpse: how long to wait for its bend-down to start.</summary>
+    internal const long PickupSettleMs = 1000;
+
+    /// <summary>Off the corpse but not seen in the inventory: counted after this anyway.</summary>
+    internal const long PickupArriveMaxMs = 4000;
+
+    /// <summary>The container is the character or a pack it carries.</summary>
+    private bool InPlayerInventory(int containerId)
+    {
+        if (containerId == 0 || _playerId == 0 || _objectCache == null) return false;
+        int player = unchecked((int)_playerId);
+        return containerId == player || _objectCache.GetContainerId(containerId) == player;
+    }
+
     /// <summary>
     /// The character still has motions queued (the engine's cast gate, GetCastBusyState):
     /// the bend-down of the last pickup is playing. False after PickupAnimMaxMs of it, so a
@@ -1495,10 +1513,24 @@ public sealed partial class RynthAiPlugin
         int currentContainer = currentItem?.Container ?? 0;
         bool stillVisibleOnCorpse = IsCorpseItemVisible(_openedContainerId, _currentLootItemId);
 
-        // Check every tick — confirm immediately as soon as the item leaves the corpse.
-        // Don't gate this on a timer; the timer only applies to the RETRY path below.
+        // Watch for this pickup's bend-down (the server plays it once the move reaches it).
+        bool animating = PickupAnimating(now);
+        if (animating) _currentLootItemSawAnim = true;
+
+        // Off the corpse is not done yet: confirming then closed the corpse while the pickup was
+        // still under way, and the character picked the last item up after the corpse closed
+        // (2026-10-07). It counts once the item shows up in the inventory (the main pack, a side
+        // pack, or merged into a stack already there: the picked object is gone) and its
+        // bend-down has played out. Off the corpse but never seen in the inventory: counted
+        // after PickupArriveMaxMs anyway, so looting can't stall on it.
         if (currentItem == null || !stillVisibleOnCorpse || (currentContainer != 0 && currentContainer != _openedContainerId))
         {
+            if (_currentLootItemLeftAt == 0) _currentLootItemLeftAt = now;
+            bool inInventory = currentItem == null || InPlayerInventory(currentContainer);
+            long since = now - _currentLootItemLeftAt;
+            bool settled = !animating && (_currentLootItemSawAnim || since >= PickupSettleMs);
+            if (!(inInventory && settled) && since < PickupArriveMaxMs)
+                return;
             ConfirmCurrentLootItemMoved(
                 now,
                 currentItem == null
@@ -2339,6 +2371,8 @@ public sealed partial class RynthAiPlugin
         _currentLootItemMoveRequestedAt = 0;
         _currentLootItemMoveAttempts = 0;
         _currentLootItemStillSince = 0;
+        _currentLootItemLeftAt = 0;
+        _currentLootItemSawAnim = false;
         _currentLootItemActionLabel = string.Empty;
         _currentLootItemName = string.Empty;
         _currentLootItemIsSalvage = false;

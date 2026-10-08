@@ -158,6 +158,15 @@ public class BuffManager : IDisposable
     private readonly Dictionary<int, DateTime> _buffFailCooldownUntil = new();
     private const double BuffFailCooldownSec = 120.0;
 
+    // A vital spell LEVEL the server refused for missing components (Revitalize, Heal, Stamina
+    // to Mana...): that level is passed over for NoComponentsLevelSec and the next lower level
+    // with components is cast instead. It used to park the whole family, then retry the same
+    // top level the character had no components for (2026-10-08).
+    private readonly Dictionary<int, DateTime> _noComponentsUntil = new();
+    private const double NoComponentsLevelSec = 600.0;
+    private bool LevelLacksComponents(int spellId)
+        => _noComponentsUntil.TryGetValue(spellId, out DateTime until) && DateTime.Now < until;
+
     // Per-family SILENT no-show counter. Distinct from _buffFailCooldownUntil
     // (which catches chat-explicit hard rejects). This catches the /god case:
     // skill is Trained → IsSkillUsable says yes → BuildDynamicBuffList includes
@@ -474,6 +483,27 @@ public class BuffManager : IDisposable
         { AcSkillType.WarMagic, "War Magic Mastery" },
         { AcSkillType.VoidMagic, "Void Magic Mastery" },
         { AcSkillType.Summoning, "Summoning Mastery" },
+    };
+
+    /// <summary>
+    /// The prots and banes the Buffing settings let the player untick (LegacyUiSettings.DisabledBuffs),
+    /// paired by element for the two-column grid: (buff base name, label). Armor Self and
+    /// Impenetrability head the columns. The cast order stays BuildDynamicBuffList's.
+    /// </summary>
+    internal static readonly (string Buff, string Label)[] ToggleProtections =
+    {
+        ("Armor Self", "Armor"), ("Fire Protection Self", "Fire"), ("Cold Protection Self", "Cold"),
+        ("Acid Protection Self", "Acid"), ("Lightning Protection Self", "Lightning"),
+        ("Blade Protection Self", "Blade"), ("Piercing Protection Self", "Piercing"),
+        ("Bludgeoning Protection Self", "Bludgeoning"),
+    };
+
+    internal static readonly (string Buff, string Label)[] ToggleBanes =
+    {
+        ("Impenetrability", "Impenetrability"), ("Flame Bane", "Flame"), ("Frost Bane", "Frost"),
+        ("Acid Bane", "Acid"), ("Lightning Bane", "Lightning"),
+        ("Blade Bane", "Blade"), ("Piercing Bane", "Piercing"),
+        ("Bludgeoning Bane", "Bludgeoning"),
     };
 
     public BuffManager(RynthCoreHost host, LegacyUiSettings settings, SpellManager spellManager, PlayerVitalsCache vitals)
@@ -1620,7 +1650,7 @@ public class BuffManager : IDisposable
             _healWaitKind = "server finishing the last cast";
             return true;
         }
-        int spellId = FindBestSpellId(baseName, AcSkillType.LifeMagic);
+        int spellId = _spellManager.GetDynamicSelfBuffId(baseName, AcSkillType.LifeMagic, LevelLacksComponents);
         // A heal with nothing known at the allowed tiers: the lowest known tier above them.
         // Vitae can drop Life Magic under a tier line while only higher tiers are known.
         if (spellId == 0 && baseName is "Heal Self" or "Stamina to Health Self")
@@ -3107,6 +3137,12 @@ public class BuffManager : IDisposable
         final.AddRange(step5_LifeAndItem);
         final.AddRange(step6_WeaponAuras);
         final.AddRange(step7_ArmorBanes);
+
+        // Buffs the player unticked (Buffing settings: prots and banes) leave the list here, so
+        // the cast loop never casts them and NeedsAnyBuff never waits on them: a skipped buff
+        // can't hold the bot in Buffing.
+        if (_settings.DisabledBuffs.Count > 0)
+            final.RemoveAll(_settings.IsBuffDisabled);
         return final;
     }
 
@@ -3316,7 +3352,15 @@ public class BuffManager : IDisposable
             if (_pendingSpellId != 0)
             {
                 var pendingSpell = SpellTableStub.GetById(_pendingSpellId);
-                if (pendingSpell != null)
+                bool noCompsVital = _pendingSpellId == _pendingVitalSpellId
+                    && (lower.Contains("components") || lower.Contains("missing some required"));
+                if (pendingSpell != null && noCompsVital)
+                {
+                    // A vital spell: pass over this level only; the next lower one goes next.
+                    _noComponentsUntil[_pendingSpellId] = DateTime.Now.AddSeconds(NoComponentsLevelSec);
+                    _host.WriteToChat($"[RynthAi] No components for {pendingSpell.Name}: using a lower level for {NoComponentsLevelSec / 60:0} min.", 2);
+                }
+                else if (pendingSpell != null)
                 {
                     if (IsItemEnchantment(pendingSpell.Name))
                     {

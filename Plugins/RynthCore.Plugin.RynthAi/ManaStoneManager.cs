@@ -110,8 +110,11 @@ internal sealed class ManaStoneManager
         // off or the macro is stopped must leave the set too.
         PruneLootedForTap(NowMs);
 
-        // An Eternal Mana Charge refills gear for free, so it works with tapping off too.
-        if (!_settings.EnableManaTapping && !HasEternalCharge()) { Reset(); return; }
+        // Refilling worn gear from a charged stone (or a free Eternal charge) works with tapping
+        // off too; only draining loot into empty stones needs tapping on. It used to need tapping
+        // on for any refill, so charged stones and bought Mana Charges were never used with it
+        // off (2026-10-08).
+        if (!_settings.EnableManaTapping && !HasChargedRefillStone()) { Reset(); return; }
         if (!_settings.IsMacroRunning)    { Reset(); return; }
 
         long now = NowMs;
@@ -487,11 +490,22 @@ internal sealed class ManaStoneManager
         if (hasRule) return false;                      // explicit rules → match by name only
         if (!_settings.EnableManaTapping) return false; // no rules → auto-detect only when tapping is on
 
-        if (item.ObjectClass == AcObjectClass.ManaStone) return true;
-        return !string.IsNullOrEmpty(item.Name)
-               && (item.Name.Contains("Mana Stone", StringComparison.OrdinalIgnoreCase)
-                   || item.Name.Contains("Mana Charge", StringComparison.OrdinalIgnoreCase));
+        // Only the ordinary tapping stones and mana charges. Retail also has special stones
+        // (Aligned, Aetheria, Unstable, Enchanted, Adjanite Mana Stone) that are not for
+        // draining or recharging: an Aligned Mana Stone was used on a wand (2026-10-08). A
+        // special stone is only touched when a ManaStone consumable rule names it.
+        if (string.IsNullOrEmpty(item.Name))
+            return item.ObjectClass == AcObjectClass.ManaStone;   // unnamed yet: the class decides (looting)
+        return OrdinaryStoneNames.Contains(item.Name)
+               || item.Name.Contains("Mana Charge", StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>The retail tapping stones (ACE world data names), smallest to largest.</summary>
+    internal static readonly HashSet<string> OrdinaryStoneNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Minor Mana Stone", "Lesser Mana Stone", "Moderate Mana Stone", "Mana Stone",
+        "Greater Mana Stone", "Major Mana Stone",
+    };
 
     /// <summary>
     /// An unlimited mana charge (Eternal Mana Charge: 10,000 mana, never used up). Always
@@ -499,6 +513,35 @@ internal sealed class ManaStoneManager
     /// </summary>
     private static bool IsEternal(WorldObject item) =>
         !string.IsNullOrEmpty(item.Name) && item.Name.StartsWith("Eternal Mana", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// A stone that may refill worn gear when charged: what <see cref="IsManaStone"/> takes, but
+    /// with tapping off as well (no rules: the ordinary stones and mana charges; with ManaStone
+    /// rules: the named ones).
+    /// </summary>
+    internal bool IsRefillStone(WorldObject item)
+    {
+        if (IsManaStone(item)) return true;
+        if (_settings.EnableManaTapping || string.IsNullOrEmpty(item.Name)) return false;
+        foreach (var rule in _settings.ConsumableRules)
+            if (rule.Type.Equals("ManaStone", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(rule.Name))
+                return false;   // rules decide (IsManaStone already said no)
+        return OrdinaryStoneNames.Contains(item.Name)
+               || item.Name.Contains("Mana Charge", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // FindChargedStone walks every known object; with tapping off it gates the whole tick, so
+    // the answer is kept for a few seconds.
+    private long _chargedCheckAt;
+    private bool _chargedCached;
+    private bool HasChargedRefillStone()
+    {
+        long now = NowMs;
+        if (now - _chargedCheckAt < 5000) return _chargedCached;
+        _chargedCheckAt = now;
+        _chargedCached = HasEternalCharge() || FindChargedStone() != 0;
+        return _chargedCached;
+    }
 
     private bool HasEternalCharge()
     {
@@ -608,7 +651,7 @@ internal sealed class ManaStoneManager
 
         foreach (var item in _objectCache.AllKnownObjects())
         {
-            if (!IsManaStone(item)) continue;
+            if (!IsRefillStone(item)) continue;
             if (!IsOwnedByPlayer(item, playerId)) continue;
 
             // Skip stones that timed out on use-on-player recently.
@@ -617,7 +660,6 @@ internal sealed class ManaStoneManager
 
             // Eternal: always charged (its mana often can't be read), never used up — first choice.
             if (IsEternal(item)) return item.Id;
-            if (!_settings.EnableManaTapping) continue;   // tapping off: only the free charge
 
             if (!_host.TryGetObjectIntProperty(unchecked((uint)item.Id), (uint)AcIntProperty.CurrentMana, out int cur))
                 continue;

@@ -194,7 +194,9 @@ public class SpellManager
         return 0;
     }
 
-    public int GetDynamicSelfBuffId(string baseSpellName, AcSkillType magicSkill)
+    /// <param name="skip">Levels to pass over (a level the server refused for missing components):
+    /// the next lower known level is returned instead.</param>
+    public int GetDynamicSelfBuffId(string baseSpellName, AcSkillType magicSkill, Func<int, bool>? skip = null)
     {
         RefreshKnownSpells(); // keep the authoritative inventory current (throttled)
 
@@ -207,8 +209,8 @@ public class SpellManager
 
         for (int tier = maxTier; tier >= 1; tier--)
         {
-            if (TryGetTierId(cleanBase, tier, out int id)) return id;
-            if (alias != null && TryGetTierId(alias, tier, out int idAlias)) return idAlias;
+            if (TryGetTierId(cleanBase, tier, out int id) && (skip == null || !skip(id))) return id;
+            if (alias != null && TryGetTierId(alias, tier, out int idAlias) && (skip == null || !skip(idAlias))) return idAlias;
         }
         return 0;
     }

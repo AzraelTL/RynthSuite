@@ -989,6 +989,8 @@ internal sealed class LegacyDashboardRenderer
                 MinRingTargets             = s.MinRingTargets,
                 BlastRange                 = s.BlastRange,
                 MinBlastTargets            = s.MinBlastTargets,
+                WallRange                  = s.WallRange,
+                MinWallTargets             = s.MinWallTargets,
                 MinSkillLevelTier1         = s.MinSkillLevelTier1,
                 MinSkillLevelTier2         = s.MinSkillLevelTier2,
                 MinSkillLevelTier3         = s.MinSkillLevelTier3,
@@ -1039,6 +1041,7 @@ internal sealed class LegacyDashboardRenderer
                 RebuffSecondsRemaining     = s.RebuffSecondsRemaining,
                 RebuffTopOffSecondsRemaining = s.RebuffTopOffSecondsRemaining,
                 CastBuffsOverItemBuffs     = s.CastBuffsOverItemBuffs,
+                DisabledBuffs              = new List<string>(s.DisabledBuffs),
                 BuffMinSkillLevelTier1     = s.BuffMinSkillLevelTier1,
                 BuffMinSkillLevelTier2     = s.BuffMinSkillLevelTier2,
                 BuffMinSkillLevelTier3     = s.BuffMinSkillLevelTier3,
@@ -1060,6 +1063,7 @@ internal sealed class LegacyDashboardRenderer
                 LootJumpHeight             = s.LootJumpHeight,
                 LootOwnership              = s.LootOwnership,
                 LootOwnCorpse              = s.LootOwnCorpse,
+                EscapeHazards              = s.EscapeHazards,
                 TravelToOwnCorpse          = s.TravelToOwnCorpse,
                 ItemInfoOnSelect           = s.ItemInfoOnSelect,
                 EnableAutostack            = s.EnableAutostack,
@@ -1192,11 +1196,13 @@ internal sealed class LegacyDashboardRenderer
             s.PetMinMonsters             = p.PetMinMonsters;
             // Spell Combat
             s.SpellCastIntervalMs        = p.SpellCastIntervalMs;
-            s.AttackSpellIntervalMs      = p.AttackSpellIntervalMs;
+            if (p.AttackSpellIntervalMs is int attackDelay) s.AttackSpellIntervalMs = attackDelay;   // absent = unchanged
             s.CastDispelSelf             = p.CastDispelSelf;
             s.MinRingTargets             = p.MinRingTargets;
             s.BlastRange                 = p.BlastRange;
             s.MinBlastTargets            = p.MinBlastTargets;
+            if (p.WallRange is int wallRange)        s.WallRange      = wallRange;        // null = an engine without walls
+            if (p.MinWallTargets is int minWall)     s.MinWallTargets = minWall;
             s.MinSkillLevelTier1         = p.MinSkillLevelTier1;
             s.MinSkillLevelTier2         = p.MinSkillLevelTier2;
             s.MinSkillLevelTier3         = p.MinSkillLevelTier3;
@@ -1247,6 +1253,7 @@ internal sealed class LegacyDashboardRenderer
             s.RebuffSecondsRemaining     = p.RebuffSecondsRemaining;
             if (p.RebuffTopOffSecondsRemaining > 0) s.RebuffTopOffSecondsRemaining = p.RebuffTopOffSecondsRemaining;
             if (p.CastBuffsOverItemBuffs is bool castOverItems) s.CastBuffsOverItemBuffs = castOverItems;   // absent = unchanged
+            if (p.DisabledBuffs is { } disabledBuffs) s.DisabledBuffs = new List<string>(disabledBuffs);  // absent = unchanged
             s.BuffMinSkillLevelTier1     = p.BuffMinSkillLevelTier1;
             s.BuffMinSkillLevelTier2     = p.BuffMinSkillLevelTier2;
             s.BuffMinSkillLevelTier3     = p.BuffMinSkillLevelTier3;
@@ -1264,6 +1271,7 @@ internal sealed class LegacyDashboardRenderer
             s.LootJumpEnabled            = p.LootJumpEnabled;
             s.LootJumpHeight             = p.LootJumpHeight;
             s.LootOwnership              = p.LootOwnership;
+            if (p.EscapeHazards is bool escape) s.EscapeHazards = escape;                 // absent = unchanged
             if (p.LootOwnCorpse is bool lootOwn) s.LootOwnCorpse = lootOwn;               // absent = unchanged
             if (p.TravelToOwnCorpse is bool travelOwn) s.TravelToOwnCorpse = travelOwn;   // absent = unchanged
             if (p.ItemInfoOnSelect is bool infoOnSelect) s.ItemInfoOnSelect = infoOnSelect; // absent = unchanged
@@ -1647,6 +1655,8 @@ internal sealed class LegacyDashboardRenderer
         dst.MinRingTargets           = tmp.MinRingTargets;
         dst.BlastRange               = tmp.BlastRange;
         dst.MinBlastTargets          = tmp.MinBlastTargets;
+        dst.WallRange                = tmp.WallRange;
+        dst.MinWallTargets           = tmp.MinWallTargets;
         dst.FollowNavMin             = tmp.FollowNavMin;
         dst.NavRingThickness         = tmp.NavRingThickness;
         dst.NavLineThickness         = tmp.NavLineThickness;
@@ -1668,6 +1678,7 @@ internal sealed class LegacyDashboardRenderer
         dst.AutoUnlockDoors          = tmp.AutoUnlockDoors;
         dst.LootOwnership            = tmp.LootOwnership;
         dst.LootOwnCorpse            = tmp.LootOwnCorpse;
+        dst.EscapeHazards            = tmp.EscapeHazards;
         dst.TravelToOwnCorpse        = tmp.TravelToOwnCorpse;
         dst.ItemInfoOnSelect         = tmp.ItemInfoOnSelect;
         dst.LootOnlyRareCorpses      = tmp.LootOnlyRareCorpses;
@@ -1676,6 +1687,7 @@ internal sealed class LegacyDashboardRenderer
         dst.RebuffSecondsRemaining   = tmp.RebuffSecondsRemaining;
         dst.RebuffTopOffSecondsRemaining = tmp.RebuffTopOffSecondsRemaining;
         dst.CastBuffsOverItemBuffs   = tmp.CastBuffsOverItemBuffs;
+        dst.DisabledBuffs            = tmp.DisabledBuffs;
         dst.BlacklistAttempts             = tmp.BlacklistAttempts;
         dst.BlacklistTimeoutSec           = tmp.BlacklistTimeoutSec;
         // 0 is never meant (every UI floors it at 250+) and is what the Settings-panel bug
@@ -2101,28 +2113,41 @@ internal sealed class LegacyDashboardRenderer
         _selectedNavIdx = sel;
     }
 
-    private DateTime _navFolderStamp;
+    private DateTime _navFolderStamp, _lootFolderStamp, _metaFolderStamp, _profileFolderStamp;
     private long _nextNavFolderCheckMs;
 
     /// <summary>
-    /// Lists NavProfiles again when the folder changed since the last look (a route saved there by
-    /// RynthNav's "save as nav route", or a file copied in), so the Nav picker shows it without a
-    /// relog. One folder time check every 3 s. Plugin tick.
+    /// Lists a folder again when it changed since the last look (a file added, removed or renamed:
+    /// a route saved by RynthNav's "save as nav route", a loot profile or meta copied in, a settings
+    /// profile saved), so its picker shows it without a relog or a reload. NavProfiles since
+    /// 2026-10; LootProfiles, MetaFiles and the character's settings profiles since 2026-10-08
+    /// (a loot profile copied in didn't show until a hot reload). One folder time check each every
+    /// 3 s. Plugin tick.
     /// </summary>
     public void TickNavFolder()
     {
         long now = Environment.TickCount64;
         if (now < _nextNavFolderCheckMs) return;
         _nextNavFolderCheckMs = now + 3000;
+        if (FolderChanged(_navFolder, ref _navFolderStamp)) RefreshNavFiles();
+        if (FolderChanged(_lootFolder, ref _lootFolderStamp)) RefreshLootFiles();
+        if (FolderChanged(_metaFolder, ref _metaFolderStamp)) RefreshMetaFiles();
+        if (FolderChanged(_charFolder, ref _profileFolderStamp)) RefreshProfilesList();
+    }
+
+    /// <summary>True when <paramref name="folder"/>'s write time moved since the last call (never on
+    /// the first look, which only records it: the lists were built at load).</summary>
+    private static bool FolderChanged(string? folder, ref DateTime stamp)
+    {
         try
         {
-            DateTime stamp = Directory.Exists(_navFolder) ? Directory.GetLastWriteTimeUtc(_navFolder) : DateTime.MinValue;
-            if (stamp == _navFolderStamp) return;
-            bool first = _navFolderStamp == default;
-            _navFolderStamp = stamp;
-            if (!first) RefreshNavFiles();
+            DateTime now = !string.IsNullOrEmpty(folder) && Directory.Exists(folder) ? Directory.GetLastWriteTimeUtc(folder) : DateTime.MinValue;
+            if (now == stamp) return false;
+            bool first = stamp == default;
+            stamp = now;
+            return !first;
         }
-        catch { }
+        catch { return false; }
     }
 
     /// <summary>Save button and /ra nav save [name]. Returns the chat line.</summary>

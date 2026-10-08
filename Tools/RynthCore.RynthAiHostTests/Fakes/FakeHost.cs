@@ -91,6 +91,9 @@ internal static unsafe class FakeHost
     public static bool GiveCalls;
     /// <summary>Every GiveObjectTo (item, target, amount; 0 = the whole object), in order.</summary>
     public static readonly List<(uint Item, uint Target, int Amount)> Gives = new();
+    /// <summary>When true (the default) a give lands at once, as the server does when it isn't busy:
+    /// the item goes to the target. False = the server hasn't taken it (still carried).</summary>
+    public static bool GiveLands = true;
     /// <summary>Opt-in: wires StopCompletely (off by default so no other test sees it).</summary>
     public static bool StopCalls;
     /// <summary>StopCompletely calls (opt-in with <see cref="StopCalls"/>).</summary>
@@ -196,7 +199,7 @@ internal static unsafe class FakeHost
         Vitals = default; BaseVitals = default; WorldName = ""; AccountName = "";
         HeadingDeg = 0; Wcids.Clear(); Spellbook.Clear(); PlayerIdValue = 0;
         Logs.Clear(); Chat.Clear(); ChatCommands.Clear();
-        AutoRunCalls.Clear(); AutoRun = false; Jumps = 0; TapJumpCalls = false; TapJumps = 0; Turns = 0; Casts.Clear(); StopCalls = false; Stops = 0; GiveCalls = false; Gives.Clear();
+        AutoRunCalls.Clear(); AutoRun = false; Jumps = 0; TapJumpCalls = false; TapJumps = 0; Turns = 0; Casts.Clear(); StopCalls = false; Stops = 0; GiveCalls = false; Gives.Clear(); GiveLands = true;
         Uses.Clear(); IdRequests.Clear(); Moves.Clear(); Appraised.Clear(); WeaponCalls = false; CombatModeValue = 1;
         VTankFlags = -1; VTankSeq = 0; LogCostMicros = 0;
         ServerGates = false; UseDoneSeq = 0; CastBusy = 0; LastUseDoneError = 0; LastUseDoneCalls = false;
@@ -631,7 +634,12 @@ internal static unsafe class FakeHost
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int GetBusyState() => BusyStateValue;
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static int GiveObjectTo(uint item, uint target, int amount) { Gives.Add((item, target, amount)); return 1; }
+    private static int GiveObjectTo(uint item, uint target, int amount)
+    {
+        Gives.Add((item, target, amount));
+        if (GiveLands && amount == 0) Containers[item] = target;
+        return 1;
+    }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int GetCurrentCombatMode() => CombatModeValue;

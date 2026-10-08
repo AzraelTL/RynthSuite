@@ -1761,7 +1761,7 @@ internal sealed class NavigationEngine
                 // teleport happened but wasn't seen, or the route stays on this side).
                 if (NextWalkTargetBeyond(route, _settings.ActiveNavIndex, OffTrackYards, out int farIdx, out double farYd))
                 {
-                    string what = pt.Type == NavPointType.Recall ? $"the recall (spell {pt.SpellId})" : $"the portal '{pt.TargetName}'";
+                    string what = pt.Type == NavPointType.Recall ? $"the recall ({NavPoint.RecallName(pt.SpellId)})" : $"the portal '{pt.TargetName}'";
                     string msg = $"Nav: {what} didn't teleport within {ActionTimeoutMs / 1000:F0}s, and the next waypoint [{farIdx}] is {farYd:F0}yd away - navigation stopped.";
                     _host.Log(msg);
                     _host.WriteToChat(msg, 1);
