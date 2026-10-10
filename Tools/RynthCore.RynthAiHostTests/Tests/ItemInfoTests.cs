@@ -25,6 +25,7 @@ internal static class ItemInfoTests
     public static void Register(Runner r)
     {
         r.Add("iteminfo: a weapon's damage, mods, imbue, slayer, spells and wield line", WeaponLine);
+        r.Add("iteminfo: Crushing Blow as the dealt crit multiplier, Biting Strike as a crit chance", CritStats);
         r.Add("iteminfo: armor's set, AL, ratings, tinks and wield level", ArmorLine);
         r.Add("iteminfo: jewelry with mana, diff and craft; a bare item stays short", JewelryAndBareItem);
         r.Add("iteminfo: a selected item already appraised prints at once, no ID", SelectedAppraised);
@@ -101,6 +102,30 @@ internal static class ItemInfoTests
         Check.False(s.Contains("mgd"), "a +0% mod is left out");
         Check.Eq(s.Split("Major Heavy Weapon Aptitude").Length, 2, "each spell named once");
         Check.False(s.Contains("not identified"), "identified: no note");
+    }
+
+    private static void CritStats()
+    {
+        var w = new Fake { Name = "Ornate Katar" };
+        w.Ints[ItemInfoText.IntItemType] = 0x1;
+        w.Ints[ItemInfoText.IntDamage] = 77;
+        w.Ints[ItemInfoText.IntWeaponTime] = 30;
+        w.Floats[ItemInfoText.FloatCriticalMultiplier] = 2.66;
+        w.Floats[ItemInfoText.FloatCriticalFrequency] = 0.15;
+        w.Floats[ItemInfoText.FloatWeaponOffense] = 1.18;
+        string s = ItemInfoText.Describe(w, Spell);
+        InOrder(s, new[] { "Dmg 77", "Speed 30", "Crushing Blow 3.66x", "Biting Strike 15%", "(+18% atk)" }, "crit stats");
+
+        w.Floats[ItemInfoText.FloatCriticalMultiplier] = 1.0;   // an ordinary crit
+        w.Floats[ItemInfoText.FloatCriticalFrequency] = 0.125;
+        s = ItemInfoText.Describe(w, Spell);
+        Check.False(s.Contains("Crushing Blow"), "a 1.0 multiplier is an ordinary crit: not shown");
+        Check.True(s.Contains("Biting Strike 12.5%"), "a fractional crit chance keeps one decimal");
+
+        var a = new Fake { Name = "Chainmail Tassets" };
+        a.Ints[ItemInfoText.IntItemType] = 0x2;
+        a.Floats[ItemInfoText.FloatCriticalMultiplier] = 3.0;
+        Check.False(ItemInfoText.Describe(a, Spell).Contains("Crushing Blow"), "only weapons show crit stats");
     }
 
     private static void ArmorLine()
@@ -203,7 +228,8 @@ internal static class ItemInfoTests
 
         public void Tick() => typeof(RynthAiPlugin).GetMethod("TickItemInfo", Any)!.Invoke(P, null);
 
-        public string[] InfoLines => FakeHost.Chat.Where(c => c.StartsWith("[RynthAi] ", StringComparison.Ordinal)).ToArray();
+        public string[] InfoLines => FakeHost.Chat.Where(c => c.StartsWith("[RynthAi] ", StringComparison.Ordinal)
+            || c.StartsWith(RynthAiPlugin.ItemPrefix, StringComparison.Ordinal)).ToArray();
     }
 
     private static void Done() => RynthAiPlugin.ItemInfoClock = () => Environment.TickCount64;
@@ -319,13 +345,13 @@ internal static class ItemInfoTests
             FakeHost.Appraised.Add(Ring);
             w.Command("/ra iteminfo mana scarab");
             w.Tick();
-            Check.True(w.InfoLines.Last().StartsWith("[RynthAi] Mana Scarab", StringComparison.Ordinal), $"exact name, any case: {w.InfoLines.Last()}");
+            Check.True(w.InfoLines.Last().StartsWith("[RynthAi Item] Mana Scarab", StringComparison.Ordinal), $"exact name, any case: {w.InfoLines.Last()}");
             w.Command("/ra iteminfo Scarab");
             w.Tick();
             Check.True(w.InfoLines.Last().Contains("Scarab") && !w.InfoLines.Last().Contains("not in your"), "a partial name finds a scarab");
             w.Command("/ra iteminfo ring");
             w.Tick();
-            Check.True(w.InfoLines.Last().StartsWith("[RynthAi] Gold Ring", StringComparison.Ordinal), "partial: Gold Ring");
+            Check.True(w.InfoLines.Last().StartsWith("[RynthAi Item] Gold Ring", StringComparison.Ordinal), "partial: Gold Ring");
             Check.Eq(FakeHost.SelectedItem, 0u, "a named lookup doesn't need a selection");
         }
         finally { Done(); }

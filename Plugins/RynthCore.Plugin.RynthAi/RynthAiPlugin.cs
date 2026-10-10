@@ -2018,10 +2018,12 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         {
             int sid = unchecked((int)currentTargetId);
             WorldObject? obj = _objectCache?[sid];
+            // Item info on select replaces the loot verdict line: one line per pick, not two
+            // (as SilentKelpie's fork does, rynth/RynthSuite PR #3). /ra lootcheck still prints it.
+            bool itemInfo = QueueItemInfoOnSelect(currentTargetId, obj);
             // Skip non-items (monsters, players, NPCs, doors, corpses, portals, etc.)
-            if (_lootInspectMode && obj != null && IsLootableClass(obj.ObjectClass))
+            if (!itemInfo && _lootInspectMode && obj != null && IsLootableClass(obj.ObjectClass))
                 InspectLootRuleForItem(sid, quiet: true);
-            QueueItemInfoOnSelect(currentTargetId, obj);
         }
     }
 

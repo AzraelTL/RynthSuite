@@ -86,6 +86,7 @@ internal static class Program
         HazardEscapeTests.Register(runner);
         ManaStoneChoiceTests.Register(runner);
         CustomDebuffTests.Register(runner);
+        ProfileLoadTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }

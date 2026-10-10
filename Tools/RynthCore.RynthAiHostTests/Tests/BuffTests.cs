@@ -62,9 +62,7 @@ internal static class BuffTests
         r.Add("buff choice: a mastery whose name has several spell ids", MultiIdMastery);   // was a known failure; fixed by 0aedcee
         r.Add("buff timers: tier-8 weapon auras last 90 minutes", TierEightAuras);   // was a known failure; fixed by 9a317a8
         r.Add("buff chat: another player's speech can't record a buff timer", SpeechIsNotACast);   // was a known failure; fixed by 0e384d2
-        r.KnownFailure("buff school: Armor Tinkering Expertise is a Creature Enchantment spell",
-            "SkillForBuff matches \"Armor\" first and files it under Life Magic: its tier comes from Life Magic, and a character without Life Magic never casts it (not fixed on any branch)",
-            ArmorTinkeringSchool);
+        r.Add("buff school: Armor Tinkering Expertise is a Creature Enchantment spell", ArmorTinkeringSchool);   // was a known failure
     }
 
     // ── Rig ───────────────────────────────────────────────────────────────────
@@ -401,7 +399,12 @@ internal static class BuffTests
 
     private static void ArmorTinkeringSchool()
     {
-        Check.Eq(BuffManager.SkillForBuff("Armor Tinkering Expertise"), AcSkillType.CreatureEnchantment, "Armor Tinkering Expertise");
+        foreach (string n in new[] { "Armor Tinkering Expertise", "Item Tinkering Expertise", "Weapon Tinkering Expertise",
+                                     "Magic Item Tinkering Expertise", "Prodigal Armor Expertise", "Incantation of Armor Tinkering Expertise" })
+            Check.Eq(BuffManager.SkillForBuff(n), AcSkillType.CreatureEnchantment, n);
+        // The "Armor" keyword still files real Life Magic armor buffs under Life.
+        foreach (string n in new[] { "Armor", "Incantation of Armor", "Prodigal Armor", "Blade Protection", "Regeneration" })
+            Check.Eq(BuffManager.SkillForBuff(n), AcSkillType.LifeMagic, n);
     }
 
     private static void ItemEnchantments()

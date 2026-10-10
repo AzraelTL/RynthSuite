@@ -38,7 +38,8 @@ internal static class ItemInfoText
 
     // STypeFloat (ACE PropertyFloat numbering).
     internal const uint FloatDamageVariance = 22, FloatMeleeDefense = 29, FloatWeaponOffense = 62, FloatDamageMod = 63,
-        FloatManaConversion = 144, FloatMissileDefense = 149, FloatMagicDefense = 150, FloatElementalDamage = 152;
+        FloatManaConversion = 144, FloatMissileDefense = 149, FloatMagicDefense = 150, FloatElementalDamage = 152,
+        FloatCriticalMultiplier = 136, FloatCriticalFrequency = 147;
 
     /// <summary>Gear ratings (STypeInt 370-389) and their short tags, in print order.</summary>
     internal static readonly (uint Key, string Tag)[] Ratings =
@@ -210,6 +211,15 @@ internal static class ItemInfoText
         }
         if (Int(item, IntElementalBonus) is int elemBonus and > 0) parts.Add("+" + elemBonus.ToString(Inv) + " elemental dmg");
         if (weapon && item.TryInt(IntWeaponTime, out int speed) && speed > 0) parts.Add("Speed " + speed.ToString(Inv));
+
+        // Crushing Blow and Biting Strike, the way the client's appraisal names them (shown as
+        // SilentKelpie's fork shows them, rynth/RynthSuite PR #3). ACE deals a crit as damage x
+        // (1 + CriticalMultiplier) (DamageEvent), so 2.66 reads "Crushing Blow 3.66x"; 1.0 is an
+        // ordinary crit. CriticalFrequency is the weapon's own crit chance (default 10%, 5% casters).
+        if (weapon && item.TryFloat(FloatCriticalMultiplier, out double critMult) && critMult > 1.0)
+            parts.Add("Crushing Blow " + (1.0 + critMult).ToString("0.##", Inv) + "x");
+        if (weapon && item.TryFloat(FloatCriticalFrequency, out double critFreq) && critFreq > 0 && critFreq < 1)
+            parts.Add("Biting Strike " + (critFreq * 100.0).ToString("0.#", Inv) + "%");
 
         // Modifiers: 1.18 = +18%. Missile launchers' damage mod and casters' elemental mod too.
         var mods = new List<string>(6);

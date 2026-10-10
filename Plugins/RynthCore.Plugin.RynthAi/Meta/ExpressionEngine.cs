@@ -1074,15 +1074,78 @@ internal sealed class ExpressionEngine
         return NewList(items);
     }
 
+    // List text: "[item,item,...]". An item that is itself a whole list is written as is, so
+    // lists nest ("[a,[b,c]]"); any other item has '\', ',', '[' and ']' escaped with '\'.
+    // Items without those characters are written exactly as before ("[a,b]").
     private static string NewList(IEnumerable<string>? items = null)
-        => items != null ? "[" + string.Join(",", items) + "]" : "[]";
+    {
+        if (items == null) return "[]";
+        var sb = new System.Text.StringBuilder("[");
+        bool first = true;
+        foreach (string? item in items)
+        {
+            if (!first) sb.Append(',');
+            first = false;
+            AppendListItem(sb, item ?? "");
+        }
+        return sb.Append(']').ToString();
+    }
+
+    private static void AppendListItem(System.Text.StringBuilder sb, string item)
+    {
+        if (IsWholeList(item)) { sb.Append(item); return; }
+        foreach (char c in item)
+        {
+            if (c is '\\' or ',' or '[' or ']') sb.Append('\\');
+            sb.Append(c);
+        }
+    }
+
+    /// <summary>True when <paramref name="s"/> is one list: its first '[' closes on the last character (escapes skipped).</summary>
+    private static bool IsWholeList(string s)
+    {
+        if (s.Length < 2 || s[0] != '[' || s[s.Length - 1] != ']') return false;
+        int depth = 0;
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (c == '\\') { i++; continue; }
+            if (c == '[') depth++;
+            else if (c == ']' && --depth == 0) return i == s.Length - 1;
+        }
+        return false;
+    }
 
     private static List<string>? GetList(string handle)
     {
         handle = handle.Trim();
         if (handle.Length < 2 || handle[0] != '[' || handle[handle.Length - 1] != ']') return null;
         string inner = handle.Substring(1, handle.Length - 2);
-        return inner.Length == 0 ? new List<string>() : new List<string>(inner.Split(','));
+        var items = new List<string>();
+        if (inner.Length == 0) return items;
+
+        // Split on commas outside nested lists. Escapes are undone for this list's own items;
+        // a nested list keeps them for when it is read as a list itself. Only "\\", "\,", "\["
+        // and "\]" are escapes (all NewList writes); any other backslash is plain text, so a
+        // list saved before escaping existed ("[c:\d]") reads back unchanged.
+        var cur = new System.Text.StringBuilder();
+        int depth = 0;
+        for (int i = 0; i < inner.Length; i++)
+        {
+            char c = inner[i];
+            if (c == '\\' && i + 1 < inner.Length && inner[i + 1] is '\\' or ',' or '[' or ']')
+            {
+                if (depth > 0) cur.Append(c);
+                cur.Append(inner[++i]);
+                continue;
+            }
+            if (c == '[') depth++;
+            else if (c == ']' && depth > 0) depth--;
+            else if (c == ',' && depth == 0) { items.Add(cur.ToString()); cur.Clear(); continue; }
+            cur.Append(c);
+        }
+        items.Add(cur.ToString());
+        return items;
     }
 
     private static string StripBackticks(string s)

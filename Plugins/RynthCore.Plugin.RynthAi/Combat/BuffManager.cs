@@ -3755,6 +3755,11 @@ public class BuffManager : IDisposable
             name.Contains("Bane"))
             return AcSkillType.ItemEnchantment;
 
+        // Tinkering skill buffs (Armor Tinkering Expertise, Prodigal Armor Expertise) are Creature
+        // Enchantment; checked before the Life Magic "Armor" match below.
+        if (name.Contains("Tinkering") || name.Contains("Armor Expertise"))
+            return AcSkillType.CreatureEnchantment;
+
         if (name.Contains("Protection") || name.Contains("Armor") ||
             name.Contains("Regeneration") || name.Contains("Rejuvenation") ||
             name.Contains("Renewal") || name == "Harlune's Blessing" ||

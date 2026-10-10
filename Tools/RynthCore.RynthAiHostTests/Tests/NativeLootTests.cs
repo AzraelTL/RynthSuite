@@ -42,9 +42,8 @@ internal static class NativeLootTests
         r.Add("loot native: profile JSON round trip keeps rules and order", JsonRoundTrip);
         r.Add("loot native: malformed or missing JSON profile", MalformedJson);
         r.Add("loot native: an invalid regex in a String rule does not match", InvalidRegexDoesNotThrow);   // was a known failure; fixed by a2902c3
-        r.KnownFailure("loot native: Keep # with a count of 0 survives a save and load",
-            "LootJsonContext skips default values when writing, so KeepCount 0 is left out and loads back as the initializer's 1",
-            KeepCountZeroRoundTrip);
+        r.Add("loot native: Keep # with a count of 0 survives a save and load", KeepCountZeroRoundTrip);   // was a known failure
+        r.Add("loot native: salvage combine turned off survives a save and load", SalvageCombineOffRoundTrip);
     }
 
     private static LootRule Rule(string name, LootAction action, params LootCondition[] conds)
@@ -365,5 +364,17 @@ internal static class NativeLootTests
         string path = TempFile("keep0.json");
         Profile(rule).Save(path);
         Check.Eq(LootProfile.Load(path).Rules[0].KeepCount, 0, "KeepCount after reload");
+    }
+
+    /// <summary>LootJsonContext skips default values: SalvageCombine.Enabled = false was left out and loaded back as true.</summary>
+    private static void SalvageCombineOffRoundTrip()
+    {
+        var p = Profile(Rule("any", LootAction.Salvage));
+        p.SalvageCombine = new SalvageCombineSettings { Enabled = false };
+        string path = TempFile("combine-off.json");
+        p.Save(path);
+        var loaded = LootProfile.Load(path);
+        Check.NotNull(loaded.SalvageCombine, "SalvageCombine after reload");
+        Check.False(loaded.SalvageCombine?.Enabled ?? true, "SalvageCombine.Enabled stays off");
     }
 }

@@ -98,11 +98,11 @@ public sealed partial class RynthAiPlugin
         }
 
         if (!quiet && _itemInfoPendingId != 0 && _itemInfoPendingId != id)
-            ChatLine($"[RynthAi] Item info: stopped waiting for {ObjectNameOr(_itemInfoPendingId)}.");
+            ChatLine($"{ItemPrefix}Item info: stopped waiting for {ObjectNameOr(_itemInfoPendingId)}.");
         if (Host.HasRequestId) Host.RequestId(id);
         _itemInfoPendingId = id;
         _itemInfoDeadline = ItemInfoClock() + ItemInfoTimeoutMs;
-        if (!quiet) ChatLine($"[RynthAi] Item info: identifying {ObjectNameOr(id)}...");
+        if (!quiet) ChatLine($"{ItemPrefix}Item info: identifying {ObjectNameOr(id)}...");
     }
 
     // Item Info On Select: the item the player just selected, for the next tick (0 = none).
@@ -112,12 +112,14 @@ public sealed partial class RynthAiPlugin
     /// Selection change (OnSelectedTargetChange): queues Item Info for an item the player
     /// selected. Skips non-items and RynthAi's own selections (the looter, metas).
     /// </summary>
-    private void QueueItemInfoOnSelect(uint id, WorldObject? obj)
+    /// <summary>Queues item info for the player's pick; true when it will print (Item Info On Select).</summary>
+    private bool QueueItemInfoOnSelect(uint id, WorldObject? obj)
     {
-        if (id == 0 || _dashboard?.Settings is not { ItemInfoOnSelect: true }) return;
-        if (obj == null || !IsLootableClass(obj.ObjectClass)) return;
-        if (SelfSelect.IsOurs(id)) return;
+        if (id == 0 || _dashboard?.Settings is not { ItemInfoOnSelect: true }) return false;
+        if (obj == null || !IsLootableClass(obj.ObjectClass)) return false;
+        if (SelfSelect.IsOurs(id)) return false;
         System.Threading.Interlocked.Exchange(ref _itemInfoSelectId, id);
+        return true;
     }
 
     /// <summary>
@@ -140,10 +142,17 @@ public sealed partial class RynthAiPlugin
     private string ObjectNameOr(uint id) =>
         Host.TryGetObjectName(id, out string n) && n.Length > 0 ? n : $"0x{id:X8}";
 
+    /// <summary>
+    /// Item info lines carry their own prefix so RynthChat files them under its Items tab
+    /// (ChatClassifier.IsItemInfo, 2026-10-09); it still starts "[Rynth", so other chat
+    /// windows treat it as RynthAi output.
+    /// </summary>
+    internal const string ItemPrefix = "[RynthAi Item] ";
+
     private void PrintItemInfo(uint id, bool identified)
     {
         var source = new HostItemInfoSource(Host, id);
-        ChatLine("[RynthAi] " + ItemInfoText.Describe(source, SpellDatabase.GetSpellName, identified));
+        ChatLine(ItemPrefix + ItemInfoText.Describe(source, SpellDatabase.GetSpellName, identified));
     }
 
     /// <summary>The live appraisal through the host (tick thread).</summary>

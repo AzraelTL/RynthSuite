@@ -567,8 +567,11 @@ public sealed partial class RynthAiPlugin
             return; // Keep our target, just wait — don't ResetCorpseTarget
         }
 
-        // Loot work is actually running this tick — the timeout clock counts again.
-        _corpseHoldFrozenAge = -1;
+        // The timeout clock counts again only where loot work really runs: an open container
+        // below, or an open the arbiter lets out (the Looting check further down). Resetting it
+        // here, before that check, let every tick Combat owned age the claim (2026-10-09:
+        // with Boost Loot Priority on, Drakkon dropped 20 corpses in an Olthoi spawn, each
+        // claimed between kills and abandoned 12 s later, never opened).
 
         // ── Active corpse work — pause navigation ────────────────────────
         if (_openedContainerId != 0 || _targetCorpseId != 0)
@@ -576,6 +579,7 @@ public sealed partial class RynthAiPlugin
 
         if (_openedContainerId != 0)
         {
+            _corpseHoldFrozenAge = -1;
             StopCorpseMovement();
             TickOpenCorpseLooting(settings);
             return;
@@ -686,7 +690,12 @@ public sealed partial class RynthAiPlugin
         // 06:18:44, the first failed open of the day's stall). One tick later the stop goes
         // out first (PauseNavigationForCorpse) and the open after it.
         if (_activity != BotActivity.Looting)
+        {
+            // Combat (or anything else) owns the tick: the claim waits, its clock stopped.
+            FreezeCorpseTimeout(now);
             return;
+        }
+        _corpseHoldFrozenAge = -1;
 
         // One server action at a time (2026-10-06, ActionPacer): no open while the server is still
         // answering another action - a kit, a cast, a stance change, or the last open itself (a
@@ -699,6 +708,13 @@ public sealed partial class RynthAiPlugin
         // 2026-10-06 07:57:09.801: the engine's close, then the client's, beside the next use).
         if (_closeSentFor != 0 && _closeSentFor != _targetCorpseId && now - _closeSentAt < CloseAnswerWaitMs
             && Host.HasGetGroundContainerId && unchecked((int)Host.GetGroundContainerId()) == _closeSentFor)
+            return;
+
+        // Peace Mode When Idle: into peace before the open, not during it. Combat holds its own
+        // idle swap while looting has work (LootHoldsIdlePeace: a mode change cancels the
+        // server's walk/turn to a corpse being opened), so the character looted in combat
+        // stance (2026-10-09). Here no open is out yet, so the swap can't cancel anything.
+        if (WantsPeaceBeforeOpen(settings, now))
             return;
 
         // Farther than reach: just use the corpse. The server walks the character to it and turns
@@ -745,6 +761,32 @@ public sealed partial class RynthAiPlugin
     }
 
     private long _corpseOpenBusyWaitSince;
+
+    // Peace before the open: one request per claimed corpse, only with no monster within
+    // LootStarveCloseYards (the same test that gives looting its turn while combat still has a
+    // target), and the open goes out anyway after PeaceBeforeOpenMaxMs.
+    private const long PeaceBeforeOpenMaxMs = 2500;
+    private int _peaceBeforeOpenFor;
+    private long _peaceBeforeOpenSince;
+
+    /// <summary>True while the open should wait for the peace-mode swap it just asked for.</summary>
+    private bool WantsPeaceBeforeOpen(LegacyUiSettings settings, long now)
+    {
+        // Not HasTargets: a target combat locked but can't reach kept it on (2026-10-09, Drakkon looted
+        // in Magic mode with a target unattacked for 82 s and nothing within 5 yd).
+        if (!settings.PeaceModeWhenIdle || _combatManager == null || _combatManager.HasCloseThreat(LootStarveCloseYards)
+            || _combatManager.CurrentCombatMode == CombatMode.NonCombat
+            || _lastCorpseOpenAttemptAt != 0)   // an open is already out: no mode change now
+            return false;
+        if (_peaceBeforeOpenFor != _targetCorpseId)
+        {
+            _peaceBeforeOpenFor = _targetCorpseId;
+            _peaceBeforeOpenSince = now;
+            Host.ChangeCombatModeFor(CombatMode.NonCombat, "Loot", "peace before opening the corpse (Peace Mode When Idle)");
+            return true;
+        }
+        return now - _peaceBeforeOpenSince < PeaceBeforeOpenMaxMs;
+    }
     // Wait for busy to genuinely clear before opening the next corpse. The backstop
     // only exists so a leaked/desynced count can't freeze looting — CheckBusyTimeout
     // now force-clears a leak in 2s during the corpse approach/open phase (lootOpenUrgent),
@@ -2598,6 +2640,15 @@ public sealed partial class RynthAiPlugin
     {
         if (!Host.HasTapJump)
             return false;
+        // Not with monsters about (2026-10-09): mid-fight, an open is answered without opening
+        // because a swing, a hit or a stance change cancels the server's walk/turn to the
+        // corpse - not the stuck queue the jump clears - and the jump looked like the nav's
+        // stuck fix firing while the character was busy. The retry still goes out, unjumped.
+        if (_combatManager?.HasNearbyMonsters == true)
+        {
+            Log($"[RynthAi] Use check: no jump {why} - monsters nearby (a fight cancels opens; it isn't the stuck queue).");
+            return false;
+        }
         if (ActionPacer.Outstanding(Host, out var pending) && pending != null)
         {
             Log($"[RynthAi] Use check: no jump {why} - the server still owes an answer to {ActionPacer.Describe(pending.Kind, pending.Label)}.");
