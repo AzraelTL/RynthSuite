@@ -3415,6 +3415,9 @@ internal sealed class ExpressionEngine
             ["OffhandDefault"]      = (() => s.OffhandDefault,         v => { if (OffhandRules.TryParse(v, out var m)) s.OffhandDefault = OffhandRules.SettingValue(m); }),
             ["PreferDualWield"]     = (() => B(s.PreferDualWield),     v => s.PreferDualWield     = ToDouble(v) != 0),
             ["MonsterRange"]        = (() => I(s.MonsterRange),        v => { if (int.TryParse(v, out int i)) s.MonsterRange     = i; }),
+            // Targeting: 0 lowest health, 1 closest, 2 farthest, 3 least turning.
+            ["TargetSelection"]     = (() => I(s.TargetSelection),     v => { if (int.TryParse(v, out int i)) s.TargetSelection  = Math.Clamp(i, 0, 3); }),
+            ["TargetLock"]          = (() => B(s.TargetLock),          v => s.TargetLock          = ToDouble(v) != 0),
             ["RingRange"]           = (() => I(s.RingRange),           v => { if (int.TryParse(v, out int i)) s.RingRange        = i; }),
             ["ApproachRange"]       = (() => I(s.ApproachRange),       v => { if (int.TryParse(v, out int i)) s.ApproachRange    = i; }),
             ["MinRingTargets"]      = (() => I(s.MinRingTargets),      v => { if (int.TryParse(v, out int i)) s.MinRingTargets   = i; }),

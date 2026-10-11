@@ -33,6 +33,8 @@
     <Compile Include="..\Shared\RynthAiScriptApi.cs" Link="Shared\RynthAiScriptApi.cs" />
     <!-- RynthNet reads the bot state through RynthAi.Status. -->
     <Compile Include="..\Shared\RynthAiStatusApi.cs" Link="Shared\RynthAiStatusApi.cs" />
+    <!-- RynthSort reads what the bot is doing through RynthAi.Activity (read only). -->
+    <Compile Include="..\Shared\RynthAiActivityApi.cs" Link="Shared\RynthAiActivityApi.cs" />
     <!-- RynthNav's navmesh path queries (stuck-recovery detours outdoors). -->
     <Compile Include="..\Shared\RynthNavPathApi.cs" Link="Shared\RynthNavPathApi.cs" />
     <!-- Reading our hits out of the combat log (victim + amount); RynthTracker reads the same lines. -->

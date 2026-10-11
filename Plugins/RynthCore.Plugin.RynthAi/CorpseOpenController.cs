@@ -1122,7 +1122,13 @@ public sealed partial class RynthAiPlugin
         return trimmed.Trim();
     }
 
-    private static string? ExtractCorpseKillerName(string longDesc)
+    /// <summary>
+    /// X from the "Killed by X." line of a corpse's LongDesc, or null. Only that line counts:
+    /// the server appends more lines ("Corpse will decay in 56s") as a corpse ages, and reading
+    /// them as part of the name failed the own-kill match, so late-reached own kills were
+    /// skipped unopened (2026-10-06, Silentkelpie). Shared with the radar's killer column.
+    /// </summary>
+    internal static string? ExtractCorpseKillerName(string? longDesc)
     {
         if (string.IsNullOrWhiteSpace(longDesc))
             return null;
@@ -1133,8 +1139,11 @@ public sealed partial class RynthAiPlugin
             return null;
 
         string remainder = longDesc[(idx + prefix.Length)..];
-        remainder = remainder.TrimEnd('.', ' ', '\n', '\r');
-        return string.IsNullOrWhiteSpace(remainder) ? null : remainder;
+        int lineEnd = remainder.IndexOfAny(new[] { '\r', '\n' });
+        if (lineEnd >= 0)
+            remainder = remainder[..lineEnd];
+        remainder = remainder.Trim().TrimEnd('.').Trim();
+        return remainder.Length == 0 ? null : remainder;
     }
 
     private static string GetLootOwnershipModeName(int lootOwnership)
@@ -1357,6 +1366,9 @@ public sealed partial class RynthAiPlugin
 
             // Evaluate against loot profile — pure classification, no UseObject.
             bool classified = ClassifyItemAgainstProfile(item, settings, out string actionLabel, out bool isSalvage, out string ruleLabel);
+            // Nothing to salvage with: an item only a Salvage rule wants stays on the corpse.
+            bool noUst = classified && isSalvage && _salvageManager != null && !_salvageManager.HasUst();
+            if (noUst) { classified = false; NoteNoUstLeft(item.Name); }
 
             // Per-item decision to the LOG, not just chat. The "Loot rule:" line
             // below uses ChatLine (Host.WriteToChat), so nothing about WHY an item
@@ -1372,7 +1384,7 @@ public sealed partial class RynthAiPlugin
             // rule it should not. If keeps correlate with appraised=False, that
             // is the cause.
             LootDiag($"[LootEval] '{item.Name}' cls={item.ObjectClass} id=0x{(uint)item.Id:X8} value={item.Values(19, 0)} stack={item.Values(12, 0)} type=0x{item.Values(1, 0):X} wcid={item.Values(unchecked((int)WorldObjectCache.DecalTypeKey), 0)} appraised={hasAppraisalData} timedOut={assessTimedOut} -> " +
-                     (classified ? $"KEEP [{actionLabel}] rule='{ruleLabel}'" : "leave"));
+                     (classified ? $"KEEP [{actionLabel}] rule='{ruleLabel}'" : noUst ? $"leave (Salvage rule '{ruleLabel}', no UST carried)" : "leave"));
 
             if (classified)
             {
@@ -1913,6 +1925,17 @@ public sealed partial class RynthAiPlugin
     /// taken; actionLabel/ruleLabel are what [LootEval] logs. The looter's calls record
     /// what they approve (pending sets, counters, chat); ClassifyLootItem has the preview.
     /// </summary>
+    private long _noUstLeftSaidAt = long.MinValue / 2;
+
+    /// <summary>Says once every 5 minutes in chat that salvage items are being left for want of a UST.</summary>
+    private void NoteNoUstLeft(string? name)
+    {
+        long now = Environment.TickCount64;
+        if (now - _noUstLeftSaidAt < 5 * 60_000) return;
+        _noUstLeftSaidAt = now;
+        ChatLine($"[RynthAi] No UST in your pack: leaving salvage items on corpses (first: {name}). Carry a Ust to salvage.");
+    }
+
     private bool ClassifyItemAgainstProfile(WorldObject item, LegacyUiSettings settings, out string actionLabel, out bool isSalvage, out string ruleLabel) =>
         ClassifyLootItem(item, settings, preview: false, out actionLabel, out isSalvage, out ruleLabel, out _);
 

@@ -57,9 +57,36 @@ internal sealed class ManaStoneManager
 
     // Stones we've positively confirmed are charged via AC chat ("is already
     // full of mana"). Distinct from the cooldown so the cache's stale CurrentMana
-    // reading doesn't auto-clear them. Only cleared when the stone disappears
-    // from cache (consumed via use-on-player).
+    // reading doesn't auto-clear them. Cleared when the stone gives its mana away
+    // (see _stoneKnownEmpty below).
     private readonly HashSet<int> _stoneKnownCharged = new();
+
+    // A stone's charge is read from its last appraisal, and the server never sends a change to it:
+    // after a stone pours its mana into worn gear the read still shows the old charge, and after a
+    // drain charges it the read still shows it empty (or can't be read at all). So what the server
+    // said about a stone since then wins over the read:
+    //   * _stoneKnownCharged (above): "drains N points" into it, "already full of mana", or "no items
+    //     equipped that need mana" (only said for a charged stone). It refills worn gear even when its
+    //     charge can't be read; it never could, so a charged stone whose charge wasn't readable was
+    //     tried as an empty stone, called charged by the server, and then never used on the gear
+    //     (Khanda-handled Mace at 0% for over an hour with five charged stones in the pack, 2026-10-10).
+    //   * _stoneKnownEmpty: it gave its mana ("The Mana Stone gives ..."). Value = the read at that
+    //     moment; a different read later is a newer appraisal and supersedes the mark. Without it the
+    //     same, now empty, stone was picked again 600 ms later (the read still said charged), the
+    //     server cancelled the use without a word, and it timed out and was parked for 5 minutes, stone
+    //     after stone (2026-10-08).
+    private readonly Dictionary<int, int?> _stoneKnownEmpty = new();
+    // Stones whose charge can't be read are identified (at most every 5 minutes each) so a charged one
+    // can refill gear with tapping off, where nothing else ever tells us it is charged.
+    private readonly Dictionary<int, long> _stoneIdRequestedAt = new();
+    private const long StoneIdRetryMs = 5 * 60 * 1000;
+
+    // The server said the worn gear is full ("Your items are fully charged." / "You have no items
+    // equipped that need mana."). Worn-item mana is read from appraisals too, so the gear can still read
+    // low; no refill for a while instead of a stone every think tick.
+    private long _refillHoldUntil;
+    private const long RefillHoldMs = 2 * 60 * 1000;
+    private long _lastNoStoneDiagAt;
 
     // Worn equipment is only treated as "needs refill" when current mana drops
     // below this fraction of its MaxMana. Prevents the bot from continually
@@ -74,7 +101,9 @@ internal sealed class ManaStoneManager
     private const long ThinkIntervalMs  = 600;
     private const long ActionTimeoutMs  = 8000;
 
-    private static long NowMs => Environment.TickCount64;
+    /// <summary>Clock (ms); tests replace it.</summary>
+    internal static Func<long> Clock { get; set; } = static () => Environment.TickCount64;
+    private static long NowMs => Clock();
 
     /// <summary>
     /// Set by the plugin: true when a Keep or Keep # rule in the active loot profile
@@ -209,7 +238,20 @@ internal sealed class ManaStoneManager
                 || text.Contains("is destroyed")
                 || text.Contains("has been destroyed"))
             {
+                // The stone is charged now; its read still shows it empty until it is appraised again.
+                if (text.Contains("The Mana Stone drains")) MarkStoneCharged(_activeStoneId);
                 if (_activeItemId != 0) _lootedForTap.Remove(_activeItemId); // drained and destroyed
+                GoIdle();
+                return;
+            }
+
+            // "The Mana Stone gives N points of mana to the X." - the stone was charged after all and
+            // poured its mana into the item (ACE does that for a charged stone used on an item that
+            // isn't full). The stone is empty now.
+            if (text.Contains("The Mana Stone gives"))
+            {
+                _host.Log($"[RynthAi] ManaStone: stone 0x{(uint)_activeStoneId:X8} was charged and gave its mana to the item instead - it is empty now.");
+                MarkStoneEmpty(_activeStoneId);
                 GoIdle();
                 return;
             }
@@ -220,7 +262,7 @@ internal sealed class ManaStoneManager
             // immediately so the next think tick picks a different stone.
             if (text.Contains("is already full of mana") && _activeStoneId != 0)
             {
-                _stoneKnownCharged.Add(_activeStoneId);
+                MarkStoneCharged(_activeStoneId);
                 _stoneTapCooldownUntil.Remove(_activeStoneId); // supersede cooldown
                 _host.Log($"[RynthAi] ManaStone: stone 0x{(uint)_activeStoneId:X8} is actually charged (server: 'already full') — marking known-charged.");
                 GoIdle();
@@ -234,12 +276,60 @@ internal sealed class ManaStoneManager
             // "The Mana Stone gives X points of mana to ..." — transfer complete.
             // The stone may also have been destroyed in the process; either way
             // reset and let the next tick pick a fresh stone.
-            if (text.Contains("The Mana Stone gives")
-                || text.Contains("The Mana Stone is destroyed"))
+            if (text.Contains("The Mana Stone gives"))
             {
+                // The stone gave its mana and is empty now (an Eternal charge refills itself), though
+                // its read still shows the old charge.
+                WorldObject? stone = _activeStoneId != 0 ? _objectCache[_activeStoneId] : null;
+                if (stone == null || !IsEternal(stone)) MarkStoneEmpty(_activeStoneId);
+                if (text.Contains("fully charged")) HoldRefills("the server says the worn items are fully charged");
+                Reset();
+                return;
+            }
+            if (text.Contains("The Mana Stone is destroyed"))
+            {
+                Reset();
+                return;
+            }
+            // ACE says this only for a charged stone: the stone keeps its charge, the gear is full.
+            if (text.Contains("no items equipped that need mana"))
+            {
+                MarkStoneCharged(_activeStoneId);
+                HoldRefills("the server says no worn item needs mana");
                 Reset();
             }
         }
+    }
+
+    private void HoldRefills(string why)
+    {
+        _refillHoldUntil = NowMs + RefillHoldMs;
+        _host.Log($"[RynthAi] ManaStone: no worn-gear refill for {RefillHoldMs / 1000}s ({why}; the gear's mana reads are from its last appraisal).");
+    }
+
+    private int? ReadStoneMana(int id) =>
+        _host.TryGetObjectIntProperty(unchecked((uint)id), (uint)AcIntProperty.CurrentMana, out int cur) ? cur : null;
+
+    /// <summary>The server showed this stone empty since its read was taken (and no newer read came in).</summary>
+    private bool IsKnownEmpty(int id, int? read)
+    {
+        if (!_stoneKnownEmpty.TryGetValue(id, out int? atMark)) return false;
+        if (read != atMark) { _stoneKnownEmpty.Remove(id); return false; }   // a newer appraisal: trust it
+        return true;
+    }
+
+    private void MarkStoneEmpty(int id)
+    {
+        if (id == 0) return;
+        _stoneKnownCharged.Remove(id);
+        _stoneKnownEmpty[id] = ReadStoneMana(id);
+    }
+
+    private void MarkStoneCharged(int id)
+    {
+        if (id == 0) return;
+        _stoneKnownEmpty.Remove(id);
+        _stoneKnownCharged.Add(id);
     }
 
     /// <summary>
@@ -316,7 +406,7 @@ internal sealed class ManaStoneManager
 
         // Priority 2 (was 1): refill worn gear with a charged stone, but only
         // when there is nothing to drain right now.
-        if (WornEquipmentNeedsMana(threshold))
+        if (WornEquipmentNeedsMana(threshold) && NowMs >= _refillHoldUntil)
         {
             int chargedStone = FindChargedStone();
             if (chargedStone != 0)
@@ -326,8 +416,13 @@ internal sealed class ManaStoneManager
                 IssueUseOnPlayer();
                 return;
             }
+            long now = NowMs;
+            if (now - _lastNoStoneDiagAt > 60_000)
+            {
+                _lastNoStoneDiagAt = now;
+                _host.Log($"[RynthAi] ManaStone: worn gear needs mana but no charged stone is known ({_stoneKnownCharged.Count} known charged, {_stoneKnownEmpty.Count} known empty).");
+            }
         }
-
     }
 
     private void IssueTapItem(int stoneId, int itemId)
@@ -387,13 +482,13 @@ internal sealed class ManaStoneManager
             if (!IsOwnedByPlayer(item, playerId)) continue;
             if (_stoneKnownCharged.Contains(item.Id)) continue;
 
-            bool readMana = _host.TryGetObjectIntProperty(unchecked((uint)item.Id),
-                                                          (uint)AcIntProperty.CurrentMana, out int cur);
-            if (readMana && cur == 0)
+            int? read = ReadStoneMana(item.Id);
+            bool knownEmpty = IsKnownEmpty(item.Id, read);   // keep in sync with FindEmptyStone
+            if (knownEmpty || read == 0)
                 _stoneTapCooldownUntil.Remove(item.Id);
 
             if (_stoneTapCooldownUntil.TryGetValue(item.Id, out long until) && now < until) continue;
-            if (readMana && cur > 0) continue;
+            if (!knownEmpty && read > 0) continue;
             count++;
         }
         return count;
@@ -608,13 +703,14 @@ internal sealed class ManaStoneManager
             // mana") are never empty until they're consumed/destroyed.
             if (_stoneKnownCharged.Contains(item.Id)) continue;
 
-            bool readMana = _host.TryGetObjectIntProperty(unchecked((uint)item.Id),
-                                                          (uint)AcIntProperty.CurrentMana, out int curMana);
+            int? read = ReadStoneMana(item.Id);
+            // It gave its mana to worn gear: empty, whatever the (older) read says.
+            bool knownEmpty = IsKnownEmpty(item.Id, read);
 
             // If we can read CurrentMana and it's truly 0, the stone IS empty —
             // clear any stale blacklist entry. This makes the cooldown self-heal
             // once the cache catches up to the actual state.
-            if (readMana && curMana == 0)
+            if (knownEmpty || read == 0)
                 _stoneTapCooldownUntil.Remove(item.Id);
 
             // Skip stones that recently failed a tap so we don't loop on the
@@ -629,8 +725,7 @@ internal sealed class ManaStoneManager
             // strict here makes us blind to real empty stones; the stone-tap
             // blacklist handles the misfires when an "empty-looking" stone
             // is actually charged server-side.
-            if (_host.TryGetObjectIntProperty(unchecked((uint)item.Id), (uint)AcIntProperty.CurrentMana, out int cur)
-                && cur > 0)
+            if (!knownEmpty && read > 0)
                 continue;
 
             return item.Id;
@@ -648,6 +743,7 @@ internal sealed class ManaStoneManager
 
         int bestId   = 0;
         int bestMana = 0;
+        bool requestedId = false;
 
         foreach (var item in _objectCache.AllKnownObjects())
         {
@@ -661,14 +757,39 @@ internal sealed class ManaStoneManager
             // Eternal: always charged (its mana often can't be read), never used up — first choice.
             if (IsEternal(item)) return item.Id;
 
-            if (!_host.TryGetObjectIntProperty(unchecked((uint)item.Id), (uint)AcIntProperty.CurrentMana, out int cur))
-                continue;
-            if (cur <= 0) continue;
+            int? read = ReadStoneMana(item.Id);
+            // It already gave its mana; the read is from before that.
+            if (IsKnownEmpty(item.Id, read)) continue;
 
-            if (cur > bestMana) { bestMana = cur; bestId = item.Id; }
+            int mana;
+            if (read > 0) mana = read.Value;
+            else if (_stoneKnownCharged.Contains(item.Id)) mana = 1;   // the server said charged; amount unknown
+            else
+            {
+                if (read == null && !requestedId) requestedId = RequestStoneId(item.Id, now);
+                continue;
+            }
+
+            if (mana > bestMana) { bestMana = mana; bestId = item.Id; }
         }
 
         return bestId;
+    }
+
+    /// <summary>
+    /// Identifies a stone whose charge can't be read (at most every 5 minutes), so a charged one shows
+    /// its charge. Not when it already has appraisal data: ACE leaves CurrentMana out for an empty
+    /// stone, so an appraised stone with no readable charge is empty.
+    /// </summary>
+    private bool RequestStoneId(int id, long now)
+    {
+        if (!_host.HasRequestId) return false;
+        if (_host.HasHasAppraisalData && _host.HasAppraisalData(unchecked((uint)id))) return false;
+        if (_stoneIdRequestedAt.TryGetValue(id, out long at) && now - at < StoneIdRetryMs) return false;
+        _stoneIdRequestedAt[id] = now;
+        _host.Log($"[RynthAi] ManaStone: identifying stone 0x{(uint)id:X8} (its charge can't be read).");
+        _host.RequestId(unchecked((uint)id));
+        return true;
     }
 
     /// <summary>
@@ -813,7 +934,8 @@ internal sealed class ManaStoneManager
         {
             _lastGearDiagAt = now;
             _host.Log($"[RynthAi] ManaStone: gear check - worn={worn} manaReadable={readable} lowest={(readable > 0 ? $"{lowestPct}% ({lowestName})" : "n/a")} " +
-                      $"refillBelow={(int)(pct * 100)}% eternal={eternal} needs={needs} tapping={_settings.EnableManaTapping}");
+                      $"refillBelow={(int)(pct * 100)}% eternal={eternal} needs={needs} tapping={_settings.EnableManaTapping}" +
+                      (now < _refillHoldUntil ? $" hold={(_refillHoldUntil - now) / 1000}s" : ""));
         }
 
         return needs;

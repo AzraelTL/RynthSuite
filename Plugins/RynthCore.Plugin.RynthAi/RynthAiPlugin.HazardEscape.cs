@@ -15,8 +15,9 @@ namespace RynthCore.Plugin.RynthAi;
 /// looting, the route, the meta: OnTick returns here, like the death hold) and walks the character
 /// back out along its own footsteps (the positions it just came through, so a path it could walk)
 /// to where it stood just before the hit. It hands back once it got there and no hit came
-/// for HazardQuietMs. A dungeon cell it was hurt in is a hazard from then on (persisted), so the
-/// patrol reroutes around it now and on later visits.
+/// for HazardQuietMs. The cell it was hurt in is NOT made a patrol hazard: from 2026-10-07 it was
+/// (persisted, patrol rerouted around it), and the reroutes sent the patrol through doors into small
+/// side rooms (2026-10-10). The patrol is back to how it was before; the escape alone stays.
 /// </summary>
 public sealed partial class RynthAiPlugin
 {
@@ -59,6 +60,8 @@ public sealed partial class RynthAiPlugin
     private bool _hazardRunning;
     private long _hazardRunBeatAt;
     private string _hazardSource = "";
+    /// <summary>Cells hurt in this session: the escape steers its target out of them. Not patrol hazards.</summary>
+    private readonly System.Collections.Generic.HashSet<uint> _hazardHurtCells = new();
 
     /// <summary>True while the escape owns the character.</summary>
     internal bool HazardEscaping => _hazardEscapeSince != 0;
@@ -79,17 +82,15 @@ public sealed partial class RynthAiPlugin
     internal void NoteHotspotChat(string? text, int chatType)
     {
         if (chatType != 0 || !TryParseHotspotDamage(text, out int amount, out string source)) return;
-        // Off (Escape Acid and Lava): neither the escape nor the learning - a character that walks
-        // through acid on purpose doesn't want the patrol rerouted around it either.
+        // Off (Escape Acid and Lava): no escape.
         if (_dashboard?.Settings is { EscapeHazards: false }) return;
         long now = HazardClock();
         bool fresh = _hazardLastHitAt == 0 || now - _hazardLastHitAt > HazardQuietMs;
         if (fresh) _hazardFirstHitAt = now;
         _hazardLastHitAt = now;
         _hazardSource = source;
-
-        if (Host.TryGetPlayerPose(out uint cell, out _, out _, out _, out _, out _, out _, out _))
-            _objectCache?.RegisterDamageHazardCell(cell, source);
+        if (Host.TryGetPlayerPose(out uint cell, out _, out _, out _, out _, out _, out _, out _) && cell != 0)
+            _hazardHurtCells.Add(cell);
 
         if (_dashboard?.Settings is not { IsMacroRunning: true }) return;
         if (!HazardEscaping)
@@ -155,7 +156,7 @@ public sealed partial class RynthAiPlugin
             if (p.At >= olderThan || (p.Cell >> 16) != (cell >> 16)) continue;
             double d = Math.Sqrt((p.X - px) * (p.X - px) + (p.Y - py) * (p.Y - py));
             if (d < HazardMinBackMeters) continue;
-            if (_objectCache?.IsHazardCell(p.Cell) == true)
+            if (_objectCache?.IsHazardCell(p.Cell) == true || _hazardHurtCells.Contains(p.Cell))
             {
                 if (fallback < 0) fallback = i;
                 continue;

@@ -887,7 +887,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         ["SpellCastIntervalMs"] = (100, 1500), ["AttackSpellIntervalMs"] = (0, 5000), ["MinRingTargets"] = (1, 20), ["MinBlastTargets"] = (1, 20), ["BlastRange"] = (0, 100), ["MinWallTargets"] = (1, 20), ["WallRange"] = (0, 100),
         ["MinSkillLevelTier1"] = (1, 500), ["MinSkillLevelTier2"] = (1, 500), ["MinSkillLevelTier3"] = (1, 500), ["MinSkillLevelTier4"] = (1, 500),
         ["MinSkillLevelTier5"] = (1, 500), ["MinSkillLevelTier6"] = (1, 500), ["MinSkillLevelTier7"] = (1, 500), ["MinSkillLevelTier8"] = (1, 500),
-        ["MonsterRange"] = (1, 200), ["MonsterDisengageRange"] = (0, 200), ["RingRange"] = (1, 50), ["ApproachRange"] = (1, 50),
+        ["MonsterRange"] = (1, 200), ["MonsterDisengageRange"] = (0, 200), ["TargetSelection"] = (0, 3), ["RingRange"] = (1, 50), ["ApproachRange"] = (1, 50),
         ["CorpseApproachRangeMax"] = (0.5, 50), ["CorpseApproachRangeMin"] = (0.5, 20),
         ["FollowNavMin"] = (0.5, 20), ["NavRingThickness"] = (1, 16), ["NavLineThickness"] = (1, 16),
         ["NavHeightOffset"] = (-5, 5), ["NavSlopeSink"] = (0, 8), ["NavLabelMode"] = (0, 2), ["OpenDoorRange"] = (0.1, 70), ["MovementMode"] = (0, 0),

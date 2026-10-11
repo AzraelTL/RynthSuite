@@ -24,6 +24,7 @@ internal static class VitalsTests
         r.Add("vitals: profiles without the Stamina to Health keys load today's 30 / 20", StaminaToHealthDefaults);
         r.Add("vitals: Re-stam To keeps a started recharge going to its line; off = one recharge as before", RestamTo);
         r.Add("vitals: out of Magic stance a listed stamina potion goes before Revitalize; a caster casts first", StaminaPotionFirst);
+        r.Add("vitals: a listed potion whose stack ran out is drunk from the next stack of that name", ListedPotionNextStack);
         r.Add("vitals: after a kit, nothing else heals until the kit's result line lands", KitResultWait);
         r.Add("vitals: Heal Self known only above the tier Life Magic allows (vitae) is still cast", HealAboveAllowedTier);
         r.Add("vitals: low health wins the arbiter even on a busy tick; backs off when nothing can heal", HealthWinsArbiter);
@@ -288,6 +289,36 @@ internal static class VitalsTests
                 Check.True(FakeHost.Casts.Count > 0, "caster: Revitalize is cast");
             }
         }
+    }
+
+    // Report 2026-10-10: 200+ Stamina Tinctures, and RynthAi stopped drinking them whenever the stack
+    // the rule was added from ran out, until the player added the next stack by hand.
+    private static void ListedPotionNextStack()
+    {
+        const uint Listed = 0x80001234, NextStack = 0x80005678;
+        FakeHost.Reset();
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Melee;
+        foreach (var row in SpellTable.Rows) FakeHost.Spellbook.Add((uint)row.Id);
+        FakeHost.Skills[(Player, STypeLife)] = (400, 2);
+        FakeHost.Names[NextStack] = "Stamina Tincture";   // the listed stack (Listed) is gone
+        var host = FakeHost.Create();
+        var s = new LegacyUiSettings { IsMacroRunning = true, HealAt = 0, TopOffHP = 0, EmergencyHealAt = 0, StaminaToHealthAt = 0,
+                                       GetManaAt = 0, TopOffMana = 0, RestamAt = 30, TopOffStam = 95, UsePotions = true, EnableBuffing = false };
+        s.ConsumableRules.Add(new ConsumableRule { Id = unchecked((int)Listed), Name = "Stamina Tincture", Type = "Stamina" });
+        var skills = new CharacterSkills(host);
+        skills.SetPlayerId(Player);
+        var sm = new SpellManager(host, s);
+        sm.InitializeNatively();
+        sm.SetCharacterSkills(skills);
+        var vitals = new PlayerVitalsCache { MaxHealth = 100, CurrentHealth = 100, MaxStamina = 100, CurrentStamina = 20, MaxMana = 100, CurrentMana = 100 };
+        var b = new BuffManager(host, s, sm, vitals);
+        b.SetCharacterSkills(skills);
+        b.SetWorldObjectCache(FakeHost.MakeCache(host, Player, new[] { NextStack }));
+        Check.True(b.CheckVitals(), "stamina 20% acts");
+        Check.True(FakeHost.Uses.Contains(NextStack), "the next stack of Stamina Tinctures is drunk");
+        Check.False(FakeHost.Uses.Contains(Listed), "not the stack that ran out");
+        Check.Eq(FakeHost.Casts.Count, 0, "no Revitalize while a tincture is carried");
     }
 
     // Tom, 2026-10-06: one Revitalize often doesn't recover enough stamina.

@@ -151,6 +151,15 @@ public sealed class LegacyUiSettings
     // can push a mob just past MonsterRange, dropping it and flipping to peace,
     // then re-approaching — an endless engage/peace oscillation at the edge.
     public int MonsterDisengageRange = 0;
+    // Targeting (2026-10-10): how combat ranks the monsters of the top Priority inside Monster
+    // Range (CombatManager.TargetScheme): 0 lowest health (unknown counts as full), 1 closest,
+    // 2 farthest, 3 least turning. Ties go to the closest.
+    public int TargetSelection;
+    // Target Lock: keep the picked target until it dies or goes, leaves Monster Range, is
+    // blacklisted or skipped by a watchdog, or a higher-priority monster is in range. Off: switch
+    // when another is clearly better by Targeting. On by default; a profile saved before this
+    // setting loads it as on.
+    public bool TargetLock = true;
     public int RingRange = 5;
     public int ApproachRange = 4;
     public int MinRingTargets = 4;
@@ -890,6 +899,9 @@ public sealed class SettingsBridgePayload
     // Ranges
     public int MonsterRange { get; set; }
     public int MonsterDisengageRange { get; set; } = -1;   // -1 = absent, see BlacklistCastSettleMs
+    // Nullable: an engine that predates them doesn't send them, and its save must leave them alone.
+    public int? TargetSelection { get; set; }
+    public bool? TargetLock { get; set; }
     public int RingRange { get; set; }
     public int ApproachRange { get; set; }
     public double CorpseApproachRangeMax { get; set; }

@@ -152,7 +152,34 @@ public sealed partial class RynthAiPlugin
     private void PrintItemInfo(uint id, bool identified)
     {
         var source = new HostItemInfoSource(Host, id);
-        ChatLine(ItemPrefix + ItemInfoText.Describe(source, SpellDatabase.GetSpellName, identified));
+        ChatLine(ItemPrefix + ItemInfoText.Describe(source, SpellDatabase.GetSpellName, identified) + LootVerdictSuffix(id));
+    }
+
+    /// <summary>
+    /// " | Loot: [Keep] (A) MajorSkill Set": the looter's own verdict on the item, as a preview
+    /// (nothing recorded), so it says exactly what [LootEval] would. Item info on select replaced
+    /// the separate verdict line (95df8ed), which was the only place it showed (Tom, 2026-10-10:
+    /// lots of Major armor kept and no way to tell which rule). "" when there's no loot profile,
+    /// or /ra lootcheck off (the toggle that hid the old verdict line too).
+    /// </summary>
+    private string LootVerdictSuffix(uint id)
+    {
+        try
+        {
+            LegacyUi.LegacyUiSettings? settings = _dashboard?.Settings;
+            WorldObject? wo = _objectCache?[unchecked((int)id)];
+            if (!_lootInspectMode || settings == null || wo == null || string.IsNullOrEmpty(settings.CurrentLootPath)) return "";
+            if (!ClassifyLootItem(wo, settings, preview: true, out string action, out _, out string rule, out string builtIn))
+                // A rule can match and still not take it (its Keep # reached, a Read rule on a non-scroll).
+                return rule.Length > 0 ? $" | Loot: leave ({rule} matched, not taken)" : " | Loot: no rule matched";
+            if (builtIn.Length > 0) return $" | Loot: [{action}] built-in - {builtIn}";
+            return $" | Loot: [{action}] {(rule.Length > 0 ? rule : "(unnamed rule)")}";
+        }
+        catch (Exception ex)
+        {
+            Host.Log($"[RynthAi] Item info: loot verdict failed for 0x{id:X8}: {ex.GetType().Name}: {ex.Message}");
+            return "";
+        }
     }
 
     /// <summary>The live appraisal through the host (tick thread).</summary>

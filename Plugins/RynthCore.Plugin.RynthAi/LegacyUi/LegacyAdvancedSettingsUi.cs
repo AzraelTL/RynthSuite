@@ -14,6 +14,7 @@ internal sealed class LegacyAdvancedSettingsUi
 
     private static readonly string[] AttackHeights = { "Low", "Medium", "High" };
     private static readonly string[] NavLabelModeNames = { "Off", "Numbers", "Numbers and names" };
+    private static readonly string[] TargetSelectionNames = { "Lowest health", "Closest", "Farthest", "Least turning" };
     private static readonly string[] LootOwnershipModes = { "My Kills Only", "Fellowship Kills", "All Corpses" };
 
     public LegacyAdvancedSettingsUi(LegacyUiSettings settings)
@@ -569,6 +570,17 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.InputInt("Ring Range", ref _settings.RingRange);
                 ImGui.SetNextItemWidth(120);
                 ImGui.InputInt("Approach Range", ref _settings.ApproachRange);
+
+                ImGui.Spacing();
+                ImGui.Text("Combat Targeting");
+                ImGui.Separator();
+                ImGui.SetNextItemWidth(160);
+                ImGui.Combo("Targeting", ref _settings.TargetSelection, TargetSelectionNames, TargetSelectionNames.Length);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Which monster to attack, among those of the highest priority inside Monster Range.\nLeast turning: the one needing the smallest turn to face. Unknown health counts as full.");
+                ImGui.Checkbox("Target Lock", ref _settings.TargetLock);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("On: keeps the target it picked until it dies, leaves Monster Range, or a higher-priority monster shows up.\nOff: switches whenever another monster is clearly better by the Targeting rule.");
 
                 ImGui.Spacing();
                 ImGui.Text("Corpse Acquisition (Yards)");

@@ -1720,7 +1720,7 @@ public class BuffManager : IDisposable
         if (_worldObjectCache == null) return false;
         foreach (var rule in _settings.ConsumableRules)
             if (Array.FindIndex(types, t => t.Equals(rule.Type, StringComparison.OrdinalIgnoreCase)) >= 0
-                && _worldObjectCache[rule.Id] != null)
+                && ConsumableLookup.Resolve(_worldObjectCache, rule) != null)
                 return true;
         return false;
     }
@@ -1733,10 +1733,10 @@ public class BuffManager : IDisposable
         foreach (var rule in _settings.ConsumableRules)
         {
             if (Array.FindIndex(types, t => t.Equals(rule.Type, StringComparison.OrdinalIgnoreCase)) < 0) continue;
-            if (_worldObjectCache[rule.Id] == null) continue;
+            if (ConsumableLookup.Resolve(_worldObjectCache, rule) is not WorldObject potion) continue;
             if (HeldCastBlocksItemUse(out string heldWhy)) return VitalNo(heldWhy);
-            _host.Log($"[RynthAi] Vitals: drinking {rule.Name} ({rule.Type}).");
-            _host.UseFor(unchecked((uint)rule.Id), "Buff", $"vitals: drink {rule.Name} ({rule.Type}) from the Items list");
+            _host.Log($"[RynthAi] Vitals: drinking {rule.Name} ({rule.Type})" + (potion.Id != rule.Id ? " from a new stack." : "."));
+            _host.UseFor(unchecked((uint)potion.Id), "Buff", $"vitals: drink {rule.Name} ({rule.Type}) from the Items list");
             _lastPotionAt = DateTime.Now;
             _lastCastAttempt = DateTime.Now;
             if (IsHealthPotionType(types)) _healLatency.HealSent(Now, rule.Name);
@@ -1879,7 +1879,7 @@ public class BuffManager : IDisposable
         WorldObject? kit = null;
         bool fromPack = false;
         foreach (var r in _settings.ConsumableRules)
-            if (r.Type.Equals("HealthKit", StringComparison.OrdinalIgnoreCase) && _worldObjectCache[r.Id] is WorldObject wo) { kit = wo; break; }
+            if (r.Type.Equals("HealthKit", StringComparison.OrdinalIgnoreCase) && ConsumableLookup.Resolve(_worldObjectCache, r) is WorldObject wo) { kit = wo; break; }
         if (kit == null) { kit = BestPackHealingKit(); fromPack = true; }
         if (kit == null) return VitalNo("no healing kit");
         if (KitRetryWait(out string kitWait)) return VitalNo(kitWait);

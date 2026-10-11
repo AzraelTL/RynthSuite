@@ -256,9 +256,9 @@ public partial class CombatManager : IDisposable
     private DateTime _targetLostScanTime = DateTime.MinValue;
     private const double TARGET_SCAN_GRACE_MS = 1500.0;
 
-    // Target lock — once committed to a mob, hold it until confirmed dead/gone.
-    // Prevents spinning caused by target thrashing when world-filter has a transient null
-    // or when a second mob briefly becomes slightly closer between scan ticks.
+    // The locked target (see HandleCombatTrigger: with Target Lock on it is held until it dies,
+    // leaves Monster Range or a higher-priority monster shows up). Prevents spinning caused by
+    // target thrashing when the world filter has a transient null.
     private int _lockedTargetId = 0;
 
     private bool _wasMacroRunning;
@@ -521,25 +521,26 @@ public partial class CombatManager : IDisposable
     private DateTime _lastScanTime = DateTime.MinValue;
     private const int SCAN_INTERVAL_MS = 50;
 
-    // Utility-AI target switching: every candidate is scored each tick.
-    // The currently-locked target gets this bonus so we don't flap on near-ties —
-    // an alternative must beat (locked_score + STICKINESS) to take over.
-    private const double TARGET_SWITCH_STICKINESS = 25.0;
+    // Target selection (2026-10-10): the Targeting setting (TargetSelection) ranks the
+    // candidates by one rule (lowest health, closest, farthest, least turning) and Target
+    // Lock keeps a pick until it is no longer valid. It replaced a blended utility score
+    // (distance + health + threat + facing, plus a stickiness and a commitment bonus for the
+    // incumbent), which still switched targets mid-fight. See HandleCombatTrigger.
+    //
+    // With Target Lock off, a monster must beat the incumbent by these margins under the
+    // Targeting rule to take over, so near-ties don't flap.
+    private const float  MoreWoundedMargin    = 0.05f;   // Lowest health: 5 percentage points
+    private const double CloserFartherMarginM = 1.5;     // Closest / Farthest: metres
+    private const double LessTurningMarginDeg = 20.0;    // Least turning: degrees of facing change
 
-    // Extra hold applied ON TOP of stickiness once we have actually landed damage
-    // on the locked target — "finish what you started". Stickiness alone only
-    // breaks near-ties; this is what stops combat walking away from a half-dead
-    // mob because something undamaged wandered closer. Cleared with the rest of
-    // the fight state on switch/DropTarget. See HandleCombatTrigger.
-    private const double DAMAGE_COMMITMENT_BONUS = 20.0;
-    // A monster this much lower in health than the wounded target takes over (a predicted kill
-    // that survived). See HandleCombatTrigger.
-    private const float MoreWoundedMargin = 0.15f;
+    /// <summary>The Targeting setting's choices (LegacyUiSettings.TargetSelection).</summary>
+    internal enum TargetScheme { LowestHealth = 0, Closest = 1, Farthest = 2, LeastTurning = 3 }
 
     // Monster priority is a strict tier, not a score bonus: when a monster of a higher
     // Priority is in range (MonsterRange), only monsters of that Priority are candidates,
-    // and a lower-priority target is left for it at once. As a +5-per-level bonus it lost
-    // to stickiness (+25) and commitment (+20) and did "little to nothing" (2026-10-03).
+    // and a lower-priority target is left for it at once, Target Lock or not. As a
+    // +5-per-level score bonus it lost to the incumbent's bonuses and did "little to
+    // nothing" (2026-10-03).
     // Priority comes from GetRuleForTarget (name, match expression, else the DEFAULT row),
     // cached per monster for PriorityCacheMs because match expressions aren't free and
     // HandleCombatTrigger runs every tick over every scanned monster.
@@ -548,41 +549,35 @@ public partial class CombatManager : IDisposable
     private const double PriorityCacheMs = 1000;
     private int _lockedPriority;
 
-    /// <summary>How long a cast-issue commitment arm survives without damage
-    /// landing. Covers a projectile's flight (Force Arc confirms at a ~650ms
-    /// median, damage follows) without granting open-ended immunity to a target
-    /// that never takes damage. See the arming block in HandleCombatTrigger.</summary>
+    /// <summary>With Target Lock off, an attack at the locked target this recent, with no
+    /// damage landed since, is still on its way: no switch until it lands or this passes.
+    /// Covers a projectile's flight (Force Arc has ~2 s of travel; switching with a bolt in
+    /// the air walked away from the mob it was about to hit, 2026-09-03). See
+    /// <see cref="AttackInFlightAtLocked"/>.</summary>
     private const double CastCommitmentWindowMs = 4000.0;
 
-    /// <summary>Ceiling on how long a target that has never taken damage may keep
-    /// the commitment bonus after being locked. Past this it competes on its own
-    /// merits again, so an unkillable or unreachable mob cannot hold the lock
-    /// forever — the 2026-09-05 stall, where one Olthoi absorbed 5+ hours and
-    /// ~3,100 casts because commitment never expired and
-    /// TargetNoProgressTimeoutSec defaults to 0 (disabled).</summary>
+    /// <summary>Ceiling on the in-flight hold: once nothing has landed on the locked target
+    /// for this long (since its last damage, or since the lock when it never took any), an
+    /// attack at it no longer holds off a switch. Without a ceiling the hold refreshes on
+    /// every cast, so a target that never takes damage could keep it forever (the
+    /// 2026-09-05 stall: one Olthoi, 5+ hours, ~3,100 casts, no damage).</summary>
     private const double UndamagedCommitmentMaxMs = 15000.0;
 
     /// <summary>When the last offensive action was issued at
-    /// <see cref="_lastAttackedTargetId"/>. Bounds the cast-issue commitment arm.</summary>
+    /// <see cref="_lastAttackedTargetId"/>. Bounds the in-flight hold.</summary>
     private DateTime _lastAttackedAt = DateTime.MinValue;
-
-    // Distance (m) at which the melee-threat bonus reaches full value. The bonus
-    // ramps continuously to this range instead of switching on at a hard edge —
-    // as a step it was worth more than TARGET_SWITCH_STICKINESS, so a mob
-    // drifting across the line flipped the winner every tick. See ScoreCandidate.
-    private const double THREAT_RANGE_M = 5.0;
 
     // Incumbent continuity across scan gaps. ScanNearbyTargets drops a target on
     // a single bad LOS result or a transient miss — the candidate list has been
-    // observed oscillating 14<->17 entries tick to tick. HandleCombatTrigger
-    // scores only what is in the list, so an incumbent that blinks out scores
-    // NOTHING and loses to any challenger. That is the "score=gone" switch, and
-    // it defeats TARGET_SCAN_GRACE_MS, whose stated job is that "one bad LOS
-    // result or scan gap shouldn't hand control to navigation" — it protected
-    // the target from being DROPPED but not from being OUTSCORED while absent.
-    // Carry the last computed score for the grace window instead.
-    private double   _lockedLastScore     = double.MinValue;
+    // observed oscillating 14<->17 entries tick to tick. Picking only from what is
+    // in the list handed the fight to whoever was visible that tick and back again
+    // the next (the A->B->A flapping of 2026-09-03, logged as "score=gone"). The
+    // incumbent stays valid for TARGET_SCAN_GRACE_MS at its last seen values instead.
+    private ScannedTarget _lockedLastSeen;
     private DateTime _lockedLastSeenInScan = DateTime.MinValue;
+
+    /// <summary>Tests: the clock target selection reads (scan grace, in-flight hold).</summary>
+    internal Func<DateTime> TargetClock { get; set; } = () => DateTime.Now;
 
     public struct ScannedTarget
     {
@@ -594,8 +589,14 @@ public partial class CombatManager : IDisposable
     }
 
     /// <summary>List of nearby, attackable, LOS-clear creatures. Re-scanned every tick (≤50 ms).
-    /// Sorted by distance — selection itself is score-based via HandleCombatTrigger.</summary>
+    /// Sorted by distance — HandleCombatTrigger picks from it by the Targeting setting.</summary>
     public IReadOnlyList<ScannedTarget> ScannedTargets => _scannedTargets;
+    /// <summary>Tests: replace the scan list (distances and facing angles as given).</summary>
+    internal void SetScannedTargetsForTests(IEnumerable<ScannedTarget> targets)
+    {
+        _scannedTargets.Clear();
+        _scannedTargets.AddRange(targets);
+    }
     internal MonsterDamageStore?   DamageStore   => _damageStore;    // per-monster pet choice (PetManager)
     internal CreatureProfileStore? CreatureStore => _creatureStore;  // learned resists (PetManager)
 
@@ -1733,6 +1734,36 @@ public partial class CombatManager : IDisposable
     /// consecutive misses → blacklist. Called every combat cycle and before
     /// recording a new cast so the last cast is still judged.
     /// </summary>
+    // ── No-damage casts: evidence for an intermittent report (2026-10-09) ─────────────
+    // A player's mage cast Nether Arc VII again and again (components used, every cast answered)
+    // and the target's health never moved; it comes and goes, so it can't be caught by asking
+    // for a dump afterwards. When the judge counts BlacklistAttempts no-damage casts in a row,
+    // this writes the flight recorder (the casts sent, their targets and every server answer)
+    // and one line with what the casts were and where things stood, before the blacklist moves on.
+    private string _lastOffensiveCastLine = "";
+    private DateTime _lastNoDamageReportAt = DateTime.MinValue;
+    private const double NoDamageReportGapMs = 10 * 60_000;   // one report per 10 min per client
+
+    private void ReportNoDamageCasts(int tid)
+    {
+        DateTime now = DateTime.Now;
+        if ((now - _lastNoDamageReportAt).TotalMilliseconds < NoDamageReportGapMs) return;
+        _lastNoDamageReportAt = now;
+        try
+        {
+            int me = (int)_host.GetPlayerId();
+            WorldObject? t = tid != 0 ? _worldFilter[tid] : null;
+            double dist = me != 0 && tid != 0 ? _worldFilter.Distance(me, tid) : -1;
+            _host.Log($"[CombatCast] NO DAMAGE: {_consecutiveCastMisses} casts in a row at 0x{(uint)tid:X8} '{t?.Name ?? "?"}' " +
+                      $"landed nothing (no hit, resist or evade line within {_settings.BlacklistCastSettleMs} ms each). " +
+                      $"Last: {_lastOffensiveCastLine}; distance {dist:0.0} m, target {(t == null ? "gone from the client" : "still known")}, " +
+                      $"active=0x{(uint)activeTargetId:X8} mode={CurrentCombatMode} busy={BusyCount} castsSinceKill={CastsSinceLastKill}. " +
+                      "Flight recorder written (Logs/flight-*.txt).");
+        }
+        catch { }
+        FlightRecorderSignal.Dump(_host, $"casts with no damage at 0x{(uint)tid:X8}");
+    }
+
     private void JudgePendingCast()
     {
         if (_pendingJudgeCastAt == DateTime.MinValue) return;
@@ -1749,6 +1780,7 @@ public partial class CombatManager : IDisposable
         _consecutiveCastMisses++;
         if (_consecutiveCastMisses >= _settings.BlacklistAttempts)
         {
+            if (CurrentCombatMode == CombatMode.Magic) ReportNoDamageCasts(tid);
             _blacklistManager.ReportFailure(tid);
             if (_blacklistManager.IsBlacklisted(tid))
             {
@@ -1802,7 +1834,7 @@ public partial class CombatManager : IDisposable
     /// "N real attacks with no damage" for casts, missile shots, and melee
     /// swings alike — never raw interval ticks.
     /// </summary>
-    private void RecordOffensiveCast(int targetId)
+    internal void RecordOffensiveCast(int targetId)   // internal for tests
     {
         if (_lastAttackedTargetId != targetId)
         {
@@ -1813,10 +1845,10 @@ public partial class CombatManager : IDisposable
         }
 
         // Stamped on EVERY offensive action, not just a target change, so the
-        // cast-issue commitment window tracks the most recent cast. Stamping only
-        // on change would expire commitment mid-fight while still casting at the
-        // same mob — reintroducing the in-flight abandonment this exists to stop.
-        _lastAttackedAt = DateTime.Now;
+        // in-flight hold (Target Lock off, AttackInFlightAtLocked) tracks the most
+        // recent cast. Stamping only on change would end the hold mid-fight while
+        // still casting at the same mob — the in-flight abandonment it exists to stop.
+        _lastAttackedAt = TargetClock();   // DateTime.Now outside tests
 
         JudgePendingCast(); // verdict on the prior attack if its settle window elapsed
 
@@ -1857,7 +1889,7 @@ public partial class CombatManager : IDisposable
         _returnToPhysicalCombat = false;
         _targetLockedAt    = DateTime.MinValue;
         _lastDamageDealtAt = DateTime.MinValue;
-        _lockedLastScore      = double.MinValue;
+        _lockedLastSeen       = default;
         _lockedLastSeenInScan = DateTime.MinValue;
         _targetLostScanTime = DateTime.MinValue;
         _pendingJudgeCastAt = DateTime.MinValue;
@@ -2535,8 +2567,8 @@ public partial class CombatManager : IDisposable
             // the stillScanned grace period below will handle a truly dead/vanished mob.
         }
 
-        // Score every candidate every tick — handles initial pick AND switching when
-        // a meaningfully better target appears (stickiness bonus prevents flapping).
+        // Pick every tick: the initial pick, and a switch when the target is no longer valid,
+        // a higher-priority monster is in range, or (Target Lock off) another is clearly better.
         HandleCombatTrigger();
 
         if (activeTargetId == 0)
@@ -3366,18 +3398,21 @@ public partial class CombatManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// Target selection, every tick. Candidates are the top monster-rule Priority among monsters
+    /// inside MonsterRange (or among all scanned ones when none is inside it), ranked by the
+    /// Targeting setting (<see cref="TargetScheme"/>). Target Lock on: a valid incumbent is kept,
+    /// full stop. Off: it is kept unless another candidate beats it by the scheme's margin, and
+    /// never while an attack at it is still in flight. A higher-priority monster in range always
+    /// takes over at once (the tier filter: the incumbent is no longer a candidate).
+    /// </summary>
     public void HandleCombatTrigger()
     {
-        // Utility-AI selection: score every visible candidate, pick the highest.
-        // The locked target carries a stickiness bonus so we only switch when a
-        // genuinely better option appears — no flapping on near-ties.
         if (_scannedTargets.Count == 0) return;
 
-        int bestId = 0;
-        double bestScore = double.MinValue;
-        double heldScore = double.MinValue;   // scored total for the incumbent, for the switch log
-        bool incumbentSeen = false;
+        DateTime now = TargetClock();
         double acquireRange = Math.Max(1.0, _settings.MonsterRange);
+        var scheme = (TargetScheme)Math.Clamp(_settings.TargetSelection, 0, 3);
 
         // Strict priority: the highest Priority among monsters inside MonsterRange (or among
         // all scanned ones when none is inside it) is the only tier that may be picked.
@@ -3388,149 +3423,87 @@ public partial class CombatManager : IDisposable
             if (p > topAnyRange) topAnyRange = p;
             if (c.Distance <= acquireRange && p > topPriority) topPriority = p;
         }
-        if (topPriority == int.MinValue) topPriority = topAnyRange;
+        bool anyInRange = topPriority != int.MinValue;
+        if (!anyInRange) topPriority = topAnyRange;
 
-        // Finish what you started: a target we have damaged (or whose health is known to be below
-        // full) is kept while it's within MonsterRange and in the top priority tier, whatever a
-        // closer fresh monster scores. As a score bonus (stickiness 25 + commitment 20) it lost to
-        // a fresh monster ~2 m closer (20 points a metre at Monster Range 5): Mob A hit twice,
-        // Mob B killed, back to A (2026-10-04). Only a clearly more wounded monster in range takes
-        // over: a predicted kill that survived. Stuck targets are still dropped by the stall
-        // watchdog (it suppresses them out of the scan).
-        int forcedId = 0;
-        if (_lockedTargetId != 0)
-        {
-            ScannedTarget? inc = null;
-            foreach (var c in _scannedTargets) if (c.Id == _lockedTargetId) { inc = c; break; }
-            if (inc is { } held && held.Distance <= acquireRange && PriorityOf(held.Id) >= topPriority)
-            {
-                float heldHp = _worldFilter.GetHealthRatio(held.Id);
-                bool wounded = _lastDamageDealtAt != DateTime.MinValue || (heldHp >= 0f && heldHp < 0.99f);
-                if (wounded)
-                {
-                    float best = heldHp >= 0f ? heldHp : 1f;
-                    foreach (var c in _scannedTargets)
-                    {
-                        if (c.Id == held.Id || c.Distance > acquireRange || PriorityOf(c.Id) < topPriority) continue;
-                        float r = _worldFilter.GetHealthRatio(c.Id);
-                        if (r > 0f && r < best - MoreWoundedMargin) { best = r; forcedId = c.Id; }
-                    }
-                    if (forcedId == 0)
-                    {
-                        _lockedLastSeenInScan = DateTime.Now;
-                        return;   // keep the wounded target
-                    }
-                }
-            }
-        }
-
+        // The best candidate by the scheme. Only monsters inside MonsterRange when any is: the
+        // scan holds a locked target out to DisengageDistance (MonsterRange+3 by default) so a
+        // lone mob at the edge doesn't flip engage/peace, not so it can hold off monsters inside
+        // the range the user set (2026-09-27, Olthoi swarm: a target at 5-8 m kept for over a
+        // minute while mobs stood at 3-5 m with Monster Range 5).
+        ScannedTarget best = default;
+        double bestKey = 0;
+        bool haveBest = false;
+        ScannedTarget? incInScan = null;
         foreach (var c in _scannedTargets)
         {
+            if (c.Id == _lockedTargetId) incInScan = c;
             if (PriorityOf(c.Id) < topPriority) continue;   // a higher-priority monster is in range
-            double s = ScoreCandidate(c);
-            // The incumbent keeps stickiness and commitment only inside MonsterRange. The
-            // scan holds a locked target out to DisengageDistance (MonsterRange+3 by default)
-            // so a lone mob at the edge doesn't flip engage/peace, not so it can out-score
-            // mobs inside the range the user set. Beyond MonsterRange it competes on its
-            // merits, and any reasonable in-range mob takes over. Before this a target at
-            // 5-8 m kept +45 and could hold off mobs at 3-5 m (2026-09-27, Olthoi swarm:
-            // Monster Range 5, one target kept for over a minute, never out of range).
-            if (c.Id == _lockedTargetId)
-            {
-                double meritScore = s;
-                s += TARGET_SWITCH_STICKINESS;
-                // Commitment: once we have COMMITTED to the locked target,
-                // finishing it outranks any small positional edge a fresh mob
-                // holds. Stickiness alone only settles near-ties — it loses to a
-                // full-health mob that simply walked closer, which is how the bot
-                // left a trail of half-dead mobs.
-                //
-                // Armed at cast ISSUE as well as on confirmed damage, because
-                // Force Arc has ~2s of travel time and keying only on damage
-                // landing left that window looking "untouched" — a 2.4-point
-                // margin could walk away from a mob with a bolt already in the
-                // air (observed 2026-09-03 02:22:45).
-                //
-                // The cast-issue arm MUST expire. The first version keyed on
-                // _lastAttackedTargetId alone, which is set at issue and never
-                // cleared while the lock holds — granting a permanent +20 on top
-                // of the +25 stickiness to a target that had never taken damage
-                // and might never take any. With TargetNoProgressTimeoutSec
-                // defaulting to 0 (disabled) nothing else breaks that loop: on
-                // 2026-09-05 the bot held one Olthoi for 5+ hours, ~3,100 casts,
-                // zero damage, zero kills, switches down from 126 to 3 per 4h.
-                //
-                // Bounded to the projectile flight window instead: long enough to
-                // cover a bolt in the air, short enough that a target which never
-                // takes damage returns to competing on its merits.
-                // Two bounds, and BOTH are needed:
-                //   * since the last cast — covers the bolt currently in flight;
-                //   * since the target was locked — caps how long we extend that
-                //     courtesy to a target that has never actually taken damage.
-                // The second bound is the important one. Without it the window
-                // refreshes on every cast, so a target under continuous fire keeps
-                // the bonus indefinitely, which is the same permanent-immunity bug
-                // in a different guise.
-                //
-                // Once damage HAS landed, _lastDamageDealtAt grants commitment with
-                // no time bound — finishing a wounded mob is exactly the intent.
-                bool undamaged = _lastDamageDealtAt == DateTime.MinValue;
-                bool withinFlightWindow =
-                    _lastAttackedTargetId == c.Id
-                    && _lastAttackedAt != DateTime.MinValue
-                    && (DateTime.Now - _lastAttackedAt).TotalMilliseconds <= CastCommitmentWindowMs;
-                bool withinUndamagedGrace =
-                    _targetLockedAt != DateTime.MinValue
-                    && (DateTime.Now - _targetLockedAt).TotalMilliseconds <= UndamagedCommitmentMaxMs;
-
-                if (!undamaged || (withinFlightWindow && withinUndamagedGrace))
-                    s += DAMAGE_COMMITMENT_BONUS;
-                if (c.Distance > acquireRange)
-                    s = meritScore;   // beyond MonsterRange: no stickiness, no commitment (see above)
-                heldScore = s;
-                incumbentSeen = true;
-                _lockedLastScore = s;
-                _lockedLastSeenInScan = DateTime.Now;
-            }
-            if (s > bestScore) { bestScore = s; bestId = c.Id; }
+            if (anyInRange && c.Distance > acquireRange) continue;
+            double key = SchemeKey(scheme, c);
+            if (!haveBest || BetterCandidate(key, c, bestKey, best)) { best = c; bestKey = key; haveBest = true; }
         }
+        if (!haveBest) return;
 
-        // Incumbent briefly absent from the scan: keep it in the running at its
-        // last known score for the grace window rather than letting it score
-        // nothing. Without this a transient scan gap hands the fight to whoever
-        // happens to be visible this tick, then the next tick hands it back —
-        // the A->B->A flapping seen repeatedly on 2026-09-03.
-        if (!incumbentSeen
-            && _lockedTargetId != 0
-            && _lockedPriority >= topPriority
-            && _lockedLastScore > double.MinValue
-            && _lockedLastSeenInScan != DateTime.MinValue
-            && (DateTime.Now - _lockedLastSeenInScan).TotalMilliseconds <= TARGET_SCAN_GRACE_MS)
-        {
-            heldScore = _lockedLastScore;
-            if (heldScore >= bestScore)
-                return; // incumbent still wins on its last known score — no switch
-        }
-
-        if (forcedId != 0) { bestId = forcedId; bestScore = double.NaN; heldScore = double.MinValue; }
-
-        if (bestId == 0 || bestId == _lockedTargetId) return;
-
-        // One line per real switch. After the scoring fixes a switch should be a
-        // genuine event (target died, left, or something decisively better showed
-        // up) — if this floods the log, selection is thrashing again and the two
-        // scores say by how much.
-        int bestPriority = PriorityOf(bestId);
+        // Is the incumbent still valid? In the scan (or briefly out of it, within the scan
+        // grace, at its last seen values), in the top tier, inside MonsterRange, not
+        // blacklisted or suppressed by a watchdog.
+        string? invalidWhy = null;
+        ScannedTarget inc = default;
         if (_lockedTargetId != 0)
         {
-            string held = forcedId != 0 ? "wounded, but another is more wounded"
-                        : _lockedPriority < bestPriority ? $"priority {_lockedPriority} < {bestPriority}"
-                        : heldScore == double.MinValue ? "gone" : heldScore.ToString("0.0");
-            _host.Log($"[CombatTarget] switch 0x{_lockedTargetId:X8} '{_worldFilter[_lockedTargetId]?.Name}' (score={held}, {DescribeTargetPos(_lockedTargetId)}) " +
-                      $"-> 0x{bestId:X8} '{_worldFilter[bestId]?.Name}' (score={bestScore:0.0}, priority {bestPriority}, {DescribeTargetPos(bestId)})");
+            bool gone = false;
+            if (incInScan is { } seen)
+            {
+                inc = seen;
+                _lockedPriority = PriorityOf(seen.Id);
+                _lockedLastSeen = seen;
+                _lockedLastSeenInScan = now;
+            }
+            else
+            {
+                inc = _lockedLastSeen;   // its priority stays the last one seen (_lockedPriority)
+                gone = _lockedLastSeenInScan == DateTime.MinValue || inc.Id != _lockedTargetId
+                    || (now - _lockedLastSeenInScan).TotalMilliseconds > TARGET_SCAN_GRACE_MS;
+            }
+            invalidWhy = gone ? "gone"
+                : _lockedPriority < topPriority ? $"priority {_lockedPriority} < {topPriority}"
+                : inc.Distance > acquireRange ? $"out of Monster Range, {inc.Distance:0.0} m"
+                : _blacklistManager.IsBlacklisted(_lockedTargetId) ? "blacklisted"
+                : _recentlyKilled.ContainsKey(_lockedTargetId) ? "suppressed"
+                : null;
         }
+
+        string? switchWhy = null;
+        if (_lockedTargetId != 0 && invalidWhy == null)
+        {
+            // Target Lock on: keep it until it is no longer valid. Nothing to log.
+            if (_settings.TargetLock || best.Id == _lockedTargetId) return;
+
+            // Target Lock off: switch only to a clearly better one, and never with an attack
+            // at the incumbent still on its way.
+            double incKey = SchemeKey(scheme, inc);
+            if (incKey - bestKey < SchemeMargin(scheme)) return;
+            if (AttackInFlightAtLocked(now)) return;
+            switchWhy = $"{SchemeName(scheme)}: {DescribeSchemeValue(scheme, inc)}, another is clearly better";
+        }
+        else if (_lockedTargetId != 0)
+        {
+            if (best.Id == _lockedTargetId) return;   // its own tier's only choice (e.g. alone past the range)
+            switchWhy = invalidWhy;
+        }
+
+        // One line per real switch. A switch should be a genuine event (target died, left,
+        // or a higher priority showed up; with the lock off, something clearly better). If
+        // this floods the log, selection is thrashing again.
+        int bestId = best.Id;
+        int bestPriority = PriorityOf(bestId);
+        string picked = $"{SchemeName(scheme)}: {DescribeSchemeValue(scheme, best)}, priority {bestPriority}, {DescribeTargetPos(bestId)}";
+        if (_lockedTargetId != 0)
+            _host.Log($"[CombatTarget] switch 0x{_lockedTargetId:X8} '{_worldFilter[_lockedTargetId]?.Name}' ({switchWhy}, {DescribeTargetPos(_lockedTargetId)}) " +
+                      $"-> 0x{bestId:X8} '{_worldFilter[bestId]?.Name}' ({picked})");
         else
-            _host.Log($"[CombatTarget] lock 0x{bestId:X8} '{_worldFilter[bestId]?.Name}' (score={bestScore:0.0}, priority {bestPriority}, {DescribeTargetPos(bestId)})");
+            _host.Log($"[CombatTarget] lock 0x{bestId:X8} '{_worldFilter[bestId]?.Name}' ({picked})");
 
         // [CombatLatency]: time this engagement from the lock to its first attack.
         double lockMs = Environment.TickCount64;
@@ -3542,8 +3515,8 @@ public partial class CombatManager : IDisposable
         _lockedPriority     = bestPriority;
         _targetLockedAt     = DateTime.Now;
         _lastDamageDealtAt  = DateTime.MinValue;
-        _lockedLastScore      = double.MinValue;   // new incumbent — no carried score yet
-        _lockedLastSeenInScan = DateTime.MinValue;
+        _lockedLastSeen       = best;   // it was in this tick's scan: the grace covers a blink next tick
+        _lockedLastSeenInScan = now;
         _consecutiveCastMisses = 0;
         _pendingJudgeCastAt = DateTime.MinValue;
         _facingTarget       = false;
@@ -3564,41 +3537,84 @@ public partial class CombatManager : IDisposable
         // inventory selection and drops an off-thread SetSelectedObject mutation.
     }
 
-    private double ScoreCandidate(in ScannedTarget c)
+    /// <summary>
+    /// A candidate's rank under <paramref name="scheme"/>: lower is better. Health that isn't
+    /// known (-1) counts as full. Combat is selection-free (SelectItem removed 2026-06-03), so
+    /// ACE pushes health only for the mob we are fighting and every other candidate reads -1;
+    /// reading that as 0 ("at death's door") made every untouched mob look nearly dead, and a
+    /// target's rank collapsed the moment we hit it and its real health arrived: pick, turn,
+    /// hit once, re-pick, turn again (the spin). An un-engaged mob is almost certainly at full
+    /// health.
+    /// </summary>
+    internal double SchemeKey(TargetScheme scheme, in ScannedTarget c) => scheme switch
     {
-        double maxDist = Math.Max(1.0, _settings.MonsterRange);
-        double distScore   = Math.Clamp((maxDist - c.Distance) / maxDist, 0.0, 1.0) * 100.0;
+        TargetScheme.LowestHealth => HealthOrFull(c.Id),
+        TargetScheme.Farthest     => -c.Distance,
+        TargetScheme.LeastTurning => c.Angle,
+        _                         => c.Distance,
+    };
 
-        // GetHealthRatio returns -1 for "no vitals received for this mob yet".
-        // Combat is selection-free (SelectItem removed 2026-06-03), so ACE only
-        // pushes health for the mob we are actually fighting — every other
-        // candidate reads -1. Math.Clamp(-1, 0, 1) folded that to 0.0, i.e. "at
-        // death's door", so every untouched mob collected the FULL 50-point
-        // wounded bonus while the mob we were burning down scored its real,
-        // smaller one.
-        //
-        // The nastier half: a target's score COLLAPSED by up to 45 points the
-        // instant we hit it and its true health finally arrived. Engaging a mob
-        // made it a worse choice than the untouched mob standing next to it, so
-        // combat was pushed off whatever it had just committed to and onto the
-        // next one — pick, turn, hit once, re-pick, turn again. That is the spin.
-        //
-        // Unknown health means "not engaged yet", and an un-engaged mob is almost
-        // certainly at full health. Score it that way.
-        float  hpRatio     = _worldFilter.GetHealthRatio(c.Id);
-        double hpScore     = hpRatio < 0f ? 0.0 : (1.0 - Math.Clamp(hpRatio, 0f, 1f)) * 50.0;
+    private double HealthOrFull(int id)
+    {
+        float r = _worldFilter.GetHealthRatio(id);
+        return r < 0f ? 1.0 : Math.Clamp(r, 0f, 1f);
+    }
 
-        // Continuous ramp rather than a hard step at 3.0m. As a step this was
-        // worth 30 points the moment a mob crossed the line — more than
-        // TARGET_SWITCH_STICKINESS (25) — so a mob jittering either side of 3.0m
-        // could flip the winner every tick regardless of our commitment.
-        double threatScore = Math.Clamp((THREAT_RANGE_M - c.Distance) / THREAT_RANGE_M, 0.0, 1.0) * 30.0;
+    /// <summary>Ranks <paramref name="c"/> ahead of the best so far: a lower key, ties to the
+    /// closer one, then the lower id (so the pick is stable tick to tick).</summary>
+    private static bool BetterCandidate(double key, in ScannedTarget c, double bestKey, in ScannedTarget best)
+    {
+        if (key != bestKey) return key < bestKey;
+        if (c.Distance != best.Distance) return c.Distance < best.Distance;
+        return (uint)c.Id < (uint)best.Id;
+    }
 
-        double facingScore = (1.0 - Math.Min(1.0, c.Angle / 180.0)) * 10.0;
+    /// <summary>With Target Lock off, how much better (in <see cref="SchemeKey"/> units) another
+    /// candidate must be than the incumbent to take over.</summary>
+    private static double SchemeMargin(TargetScheme scheme) => scheme switch
+    {
+        TargetScheme.LowestHealth => MoreWoundedMargin,
+        TargetScheme.LeastTurning => LessTurningMarginDeg,
+        _                         => CloserFartherMarginM,
+    };
 
-        // Monster priority is not scored here: HandleCombatTrigger only scores monsters of
-        // the top Priority in range (see PriorityOf), so within the field it's a constant.
-        return distScore + hpScore + threatScore + facingScore;
+    internal static string SchemeName(TargetScheme scheme) => scheme switch
+    {
+        TargetScheme.LowestHealth => "lowest health",
+        TargetScheme.Closest      => "closest",
+        TargetScheme.Farthest     => "farthest",
+        _                         => "least turning",
+    };
+
+    private string DescribeSchemeValue(TargetScheme scheme, in ScannedTarget c)
+    {
+        switch (scheme)
+        {
+            case TargetScheme.LowestHealth:
+                float r = _worldFilter.GetHealthRatio(c.Id);
+                return r < 0f ? "health unknown (as full)" : $"health {Math.Clamp(r, 0f, 1f) * 100:0}%";
+            case TargetScheme.LeastTurning:
+                return $"turn {c.Angle:0} deg";
+            default:
+                return $"{c.Distance:0.0} m";
+        }
+    }
+
+    /// <summary>
+    /// True while an attack at the locked target is still on its way: issued at it within
+    /// <see cref="CastCommitmentWindowMs"/> with no damage landed since. Capped by
+    /// <see cref="UndamagedCommitmentMaxMs"/> since the last damage (or the lock, when it never
+    /// took any), so continuous fire at a target that never takes damage can't hold it forever.
+    /// Only Target Lock off asks: with the lock on nothing switches a valid target anyway.
+    /// </summary>
+    private bool AttackInFlightAtLocked(DateTime now)
+    {
+        if (_lockedTargetId == 0 || _lastAttackedTargetId != _lockedTargetId || _lastAttackedAt == DateTime.MinValue)
+            return false;
+        if ((now - _lastAttackedAt).TotalMilliseconds > CastCommitmentWindowMs) return false;
+        if (_lastDamageDealtAt != DateTime.MinValue && _lastDamageDealtAt >= _lastAttackedAt) return false;   // it landed
+        DateTime progress = _lastDamageDealtAt != DateTime.MinValue ? _lastDamageDealtAt : _targetLockedAt;
+        return progress != DateTime.MinValue && (now - progress).TotalMilliseconds <= UndamagedCommitmentMaxMs;
     }
 
     /// <summary>The Priority of the monster rule that applies to <paramref name="id"/> (its own
@@ -5178,9 +5194,10 @@ public partial class CombatManager : IDisposable
             LastCombatSkipReason = "cast"; // D4 record-only: offensive cast issued this tick
             // Visibility: log exactly what war/void spell we're about to cast
             // (id + resolved name + element/tier/target). Diagnostic only.
-            _host.Log($"[CombatCast] offensive id={offensiveSpellId} " +
+            _lastOffensiveCastLine = $"offensive id={offensiveSpellId} " +
                       $"'{SpellTableStub.GetById(offensiveSpellId)?.Name}' elem={element} " +
-                      $"shape={ShapeName(castShape)} ring={isRing} warTier={warTier} voidTier={voidTier} target='{target.Name}'");
+                      $"shape={ShapeName(castShape)} ring={isRing} warTier={warTier} voidTier={voidTier} target='{target.Name}'";
+            _host.Log("[CombatCast] " + _lastOffensiveCastLine);
             try
             {
                 _host.CastSpellFor((uint)activeTargetId, offensiveSpellId, "Combat", SpellTableStub.GetById(offensiveSpellId)?.Name ?? $"spell {offensiveSpellId}");

@@ -1495,6 +1495,7 @@ public sealed partial class RynthAiPlugin
                 _dashboard.Settings.CurrentLootPath = candidatePath;
 
             ChatLine($"[RynthAi] Loaded loot profile '{System.IO.Path.GetFileName(candidatePath)}' with {profile.Rules.Count} rule(s).");
+            ReportLootProfileProblems(profile, System.IO.Path.GetFileName(candidatePath));
             return true;
         }
         catch (Exception ex)
@@ -1502,6 +1503,42 @@ public sealed partial class RynthAiPlugin
             ChatLine($"[RynthAi] Failed to load loot profile: {ex.Message}");
             return false;
         }
+    }
+
+    /// <summary>
+    /// Reports, in chat and the log, a header rule count that disagrees with the rules
+    /// found, and names the rules that use condition types RynthAi cannot evaluate. The
+    /// evaluator treats such a rule as never matching, so the items it was written for
+    /// stay on corpses with nothing in chat or the log to say why.
+    /// </summary>
+    private void ReportLootProfileProblems(VTankLootProfile profile, string fileName)
+    {
+        if (profile.DeclaredRuleCount >= 0 && profile.DeclaredRuleCount != profile.Rules.Count)
+        {
+            string countMessage = $"[RynthAi] Loot profile '{fileName}': header declares {profile.DeclaredRuleCount} rule(s) " +
+                                  $"but the file holds {profile.Rules.Count}; all {profile.Rules.Count} are in use. " +
+                                  "Re-save the profile in the loot editor to correct the header.";
+            ChatLine(countMessage);
+            Host.Log(countMessage);
+        }
+
+        var bad = new List<string>();
+        foreach (VTankLootRule rule in profile.Rules)
+        {
+            var types = rule.Conditions
+                .Select(c => c.NodeType)
+                .Where(t => VTankNodeTypes.GetDataLineCount(t) < 0)
+                .Distinct()
+                .ToList();
+            if (types.Count > 0)
+                bad.Add($"'{rule.Name.Trim()}' (type {string.Join("/", types)})");
+        }
+        if (bad.Count == 0) return;
+
+        string message = $"[RynthAi] Loot profile '{fileName}': {bad.Count} rule(s) use condition types " +
+                         $"RynthAi does not support and will never match: {string.Join(", ", bad)}.";
+        ChatLine(message);
+        Host.Log(message);
     }
 
     // ── Loot Editor (engine ImGui panel) ────────────────────────────────────
@@ -2772,6 +2809,25 @@ public sealed partial class RynthAiPlugin
     /// after a new hazard was sighted mid-patrol — it reroutes silently (no fresh
     /// "patrol started" chatter, just a one-line note) and never flips IsMacroRunning.
     /// </summary>
+    // One log line per patrol waypoint and a summary (diagnostics: which rule put each point
+    // where it is, e.g. the patrol walking into small rooms it should only look into).
+    private void LogPatrolWaypoints(NavRouteParser route, Dictionary<uint, DungeonNavNode> graph, DungeonGeometry? geometry,
+                                    IReadOnlySet<uint>? hazards, Dictionary<NavPoint, DungeonPathfinder.PatrolPointInfo> pointLog,
+                                    uint playerCell, uint startCell)
+    {
+        try
+        {
+            Host.Log($"[RynthAi] DunNav-Patrol wp build: player cell {playerCell:X8}, start cell {startCell:X8}, {route.Points.Count} points, geometry {(geometry != null ? "on" : "off")}"
+                     + (hazards is { Count: > 0 } ? $", hazards {string.Join(",", hazards.Where(c => c >> 16 == startCell >> 16).OrderBy(c => c).Select(c => (c & 0xFFFF).ToString("X4")))}" : ""));
+            foreach (string line in DungeonPathfinder.DescribePatrol(route, graph, geometry, hazards, pointLog))
+                Host.Log("[RynthAi] DunNav-Patrol " + line);
+        }
+        catch (Exception ex)
+        {
+            Host.Log($"[RynthAi] DunNav-Patrol wp log failed: {ex.Message}");
+        }
+    }
+
     private void BuildDunPatrol(bool isRebuild)
     {
         var settings = _dashboard?.Settings;
@@ -2857,11 +2913,21 @@ public sealed partial class RynthAiPlugin
         // The dungeon map geometry (doorways, floors, walls): doorways taken straight on and
         // big rooms crossed directly. Null (old cell walk) until DungeonLOS is up.
         var geometry = DungeonPathfinder.GetGeometry(landblockKey, cellDat, _raycast?.GeometryLoader?.DungeonLOS);
-        var route = DungeonPathfinder.BuildPatrolRoute(graph, startCell, hazards, geometry);
+        // Diagnostics: record which rule laid each waypoint (logged below, one line each).
+        var pointLog = new Dictionary<NavPoint, DungeonPathfinder.PatrolPointInfo>(ReferenceEqualityComparer.Instance);
+        DungeonPathfinder.PointLog = pointLog;
+        NavRouteParser route;
+        try { route = DungeonPathfinder.BuildPatrolRoute(graph, startCell, hazards, geometry); }
+        finally { DungeonPathfinder.PointLog = null; }
 
         // Lead the bot out of the hazard first.
         if (evacuate)
-            route.Points.Insert(0, new NavPoint { Type = NavPointType.Point, NS = evacNS, EW = evacEW, Z = evacZ });
+        {
+            var lead = new NavPoint { Type = NavPointType.Point, NS = evacNS, EW = evacEW, Z = evacZ };
+            route.Points.Insert(0, lead);
+            pointLog[lead] = new DungeonPathfinder.PatrolPointInfo { Kind = "evacuate", Cell = startCell, Why = "start cell is a hazard" };
+        }
+        LogPatrolWaypoints(route, graph, geometry, hazards, pointLog, playerCell, startCell);
 
         // Empty-route guard: a single-cell / hazard-locked start yields no waypoints. Do NOT claim the
         // patrol started or enable nav — the bot would just stand in place (in the hazard) taking damage.

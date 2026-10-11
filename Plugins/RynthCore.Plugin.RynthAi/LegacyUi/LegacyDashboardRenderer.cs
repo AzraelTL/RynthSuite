@@ -1002,6 +1002,8 @@ internal sealed class LegacyDashboardRenderer
                 // Ranges
                 MonsterRange               = s.MonsterRange,
                 MonsterDisengageRange      = s.MonsterDisengageRange,
+                TargetSelection            = s.TargetSelection,
+                TargetLock                 = s.TargetLock,
                 RingRange                  = s.RingRange,
                 ApproachRange              = s.ApproachRange,
                 CorpseApproachRangeMax     = s.CorpseApproachRangeMax,
@@ -1214,6 +1216,8 @@ internal sealed class LegacyDashboardRenderer
             // Ranges
             s.MonsterRange               = p.MonsterRange;
             if (p.MonsterDisengageRange >= 0) s.MonsterDisengageRange = p.MonsterDisengageRange;   // -1 = not sent
+            if (p.TargetSelection is int targeting) s.TargetSelection = Math.Clamp(targeting, 0, 3);   // absent = unchanged
+            if (p.TargetLock is bool targetLock) s.TargetLock = targetLock;                           // absent = unchanged
             s.RingRange                  = p.RingRange;
             s.ApproachRange              = p.ApproachRange;
             s.CorpseApproachRangeMax     = p.CorpseApproachRangeMax;
@@ -1652,6 +1656,8 @@ internal sealed class LegacyDashboardRenderer
         dst.InfuseOthersAt           = tmp.InfuseOthersAt;
         dst.MonsterRange             = tmp.MonsterRange;
         dst.MonsterDisengageRange    = tmp.MonsterDisengageRange;
+        dst.TargetSelection          = Math.Clamp(tmp.TargetSelection, 0, 3);
+        dst.TargetLock               = tmp.TargetLock;
         dst.RingRange                = tmp.RingRange;
         dst.ApproachRange            = tmp.ApproachRange;
         dst.MinRingTargets           = tmp.MinRingTargets;

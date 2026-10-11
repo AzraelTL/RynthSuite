@@ -63,6 +63,7 @@ internal static class Program
         LootCorpseTests.Register(runner);
         OwnCorpseTests.Register(runner);
         UseRefusalTests.Register(runner);
+        CorpseKillerTests.Register(runner);
         VitalsTests.Register(runner);
         MultiTargetTests.Register(runner);
         CastSafetyTests.Register(runner);
@@ -73,6 +74,7 @@ internal static class Program
         UseAtLoginTests.Register(runner);
         LearnSpellsTests.Register(runner);
         AttackLatencyTests.Register(runner);
+        TargetingTests.Register(runner);
         LootAddItemTests.Register(runner);
         GiveTests.Register(runner);
         DungeonMapBakeTests.Register(runner);
@@ -87,6 +89,7 @@ internal static class Program
         ManaStoneChoiceTests.Register(runner);
         CustomDebuffTests.Register(runner);
         ProfileLoadTests.Register(runner);
+        ActivityInterfaceTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }

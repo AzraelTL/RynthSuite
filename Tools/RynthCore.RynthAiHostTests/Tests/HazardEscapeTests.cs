@@ -25,7 +25,7 @@ internal static class HazardEscapeTests
         r.Add("hazard: the hotspot damage line is read (amount, source); other lines are not", Parse);
         r.Add("hazard: a hit stops everything and walks back along the footsteps, then hands back", EscapeAlongFootsteps);
         r.Add("hazard: hurt again where it stopped - it goes further back", FurtherBack);
-        r.Add("hazard: macro off - the cell is still learned, nothing moves", MacroOff);
+        r.Add("hazard: macro off - nothing moves, nothing learned", MacroOff);
         r.Add("hazard: Escape Acid and Lava off - no escape and nothing learned (some walk through acid)", SettingOff);
     }
 
@@ -85,7 +85,7 @@ internal static class HazardEscapeTests
 
         b.Hit();
         Check.True(b.P.HazardEscaping, "the hit starts the escape");
-        Check.True(b.Cache.IsHazardCell(CellB), "the cell it was hurt in is a hazard now");
+        Check.False(b.Cache.IsHazardCell(CellB), "the cell it was hurt in is not a patrol hazard (patrol as before 10-07)");
         Check.True(b.Hold(), "the escape owns the tick (nothing else runs)");
         Check.True(FakeHost.AutoRun, "running");
 
@@ -134,7 +134,7 @@ internal static class HazardEscapeTests
         b.S.IsMacroRunning = false;
         for (int i = 0; i <= 6; i++) b.At(CellA, 60f, -185f + i);
         b.Hit();
-        Check.True(b.Cache.IsHazardCell(CellA), "the cell is learned");
+        Check.False(b.Cache.IsHazardCell(CellA), "the cell is not learned");
         Check.False(b.P.HazardEscaping, "but nothing moves the character while you play it");
         Check.False(b.Hold(), "and the tick is not held");
     }
