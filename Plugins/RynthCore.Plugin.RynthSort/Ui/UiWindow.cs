@@ -42,6 +42,9 @@ internal sealed class UiWindow
     public string Title;
     public bool Visible;
     public bool ShowInBar = true;
+    /// <summary>With ShowInBar: the window has its own button on the RynthCore bar (title as the
+    /// tooltip) rather than a line in the Scripts menu.</summary>
+    public bool BarButton = true;
     public float DefaultWidth, DefaultHeight, MinWidth, MinHeight;
 
     /// <summary>A pass is wanted at the next chance (input arrived, it was just shown, data changed).</summary>
@@ -80,7 +83,8 @@ internal sealed class UiWindow
         Title = title;
     }
 
-    public uint Flags => (Visible ? UiFormat.FlagVisible : 0) | (ShowInBar ? UiFormat.FlagShowInBar : 0);
+    public uint Flags => (Visible ? UiFormat.FlagVisible : 0) | (ShowInBar ? UiFormat.FlagShowInBar : 0)
+        | (ShowInBar && BarButton ? UiFormat.FlagBarButton : 0);
 
     public bool HeaderDirty =>
         _sentTitle != Title || _sentFlags != Flags || _sentDw != DefaultWidth || _sentDh != DefaultHeight
@@ -208,6 +212,23 @@ internal sealed class UiWindow
         EndOp(p);
     }
 
+    /// <summary>Moves the following items right by <paramref name="w"/> logical units, until <see cref="Unindent"/>.</summary>
+    public void Indent(float w)
+    {
+        if (!Room()) return;
+        int p = BeginOp(UiFormat.OpIndent);
+        F32(w);
+        EndOp(p);
+    }
+
+    public void Unindent(float w)
+    {
+        if (!Room()) return;
+        int p = BeginOp(UiFormat.OpUnindent);
+        F32(w);
+        EndOp(p);
+    }
+
     public void Button(string label, string id, Action onClick, float w = 0f, float h = 0f, bool small = false)
     {
         if (!Room()) return;
@@ -265,7 +286,11 @@ internal sealed class UiWindow
     }
 
     /// <summary>A text box; <paramref name="set"/> gets every edit (submitted = Enter was pressed).</summary>
-    public void InputText(string label, string id, string value, int maxLen, Action<string> set, uint flags = 0)
+    public void InputText(string label, string id, string value, int maxLen, Action<string> set, uint flags = 0) =>
+        InputText(label, id, value, maxLen, (text, _) => set(text), flags);
+
+    /// <summary>A text box; <paramref name="set"/> gets every edit and whether Enter was pressed.</summary>
+    public void InputText(string label, string id, string value, int maxLen, Action<string, bool> set, uint flags = 0)
     {
         if (!Room()) return;
         maxLen = Math.Clamp(maxLen, 1, UiFormat.MaxString);
@@ -277,7 +302,7 @@ internal sealed class UiWindow
         U16((ushort)maxLen);
         U32(flags);
         EndOp(p);
-        _next[key] = e => { if (e.Type == UiFormat.EvText) set(e.Text); };
+        _next[key] = e => { if (e.Type == UiFormat.EvText) set(e.Text, e.Submitted); };
     }
 
     public void Combo(string label, string id, int index, IReadOnlyList<string> items, Action<int> set)

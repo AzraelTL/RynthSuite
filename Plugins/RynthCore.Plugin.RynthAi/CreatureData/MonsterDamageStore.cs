@@ -159,6 +159,9 @@ internal sealed class MonsterDamageStore
 
     private static string Num(double d) => d.ToString("0.##", CultureInfo.InvariantCulture);
 
+    /// <summary>Nothing is recorded under wcid 0 or a player character's weenie (<see cref="PlayerWeenies"/>).</summary>
+    private static bool NotMonster(uint wcid) => wcid == 0 || PlayerWeenies.IsPlayerWcid(wcid);
+
     /// <summary>Point the store at a character's folder and load its file. Safe to call again on character change.</summary>
     public void SetCharacter(string charFolder)
     {
@@ -341,7 +344,23 @@ internal sealed class MonsterDamageStore
             {
                 // Corrupt file — start fresh; it rewrites on next save.
             }
+
+            // Rows a player character left behind (an appraised player or your own character
+            // listed as a monster) go, and the next save writes the file without them.
+            if (DropPlayerRowsLocked()) _dirty = true;
         }
+    }
+
+    /// <summary>Removes every row under a player weenie. True when any went. Caller holds _lock.</summary>
+    private bool DropPlayerRowsLocked()
+    {
+        var gone = new List<uint>();
+        foreach (uint w in _byWcid.Keys) if (PlayerWeenies.IsPlayerWcid(w)) gone.Add(w);
+        foreach (uint w in gone) _byWcid.Remove(w);
+        var tierGone = new List<(uint, int)>();
+        foreach (var k in _byTier.Keys) if (PlayerWeenies.IsPlayerWcid(k.Wcid)) tierGone.Add(k);
+        foreach (var k in tierGone) _byTier.Remove(k);
+        return gone.Count > 0 || tierGone.Count > 0;
     }
 
     /// <summary>One AH/AD/AU/APK/AT row (a difficulty tier above 0). Caller holds _lock.</summary>
@@ -529,7 +548,7 @@ internal sealed class MonsterDamageStore
     /// </summary>
     public void RecordHit(uint weaponId, uint wcid, string name, string element, int tier, double damage, bool crit)
     {
-        if (wcid == 0 || damage <= 0) return;
+        if (NotMonster(wcid) || damage <= 0) return;
         int d = Difficulty;
         lock (_lock)
         {
@@ -561,7 +580,7 @@ internal sealed class MonsterDamageStore
     /// </summary>
     public void RecordKill(uint weaponId, uint wcid, string name, string element, int tier, int castCount, double totalDamage)
     {
-        if (wcid == 0) return;
+        if (NotMonster(wcid)) return;
         int d = Difficulty;
         lock (_lock)
         {
@@ -607,7 +626,7 @@ internal sealed class MonsterDamageStore
     /// <summary>An attack or cast that did nothing: evaded, or the spell was resisted.</summary>
     public void RecordMiss(uint weaponId, uint wcid, string name)
     {
-        if (wcid == 0 || weaponId == 0) return;
+        if (NotMonster(wcid) || weaponId == 0) return;
         int d = Difficulty;
         lock (_lock)
         {
@@ -623,7 +642,7 @@ internal sealed class MonsterDamageStore
     /// </summary>
     public void RecordFightTime(uint weaponId, uint wcid, string name, double seconds, string? summonElement)
     {
-        if (wcid == 0 || seconds <= 0 || seconds > 600) return;
+        if (NotMonster(wcid) || seconds <= 0 || seconds > 600) return;
         int d = Difficulty;
         lock (_lock)
         {
@@ -650,7 +669,7 @@ internal sealed class MonsterDamageStore
     /// <summary>The monster hit us for <paramref name="damage"/> of <paramref name="element"/>.</summary>
     public void RecordTaken(uint wcid, string name, string element, double damage)
     {
-        if (wcid == 0 || damage <= 0) return;
+        if (NotMonster(wcid) || damage <= 0) return;
         int d = Difficulty;
         lock (_lock)
         {
@@ -758,7 +777,7 @@ internal sealed class MonsterDamageStore
     /// collapsed row shows the LATEST tier used. In-memory only (not persisted) — resets per session.</summary>
     public void NoteCast(uint wcid, int tier, string? name = null)
     {
-        if (wcid == 0) return;
+        if (NotMonster(wcid)) return;
         lock (_lock)
         {
             var p = Get(wcid);
@@ -859,7 +878,7 @@ internal sealed class MonsterDamageStore
     /// <summary>Set (or clear, with hp &lt;= 0) the manual HP override for a wcid. Persists on next save.</summary>
     public void SetManualHp(uint wcid, double hp, string? name = null)
     {
-        if (wcid == 0) return;
+        if (NotMonster(wcid)) return;
         lock (_lock)
         {
             var p = Get(wcid);
@@ -880,7 +899,7 @@ internal sealed class MonsterDamageStore
     /// <summary>Set (0 clears) the per-monster weapon override. Persists on next save.</summary>
     public void SetManualWeapon(uint wcid, uint weaponId, string? name = null)
     {
-        if (wcid == 0) return;
+        if (NotMonster(wcid)) return;
         lock (_lock)
         {
             var p = Get(wcid);
@@ -901,7 +920,7 @@ internal sealed class MonsterDamageStore
     /// <summary>Set ("" = Auto) the per-monster pet choice. Persists on next save.</summary>
     public void SetManualPet(uint wcid, string choice, string? name = null)
     {
-        if (wcid == 0) return;
+        if (NotMonster(wcid)) return;
         lock (_lock)
         {
             var p = Get(wcid);
@@ -922,7 +941,7 @@ internal sealed class MonsterDamageStore
     /// <summary>Set (0 clears) the per-monster offhand override. Persists on next save.</summary>
     public void SetManualOffhand(uint wcid, uint offhandId, string? name = null)
     {
-        if (wcid == 0) return;
+        if (NotMonster(wcid)) return;
         lock (_lock)
         {
             var p = Get(wcid);

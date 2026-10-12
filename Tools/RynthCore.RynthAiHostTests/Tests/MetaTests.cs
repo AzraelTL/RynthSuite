@@ -62,6 +62,8 @@ internal static class MetaTests
         r.Add("meta edit: a saved rule keeps CallState's return state and ChatCapture's colours", EditKeepsHiddenFields);
         r.Add("meta edit: the editor's Set current text matches the landblock / landcell", SetCurrentMatches);
         r.Add("meta edit: a new state's Never -> None rule keeps it through a save and reload", NewStateSurvivesReload);
+        r.Add("meta: rule names survive a save and reload (.af \"~~ @name\")", RuleNamesRoundTrip);
+        r.Add("meta edit: an update without a name (an engine without rule names) keeps the rule's name", UpdateKeepsName);
     }
 
     private static void SetCurrentMatches()
@@ -107,6 +109,71 @@ internal static class MetaTests
         rig.Tick(5);
         Check.Eq(rig.S.CurrentState, "Loot", "moved into the new state");
         Check.False(rig.Has("x"), "its Never rule never fires");
+    }
+
+    private static void RuleNamesRoundTrip()
+    {
+        var named = Rule("Hunt", C.Always, "", A.ChatCommand, "/vt start");
+        named.Name = "Start hunting";
+        var both = Rule("Hunt", C.Never, "", A.None, "");
+        both.Name = "  Parked " + "\r\n" + " rule ";   // trimmed, kept on one line
+        both.Enabled = false;
+        var plain = Rule("Hunt", C.Always, "", A.None, "");
+        var rules = new List<MetaRule> { named, both, plain };
+
+        string text = AfFileWriter.SaveToString(rules, new Dictionary<string, List<string>>());
+        Check.True(text.Contains("~~ @name Start hunting"), "written as a ~~ @name line");
+        var back = AfFileParser.LoadFromText(text);
+        Check.Eq(back.Rules.Count, 3, "every rule back");
+        Check.Eq(back.Warnings.Count, 0, "no warnings");
+        if (back.Rules.Count == 3)
+        {
+            Check.Eq(back.Rules[0].Name, "Start hunting", "the name");
+            Check.Eq(back.Rules[1].Name, "Parked    rule", "one line, trimmed");
+            Check.False(back.Rules[1].Enabled, "a name and @disabled together");
+            Check.Eq(back.Rules[2].Name, "", "a name belongs to one rule only");
+        }
+
+        // Hand-written: either marker order; "@names" and an empty "@name" are just comments.
+        var hand = AfFileParser.LoadFromText(string.Join("\n", new[]
+        {
+            "STATE: {Default} ~~ {",
+            "\t~~ @disabled",
+            "\t~~ @name Second",
+            "\tIF:\tAlways",
+            "\t\tDO:\tNone",
+            "\t~~ @names are just a comment",
+            "\tIF:\tNever",
+            "\t\tDO:\tNone",
+            "\t~~ @name",
+            "\tIF:\tNever",
+            "\t\tDO:\tNone",
+            "~~ }",
+        }));
+        Check.Eq(hand.Rules.Count, 3, "three rules");
+        if (hand.Rules.Count == 3)
+        {
+            Check.Eq(hand.Rules[0].Name, "Second", "name after @disabled");
+            Check.False(hand.Rules[0].Enabled, "still disabled");
+            Check.Eq(hand.Rules[1].Name, "", "@names is a comment");
+            Check.Eq(hand.Rules[2].Name, "", "an empty @name is a comment");
+        }
+    }
+
+    private static void UpdateKeepsName()
+    {
+        var rule = Rule("Default", C.Always, "", A.None, "");
+        rule.Name = "Keep me";
+        var rules = new List<MetaRule> { rule };
+        MetaRuleEdits.Replace(rules, 0, Rule("Default", C.Never, "", A.None, ""), keepName: true);
+        Check.Eq(rules[0].Name, "Keep me", "an engine without names doesn't wipe it");
+        Check.Eq(rules[0].Condition, C.Never, "the edit applied");
+        var renamed = Rule("Default", C.Never, "", A.None, "");
+        renamed.Name = "New name";
+        MetaRuleEdits.Replace(rules, 0, renamed);
+        Check.Eq(rules[0].Name, "New name", "a sent name replaces it");
+        MetaRuleEdits.Replace(rules, 0, Rule("Default", C.Never, "", A.None, ""));
+        Check.Eq(rules[0].Name, "", "a sent empty name clears it");
     }
 
     // ── Panel edits on a running meta (MetaRuleEdits, update_rule; 2026-10-05 autosave) ─────
@@ -936,6 +1003,21 @@ internal static class MetaTests
         RunAction(rig, A.EmbeddedNavRoute, "__rynthai_offline_test_no_such_route__");
         Check.Eq(rig.S.CurrentRoute.Points.Count, 0, "unknown route: nothing loaded");
         Check.True(FakeHost.Chat.Exists(c => c.Contains("Route missing")), "unknown route reported");
+
+        // "Patrol" (the Meta panel's first route choice): the dungeon patrol, as /ra dunnav-patrol.
+        rig.Ra.Clear();
+        RunAction(rig, A.EmbeddedNavRoute, "Patrol");
+        Check.Eq(string.Join("|", rig.Ra), "/ra dunnav-patrol", "Patrol starts the dungeon patrol");
+        Check.Eq(rig.S.CurrentRoute.Points.Count, 0, "...and loads no route itself");
+        rig.Ra.Clear();
+        RunAction(rig, A.EmbeddedNavRoute, "patrol");
+        Check.Eq(rig.Ra.Count, 1, "any case");
+        // A meta's own route called Patrol wins.
+        rig.Ra.Clear();
+        rig.S.EmbeddedNavs["Patrol"] = once;
+        RunAction(rig, A.EmbeddedNavRoute, "Patrol");
+        Check.Eq(rig.Ra.Count, 0, "an embedded route named Patrol is used instead");
+        Check.Eq(rig.S.CurrentNavPath, "<embedded:Patrol>", "...and loaded");
     }
 
     private static void Watchdog()

@@ -13,7 +13,7 @@ internal sealed class SortSettings
 {
     public const int SettleMin = 0, SettleMax = 30, GapMin = 100, GapMax = 3000;
 
-    /// <summary>Auto-sort: new items in the main pack go to their pack after the settle time.</summary>
+    /// <summary>Auto-sort: keeps every pack tidy (new items from the main pack after the settle time, misplaced items, stacks, order).</summary>
     public bool Auto = true;
     /// <summary>How long a new item sits in the main pack before it moves (seconds).</summary>
     public int SettleSec = 5;
@@ -21,8 +21,17 @@ internal sealed class SortSettings
     public int GapMs = 300;
     /// <summary>Moves may go while RynthAi fights (never while it waits on the server or animates).</summary>
     public bool SortInCombat;
-    /// <summary>The window was open when last seen.</summary>
-    public bool WindowOpen = true;
+    /// <summary>Items are put in order inside each pack (A-Z by name), when the engine can read slot orders (API v80).</summary>
+    public bool OrderInPacks = true;
+    /// <summary>The order inside a pack groups by kind (class) first, then name.</summary>
+    public bool OrderKindFirst;
+    /// <summary>
+    /// The window was open when last seen. Closed for a character RynthSort hasn't seen (it
+    /// has a button on the RynthCore bar and /rsort), so a new character or alt doesn't get it
+    /// popping up at every login until closed once; open once after taking over the Lua
+    /// script's rules, to show them.
+    /// </summary>
+    public bool WindowOpen;
 
     public void Clamp()
     {
@@ -38,6 +47,17 @@ internal sealed class CharacterSortData
     public SortSettings Settings = new();
     /// <summary>Where these came from on first run ("" = defaults, else the Lua script's file).</summary>
     public string ImportedFrom = string.Empty;
+    /// <summary>
+    /// The rules are tied to pack ids (<see cref="PackFix"/> ran once). False for files saved
+    /// before pack ids, a new character's defaults and a fresh import from the Lua script.
+    /// </summary>
+    public bool PacksFixed;
+    /// <summary>
+    /// The Lua script's rules as its file has them, while <see cref="PacksFixed"/> is false and the
+    /// rules came from it: tells untouched imported rules (Lua numbers) from ones picked in
+    /// RynthSort's window since. Null when unknown. Not saved.
+    /// </summary>
+    public List<SortRule>? LuaRules;
 }
 
 /// <summary>
@@ -87,13 +107,20 @@ internal sealed class SortStore
         string own = PathFor(server, character);
         if (File.Exists(own))
         {
-            if (TryRead(own, out CharacterSortData? d, out problem)) return d!;
-            return new CharacterSortData();
+            if (!TryRead(own, out CharacterSortData? d, out problem)) return new CharacterSortData();
+            // Imported before pack ids: the Lua script's file says which rules are still its own.
+            if (!d!.PacksFixed && d.ImportedFrom.Length > 0 && File.Exists(d.ImportedFrom)
+                && TryRead(d.ImportedFrom, out CharacterSortData? luaNow, out _))
+                d.LuaRules = luaNow!.Rules;
+            return d;
         }
         string lua = LuaPathFor(server, character);
         if (File.Exists(lua) && TryRead(lua, out CharacterSortData? imported, out problem))
         {
             imported!.ImportedFrom = lua;
+            imported.PacksFixed = false;           // Lua pack numbers: fixed on the first settled read
+            imported.LuaRules = imported.Rules.ConvertAll(r => r.Clone());
+            imported.Settings.WindowOpen = true;   // show the rules just taken over (the Lua file has no windowOpen)
             return imported;
         }
         return new CharacterSortData();
@@ -149,37 +176,67 @@ internal sealed class SortStore
             st.SettleSec = Int(s, "settleSec", st.SettleSec);
             st.GapMs = Int(s, "gapMs", st.GapMs);
             st.SortInCombat = Bool(s, "sortInCombat", st.SortInCombat);
+            st.OrderInPacks = Bool(s, "orderInPacks", st.OrderInPacks);
+            st.OrderKindFirst = Bool(s, "orderKindFirst", st.OrderKindFirst);
             st.WindowOpen = Bool(s, "windowOpen", st.WindowOpen);
             st.Clamp();
         }
         if (root.TryGetProperty("importedFrom", out JsonElement f) && f.ValueKind == JsonValueKind.String)
             d.ImportedFrom = f.GetString() ?? string.Empty;
+        // Missing (a version 1 file, the Lua script's file): rules by number only, not fixed yet.
+        d.PacksFixed = Bool(root, "packsFixed", false);
         return d;
     }
 
+    /// <summary>
+    /// One rule. Version 3 has "classes" and "names" lists; anything older (versions 1 and 2, and the
+    /// Lua script's file) has one test, { kind = "class" | "name", class, text }, which becomes a
+    /// rule with that one class or name. Version 3 writes those old fields too (its first entry),
+    /// so an older RynthSort reading a newer file still gets a sensible rule.
+    /// </summary>
     private static SortRule? ParseRule(JsonElement e)
     {
         if (e.ValueKind != JsonValueKind.Object) return null;
         var r = new SortRule
         {
             On = Bool(e, "on", true),
-            Kind = e.TryGetProperty("kind", out JsonElement k) && k.ValueKind == JsonValueKind.String
-                   && string.Equals(k.GetString(), "name", StringComparison.OrdinalIgnoreCase) ? RuleKind.Name : RuleKind.Class,
-            Class = Int(e, "class", ObjectClasses.SpellComponent),
-            Text = e.TryGetProperty("text", out JsonElement t) && t.ValueKind == JsonValueKind.String ? t.GetString() ?? string.Empty : string.Empty,
             Pack = Math.Clamp(Int(e, "pack", 1), 1, MaxPack),
+            PackId = UInt(e, "packId"),
+            PackNote = e.TryGetProperty("packNote", out JsonElement pn) && pn.ValueKind == JsonValueKind.String ? pn.GetString() ?? string.Empty : string.Empty,
         };
-        if (r.Text.Length > 64) r.Text = r.Text[..64];
+        bool hasClasses = e.TryGetProperty("classes", out JsonElement cl) && cl.ValueKind == JsonValueKind.Array;
+        bool hasNames = e.TryGetProperty("names", out JsonElement nm) && nm.ValueKind == JsonValueKind.Array;
+        if (hasClasses || hasNames)
+        {
+            if (hasClasses)
+                foreach (JsonElement c in cl.EnumerateArray())
+                    if (c.ValueKind == JsonValueKind.Number && c.TryGetDouble(out double v) && v >= 0 && v <= 1000) r.AddClass((int)Math.Round(v));
+            if (hasNames)
+                foreach (JsonElement n in nm.EnumerateArray())
+                    if (n.ValueKind == JsonValueKind.String) r.AddName(n.GetString());
+        }
+        else
+        {
+            bool byName = e.TryGetProperty("kind", out JsonElement k) && k.ValueKind == JsonValueKind.String
+                          && string.Equals(k.GetString(), "name", StringComparison.OrdinalIgnoreCase);
+            if (byName) r.AddName(e.TryGetProperty("text", out JsonElement t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null);
+            else r.AddClass(Int(e, "class", ObjectClasses.SpellComponent));
+        }
+        if (r.PackNote.Length > 96) r.PackNote = r.PackNote[..96];
         return r;
     }
 
-    /// <summary>Writes the character's file (temp file, then moved over the old one). Returns an error or null.</summary>
-    public string? Save(string server, string character, CharacterSortData d)
+    /// <summary>
+    /// Writes the character's file (temp file, then moved over the old one). <paramref name="backup"/>:
+    /// copy the old file to "&lt;file&gt;.bak" first (the one-time pack fix keeps one). Returns an error or null.
+    /// </summary>
+    public string? Save(string server, string character, CharacterSortData d, bool backup = false)
     {
         string path = PathFor(server, character);
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            if (backup && File.Exists(path)) File.Copy(path, path + ".bak", overwrite: true);
             string tmp = path + "." + Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + ".tmp";
             File.WriteAllText(tmp, ToJson(d), new UTF8Encoding(false));
             File.Move(tmp, path, overwrite: true);
@@ -197,16 +254,29 @@ internal sealed class SortStore
         using (var w = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
         {
             w.WriteStartObject();
-            w.WriteNumber("version", 1);
+            // 3: a rule holds several classes and names. 2: rules carry packId / packNote, and
+            // packsFixed. Versions 1 and 2 still load (one class or name per rule).
+            w.WriteNumber("version", 3);
             w.WriteStartArray("rules");
             foreach (SortRule r in d.Rules)
             {
                 w.WriteStartObject();
                 w.WriteBoolean("on", r.On);
-                w.WriteString("kind", r.Kind == RuleKind.Name ? "name" : "class");
-                w.WriteNumber("class", r.Class);
-                w.WriteString("text", r.Text ?? string.Empty);
+                w.WriteStartArray("classes");
+                foreach (int c in r.Classes) w.WriteNumberValue(c);
+                w.WriteEndArray();
+                w.WriteStartArray("names");
+                foreach (string n in r.Names) w.WriteStringValue(n);
+                w.WriteEndArray();
+                // The first entry the old way, for an older RynthSort reading this file (an empty
+                // rule as a blank name rule, which matches nothing there too).
+                bool firstIsName = r.Classes.Count == 0;
+                w.WriteString("kind", firstIsName ? "name" : "class");
+                w.WriteNumber("class", r.Classes.Count > 0 ? r.Classes[0] : ObjectClasses.SpellComponent);
+                w.WriteString("text", firstIsName && r.Names.Count > 0 ? r.Names[0] : string.Empty);
                 w.WriteNumber("pack", r.Pack);
+                if (r.PackId != 0) w.WriteNumber("packId", r.PackId);
+                if (r.PackNote.Length > 0) w.WriteString("packNote", r.PackNote);
                 w.WriteEndObject();
             }
             w.WriteEndArray();
@@ -215,9 +285,12 @@ internal sealed class SortStore
             w.WriteNumber("settleSec", d.Settings.SettleSec);
             w.WriteNumber("gapMs", d.Settings.GapMs);
             w.WriteBoolean("sortInCombat", d.Settings.SortInCombat);
+            w.WriteBoolean("orderInPacks", d.Settings.OrderInPacks);
+            w.WriteBoolean("orderKindFirst", d.Settings.OrderKindFirst);
             w.WriteBoolean("windowOpen", d.Settings.WindowOpen);
             w.WriteEndObject();
             if (d.ImportedFrom.Length > 0) w.WriteString("importedFrom", d.ImportedFrom);
+            w.WriteBoolean("packsFixed", d.PacksFixed);
             w.WriteEndObject();
         }
         return Encoding.UTF8.GetString(ms.ToArray()) + "\n";
@@ -227,6 +300,14 @@ internal sealed class SortStore
         o.TryGetProperty(name, out JsonElement v) && (v.ValueKind == JsonValueKind.True || v.ValueKind == JsonValueKind.False)
             ? v.GetBoolean()
             : fallback;
+
+    /// <summary>An object id (0 when missing, negative or odd).</summary>
+    private static uint UInt(JsonElement o, string name)
+    {
+        if (!o.TryGetProperty(name, out JsonElement v) || v.ValueKind != JsonValueKind.Number) return 0;
+        if (v.TryGetUInt32(out uint u)) return u;
+        return v.TryGetDouble(out double dbl) && dbl >= 0 && dbl <= uint.MaxValue && dbl == Math.Floor(dbl) ? (uint)dbl : 0;
+    }
 
     private static int Int(JsonElement o, string name, int fallback)
     {

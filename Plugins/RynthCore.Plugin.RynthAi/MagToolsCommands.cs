@@ -86,7 +86,10 @@ public sealed partial class RynthAiPlugin
                 return true;
             case "quit":
             case "exit":
-                if (Host.HasInvokeChatParser) Host.InvokeChatParser("/quit");
+                // Close the client (also /ub quit|exit, which land here). "/quit" is not an AC
+                // client command and did nothing; the engine's /rc quit closes the client the way
+                // its close button does, logging the character off.
+                if (Host.HasInvokeChatParser) Host.InvokeChatParser("/rc quit");
                 return true;
 
             // ── Send a chat line / slash command (VTank /mt send) ────────────

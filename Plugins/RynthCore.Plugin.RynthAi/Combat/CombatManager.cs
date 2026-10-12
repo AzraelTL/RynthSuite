@@ -290,6 +290,45 @@ public partial class CombatManager : IDisposable
     public Func<bool>? HoldIdlePeace { get; set; }
     private bool _idlePeaceHeldLogged;
 
+    /// <summary>
+    /// RynthAi's mana reserve (BuffManager.OffensiveCastHold): given the attack or debuff spell
+    /// about to be cast, a reason to hold it (mana under its cost, or under the reserve kept for
+    /// Stamina to Mana), or null to cast. Null hook = never hold (2026-10-11).
+    /// </summary>
+    public Func<int, string?>? ManaReserveHold { get; set; }
+    private bool _manaCastHeld;        // AttackWithMagic held its cast for mana this tick
+    private bool _manaHoldLogged;
+
+    // The kind of weapon EquipWeaponAndSetStance last chose (a CombatMode), -1 before it chose.
+    private int _chosenWeaponMode = -1;
+
+    /// <summary>Combat fights with magic: its chosen weapon is a wand (before it chose, the stance).
+    /// BuffManager's mana reserve holds only a caster's attacks.</summary>
+    public bool FightsWithMagic => _chosenWeaponMode >= 0
+        ? _chosenWeaponMode == CombatMode.Magic
+        : CurrentCombatMode == CombatMode.Magic;
+
+    /// <summary>True (and logged once per hold) when the mana reserve holds this cast.</summary>
+    private bool ManaHoldsCast(int spellId)
+    {
+        string? why = null;
+        try { why = ManaReserveHold?.Invoke(spellId); } catch { why = null; }
+        if (why == null)
+        {
+            if (_manaHoldLogged) _host.Log("[CombatCast] mana is back: attacks resume");
+            _manaHoldLogged = false;
+            return false;
+        }
+        _manaCastHeld = true;
+        LastCombatSkipReason = "mana-reserve"; // D4 record-only
+        if (!_manaHoldLogged)
+        {
+            _manaHoldLogged = true;
+            _host.Log($"[CombatCast] attacks wait: {why}");
+        }
+        return true;
+    }
+
     /// <summary>Current combat mode — read live from AC client each access to avoid event-drop drift.</summary>
     public int CurrentCombatMode =>
         _host.HasGetCurrentCombatMode ? _host.GetCurrentCombatMode() : CombatMode.NonCombat;
@@ -433,6 +472,18 @@ public partial class CombatManager : IDisposable
     private readonly record struct PendingKill(
         string Name, uint Wcid, int CastCount, uint WeaponId, string Element, int Tier, double Damage, DateTime Expiry,
         DateTime Started = default, string? Summon = null, int Id = 0);
+
+    // Predicted kills that never happened (player log, 2026-10-11): two Rampagers side by side,
+    // each cast landing nothing. The casts-to-kill average said one Nether Arc kills a Rampager, so
+    // every cast#1 was a "predicted kill" and the bot swapped to the other one, and back, for 30
+    // minutes (~460 swaps, 533 casts since the last kill). Each swap drops the target, which wipes
+    // the no-damage judge (DropTarget clears the miss streak and the pending verdict, and a new
+    // target restarts the streak), so the NO DAMAGE report, the flight recorder and the blacklist
+    // never ran. A monster we swapped off as dead that is fought again is alive: the prediction
+    // was wrong, so no more predicted swaps off it — the bot stays on it and the judge can count.
+    private readonly Dictionary<int, DateTime> _predictedSwapAt = new();      // id -> when we swapped off it as a predicted kill
+    private readonly Dictionary<int, DateTime> _predictionFailedAt = new();   // id -> when it turned out alive: never predicted again
+    private const double PredictionMemoryMs = 10 * 60_000;                    // both forget after 10 min
 
     // Ring of recently-fought objects (by id). The single _lastFight* slot only credits a kill
     // that lands one-back; when we've advanced PAST the dying mob (rapid multi-mob melee) its
@@ -866,7 +917,8 @@ public partial class CombatManager : IDisposable
             if (!string.IsNullOrEmpty(wo.Name) && _seenMonsterNameToWcid.Count < 256
                 && !_seenMonsterNameToWcid.ContainsKey(wo.Name)
                 && (!_host.HasObjectIsAttackable || _host.ObjectIsAttackable((uint)wo.Id))
-                && _host.HasGetObjectWcid && _host.TryGetObjectWcid((uint)wo.Id, out uint scanWcid) && scanWcid != 0)
+                && _host.HasGetObjectWcid && _host.TryGetObjectWcid((uint)wo.Id, out uint scanWcid) && scanWcid != 0
+                && !CreatureData.PlayerWeenies.IsPlayerWcid(scanWcid))   // players the cache classed as monsters
                 _seenMonsterNameToWcid[wo.Name] = scanWcid;
 
             // Allow the currently-engaged target out to DisengageDistance: AC's
@@ -1612,8 +1664,92 @@ public partial class CombatManager : IDisposable
         _lastSpellCast = DateTime.Now;
     }
 
+    // ── Position re-sync after casts that land nothing (2026-10-12) ──────────────────────────
+    // Flight 63260: after a stray stop burst rode with a cast, every projectile cast (Corruption
+    // VII, Nether Arc VII) was answered - components burned, UseDone - and nothing landed, until a
+    // real sidestep (12:32:13) ended it. ACE launches projectiles from the caster's SERVER physics
+    // position and drops a spawn that fails or collides at once without a word; it re-syncs that
+    // position only when a reported position differs from the last one (Player_Tick
+    // UpdatePlayerPosition), and standing still reports the same spot. So after
+    // ResyncAfterMagicMisses magic casts in a row with no damage (any target: swaps between two
+    // monsters don't reset it), RynthAi takes one short real sidestep - a movement key down and
+    // up through the client (MoveToState + AutonomousPositions), alternating sides - once the
+    // server has answered the last cast, and casts nothing until it is done. At most once per
+    // ResyncCooldownMs.
+    internal const int ResyncAfterMagicMisses = 3;
+    internal const double ResyncStepMs = 300;
+    internal const double ResyncSettleMs = 400;
+    internal const double ResyncCooldownMs = 30_000;
+    private const uint MotionSideStepRight = 0x6500000F;
+    private const uint MotionSideStepLeft = 0x65000010;
+    private int _magicMissesSinceHit;
+    private int _resyncState;                 // 0 idle, 1 wanted, 2 stepping, 3 settling
+    private DateTime _resyncAt = DateTime.MinValue;
+    private DateTime _lastResyncAt = DateTime.MinValue;
+    private uint _resyncMotion;
+    private bool _resyncLeftNext;
+    internal int ResyncSteps { get; private set; }
+    internal bool ResyncActive => _resyncState != 0;
+
+    private void NoteMagicMissForResync(int tid)
+    {
+        _magicMissesSinceHit++;
+        if (_resyncState != 0 || _magicMissesSinceHit < ResyncAfterMagicMisses) return;
+        DateTime now = TargetClock();
+        if (_lastResyncAt != DateTime.MinValue && (now - _lastResyncAt).TotalMilliseconds < ResyncCooldownMs) return;
+        if (!_host.HasSetMotion) return;
+        _resyncState = 1;
+        _resyncAt = now;
+        _host.Log($"[CombatCast] {_magicMissesSinceHit} magic casts in a row landed nothing (last at 0x{(uint)tid:X8}) - " +
+                  "one short sidestep to re-sync the server's copy of our position before the next cast");
+    }
+
+    /// <summary>
+    /// The re-sync sidestep, one step per call (Think, before a cast). True while it runs: no cast.
+    /// Starts only when no server action is unanswered and the character isn't animating.
+    /// </summary>
+    internal bool TickResyncStep()
+    {
+        if (_resyncState == 0) return false;
+        DateTime now = TargetClock();
+        switch (_resyncState)
+        {
+            case 1:
+                if (ActionPacer.Enabled
+                    && (ActionPacer.Current(_host) != null || ActionPacer.GestureHolds(_host, "Combat/Resync", HealNeed.None, out _)))
+                {
+                    if ((now - _resyncAt).TotalMilliseconds > 10_000) { _resyncState = 0; _host.Log("[CombatCast] re-sync sidestep given up: the server never went idle"); }
+                    return true;
+                }
+                _resyncMotion = _resyncLeftNext ? MotionSideStepLeft : MotionSideStepRight;
+                _resyncLeftNext = !_resyncLeftNext;
+                if (!_host.SetMotionBy("Combat/Resync", _resyncMotion, true)) { _resyncState = 0; return false; }
+                _resyncState = 2;
+                _resyncAt = now;
+                return true;
+            case 2:
+                if ((now - _resyncAt).TotalMilliseconds < ResyncStepMs) return true;
+                _host.SetMotionBy("Combat/Resync", _resyncMotion, false);
+                _resyncState = 3;
+                _resyncAt = now;
+                return true;
+            default:
+                if ((now - _resyncAt).TotalMilliseconds < ResyncSettleMs) return true;
+                _resyncState = 0;
+                _lastResyncAt = now;
+                _magicMissesSinceHit = 0;
+                ResyncSteps++;
+                _host.Log("[CombatCast] re-sync sidestep done");
+                return false;
+        }
+    }
+
+    /// <summary>Test seam: one judged magic cast with no damage.</summary>
+    internal void MagicMissForTest(int tid) => NoteMagicMissForResync(tid);
+
     public void ReportDamageOnTarget(int targetId)
     {
+        _magicMissesSinceHit = 0;   // something we cast landed: the server's position is fine
         // Damage / health change on the cast we're judging → that cast HIT.
         if (targetId == _pendingJudgeTargetId)
             _damageSincePendingCast = true;
@@ -1744,6 +1880,44 @@ public partial class CombatManager : IDisposable
     private DateTime _lastNoDamageReportAt = DateTime.MinValue;
     private const double NoDamageReportGapMs = 10 * 60_000;   // one report per 10 min per client
 
+    // ── What the server said about each combat cast (2026-10-11) ─────────────────────────────
+    // A player log with 30 minutes of casts that landed nothing could not show what the server
+    // answered: chat is logged only while a buff is pending ([BuffChat]), never around an attack or
+    // debuff cast. A resist, a fizzle, an out-of-range or a silent nothing all looked the same.
+    // Now every combat cast logs the lines that arrive within CastChatTraceMs of its send (the
+    // incantation, the hit or resist, components, refusals), capped per cast; the monsters'
+    // swings at us and our evades of them are left out.
+    private int _castTraceSpellId;
+    private int _castTraceTargetId;
+    private DateTime _castTraceAt = DateTime.MinValue;
+    private int _castTraceLines;
+    private const double CastChatTraceMs = 4000;
+    private const int CastChatTraceMaxLines = 8;
+
+    internal void StartCastChatTrace(int spellId, int targetId)
+    {
+        _castTraceSpellId = spellId;
+        _castTraceTargetId = targetId;
+        _castTraceAt = TargetClock();
+        _castTraceLines = 0;
+    }
+
+    /// <summary>Every chat line goes through here (RynthAiPlugin.OnChatWindowText); logs it when a
+    /// combat cast went out in the last <see cref="CastChatTraceMs"/>.</summary>
+    internal void TraceCastChat(string? text, int chatType)
+    {
+        if (_castTraceAt == DateTime.MinValue || string.IsNullOrEmpty(text)) return;
+        double ms = (TargetClock() - _castTraceAt).TotalMilliseconds;
+        if (ms > CastChatTraceMs) { _castTraceAt = DateTime.MinValue; return; }
+        if (_castTraceLines >= CastChatTraceMaxLines) return;
+        string line = text.Trim();
+        if (line.StartsWith("You evaded ", StringComparison.Ordinal)) return;               // their swing, our evade
+        if (!line.StartsWith("You ", StringComparison.Ordinal) && IncomingDamage.IsMatch(line)) return;   // their hit on us
+        _castTraceLines++;
+        string spell = SpellTableStub.GetById(_castTraceSpellId)?.Name ?? $"spell {_castTraceSpellId}";
+        _host.Log($"[CombatChat] +{ms:0} ms after '{spell}' at 0x{(uint)_castTraceTargetId:X8}: type={chatType} '{line}'");
+    }
+
     private void ReportNoDamageCasts(int tid)
     {
         DateTime now = DateTime.Now;
@@ -1775,8 +1949,9 @@ public partial class CombatManager : IDisposable
         bool hit = _damageSincePendingCast;
         _pendingJudgeCastAt = DateTime.MinValue;
 
-        if (hit) { _consecutiveCastMisses = 0; return; }
+        if (hit) { _consecutiveCastMisses = 0; _magicMissesSinceHit = 0; return; }
 
+        if (CurrentCombatMode == CombatMode.Magic) NoteMagicMissForResync(tid);
         _consecutiveCastMisses++;
         if (_consecutiveCastMisses >= _settings.BlacklistAttempts)
         {
@@ -1933,6 +2108,7 @@ public partial class CombatManager : IDisposable
 
         _recentlyKilled[swapId] = DateTime.Now.AddMilliseconds(PREDICTED_SWAP_SUPPRESS_MS);
         ForgetScanned(swapId);
+        _predictedSwapAt[swapId] = TargetClock();   // fought again later = it didn't die (PredictionFailed)
         // Queue this predicted one-shot so it's CREDITED when its death confirms —
         // we may swap away before its KillerNotification. Capture the name LIVE
         // from the world filter (_fightTargetName is often empty this early).
@@ -2349,6 +2525,7 @@ public partial class CombatManager : IDisposable
         _predictKillSwap = false;
         if (isRing || _damageStore == null || _fightTargetWcid == 0) return;
         if (activeTargetId == 0 || activeTargetId != _fightTargetId) return;
+        if (PredictionFailed(activeTargetId)) return;    // survived a predicted kill — stay on it
         if (!HasAlternateTarget(activeTargetId)) return; // nothing to swap to — keep casting
 
         // (A) Casts-to-kill: we've fired the number of casts this wcid typically
@@ -2386,6 +2563,56 @@ public partial class CombatManager : IDisposable
         }
         return false;
     }
+
+    /// <summary>
+    /// True when <paramref name="id"/> survived a predicted kill: we swapped off it as dead and are
+    /// now casting at it again (the kill-notice match is by name only, so being fought again is the
+    /// one sure sign). Logs once when that is first seen. Called after each cast at the fight target.
+    /// </summary>
+    private bool PredictionFailed(int id)
+    {
+        DateTime now = TargetClock();
+        if (_predictionFailedAt.Count > 0 || _predictedSwapAt.Count > 0)
+        {
+            PruneOlderThan(_predictionFailedAt, now);
+            PruneOlderThan(_predictedSwapAt, now);
+        }
+        if (_predictionFailedAt.ContainsKey(id)) return true;
+        if (!_predictedSwapAt.TryGetValue(id, out DateTime swappedAt)) return false;
+
+        _predictedSwapAt.Remove(id);
+        _predictionFailedAt[id] = now;
+        float hp = _worldFilter.GetHealthRatio(id);
+        string health = hp >= 0f ? $"health {hp * 100f:0}%" : "health unknown";
+        _host.Log($"[RynthAi] Predicted kill of 0x{(uint)id:X8} '{_worldFilter[id]?.Name}' didn't happen: fought again " +
+                  $"{(now - swappedAt).TotalSeconds:0.0} s after the swap ({health}, dealt~{_fightDamage:0} this fight). " +
+                  "No more predicted swaps off it, so its casts are judged for damage.");
+        return true;
+    }
+
+    private static void PruneOlderThan(Dictionary<int, DateTime> map, DateTime now)
+    {
+        List<int>? old = null;
+        foreach (var kv in map)
+            if ((now - kv.Value).TotalMilliseconds > PredictionMemoryMs) (old ??= new()).Add(kv.Key);
+        if (old != null) foreach (int k in old) map.Remove(k);
+    }
+
+    /// <summary>Test seam: a cast at the fight target, then the kill-shot decision (as AttackWithMagic does).</summary>
+    internal bool CastAndPredictForTest(uint weaponId, string element, int tier)
+    {
+        _fightCastCount++;
+        _lastCastWeaponId = weaponId;
+        _lastCastElement = element;
+        _lastCastTier = tier;
+        EvaluateKillShot(weaponId, element, tier, isRing: false);
+        bool predicted = _predictKillSwap;
+        _predictKillSwap = false;
+        return predicted;
+    }
+
+    /// <summary>Test seam: the confirmed predicted-kill swap off the fight target.</summary>
+    internal void PredictedSwapForTest() => ExecuteDeferredKillSwap();
 
     /// <summary>Floor between attack commands for the first cast at a new target when the server
     /// gates are available (see <see cref="AttackIntervalMs"/>). Only bounds how fast a refused
@@ -2784,6 +3011,15 @@ public partial class CombatManager : IDisposable
                 return true;
             }
 
+            // Casts landing nothing: one short real sidestep re-syncs the server's copy of our
+            // position (TickResyncStep, 2026-10-12); nothing is cast while it runs.
+            if (CurrentCombatMode == CombatMode.Magic && TickResyncStep())
+            {
+                LastCombatSkipReason = "position-resync";
+                _tickWait = CombatLatencyTracker.Wait.Cast;
+                return true;
+            }
+
             // MAGIC and MISSILE: the server turns the player to the target itself,
             // as retail did — ACE Rotate(target) before a targeted cast (and again
             // after the windup if needed) and before the first missile shot and
@@ -2895,6 +3131,13 @@ public partial class CombatManager : IDisposable
                 if (_wallFaceHeld)
                 {
                     _tickWait = CombatLatencyTracker.Wait.Face;
+                    return true;
+                }
+                // Held for mana (the reserve, or under the spell's cost): nothing was sent, so
+                // it isn't an attack either; the next tick asks again.
+                if (_manaCastHeld)
+                {
+                    _tickWait = CombatLatencyTracker.Wait.Cast;
                     return true;
                 }
 
@@ -4124,6 +4367,7 @@ public partial class CombatManager : IDisposable
         int desiredMode = IsWandObject(weaponObj)                                  ? CombatMode.Magic
                         : weaponObj.ObjectClass == AcObjectClass.MissileWeapon ? CombatMode.Missile
                         : CombatMode.Melee;
+        _chosenWeaponMode = desiredMode;
 
         bool diagNow = (DateTime.Now - _lastEquipDiagAt).TotalSeconds > 5;
 
@@ -5054,6 +5298,7 @@ public partial class CombatManager : IDisposable
     private void AttackWithMagic(WorldObject target)
     {
         _wallFaceHeld = false;
+        _manaCastHeld = false;
         if (_spellManager == null || target == null) return;
 
         // Hard safety veto: never cast offensive magic at something AC's combat
@@ -5133,11 +5378,13 @@ public partial class CombatManager : IDisposable
                     spellId = FindBestDebuffSpellWithTier(debuffKey, out castTier);
 
                 if (spellId == 0) continue;
+                if (ManaHoldsCast(spellId)) return;   // mana reserve: Stamina to Mana first, or regenerate
 
                 try
                 {
                     _host.CastSpellFor((uint)activeTargetId, spellId, "Combat", SpellTableStub.GetById(spellId)?.Name ?? $"spell {spellId}");
                     MarkCombatCastIssued();
+                    StartCastChatTrace(spellId, activeTargetId);
                     _lastSpellCast = DateTime.Now;
                     _lastCastWasRing = false;
                     _pendingDebuffKey = debuffKey;
@@ -5189,6 +5436,7 @@ public partial class CombatManager : IDisposable
         }
         // A ring or a wall hits several monsters: its damage isn't the fight target's alone.
         bool multiTarget = isRing || castShape == ShapeWall;
+        if (offensiveSpellId != 0 && ManaHoldsCast(offensiveSpellId)) return;   // mana reserve
         if (offensiveSpellId != 0)
         {
             LastCombatSkipReason = "cast"; // D4 record-only: offensive cast issued this tick
@@ -5202,6 +5450,7 @@ public partial class CombatManager : IDisposable
             {
                 _host.CastSpellFor((uint)activeTargetId, offensiveSpellId, "Combat", SpellTableStub.GetById(offensiveSpellId)?.Name ?? $"spell {offensiveSpellId}");
                 MarkCombatCastIssued();
+                StartCastChatTrace(offensiveSpellId, activeTargetId);
                 SessionAttackCasts++;      // D6: offensive attack-cast tally for the casts-per-kill signal
                 CastsSinceLastKill++;      //     reset in OnKillNotification when a kill lands
                 _lastSpellCast = DateTime.Now;

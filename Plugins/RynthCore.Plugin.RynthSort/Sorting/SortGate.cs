@@ -99,7 +99,10 @@ internal sealed class LootWatch
     {
         if (containerId != 0)
         {
-            if (containerId != _id || itemCount != _count)
+            // An unreadable count (-1) is not a change: a count read that flickered between -1 and
+            // the real number made a corpse left open look like it was being looted for ever
+            // ("paused: looting" while standing still, 2026-10-11).
+            if (containerId != _id || (itemCount >= 0 && itemCount != _count))
             {
                 _id = containerId;
                 _count = itemCount;

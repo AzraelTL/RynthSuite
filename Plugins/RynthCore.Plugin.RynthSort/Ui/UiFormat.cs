@@ -30,6 +30,8 @@ internal static class UiFormat
     public const byte OpSameLine = 0x11;
     public const byte OpSpacing = 0x13;
     public const byte OpDummy = 0x14;
+    public const byte OpIndent = 0x15;
+    public const byte OpUnindent = 0x16;
     public const byte OpButton = 0x20;
     public const byte OpCheckbox = 0x21;
     public const byte OpSliderInt = 0x22;
@@ -49,6 +51,9 @@ internal static class UiFormat
     // Window flags
     public const uint FlagVisible = 1u << 0;
     public const uint FlagShowInBar = 1u << 1;
+    /// <summary>With ShowInBar: a bar button of its own instead of a Scripts menu line (engines from
+    /// 2026-10-11; older ones ignore it and list the window in the Scripts menu).</summary>
+    public const uint FlagBarButton = 1u << 11;
     public const uint FlagNoScrollbar = 1u << 5;
 
     // Image icon kinds (op level 2)
@@ -75,6 +80,8 @@ internal static class UiFormat
 
     // InputText flags
     public const uint InputAutoSelectAll = 4096;
+    /// <summary>The text box reports Enter (its event carries submitted = true).</summary>
+    public const uint InputEnterReturnsTrue = 32;
 
     // CollapsingHeader flags
     public const uint TreeDefaultOpen = 32;

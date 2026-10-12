@@ -64,6 +64,18 @@ public static unsafe class PluginExports
         }
     }
 
+    /// <summary>
+    /// How many lines the scrollback keeps (the engine's "Chat history" setting; 0.3.0).
+    /// Returns the number applied (clamped to 100..10000), or 0 before the plugin is up.
+    /// Engines before it never call this, and the plugin keeps ChatBuffer.DefaultCapacity.
+    /// </summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthChatSetCapacity", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int SetCapacity(int lines)
+    {
+        try { return Runtime.Plugin?.SetScrollbackCapacity(lines) ?? 0; }
+        catch { return 0; }
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "RynthChatSendLine", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void SendLine(IntPtr ansiText)
     {

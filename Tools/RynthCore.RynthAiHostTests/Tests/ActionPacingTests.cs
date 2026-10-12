@@ -47,7 +47,10 @@ internal static class ActionPacingTests
     {
         r.Add("pacing: a use is the server action until its UseDone; a refusal answers it too; a wield answers by wielding", UseAnswers);
         r.Add("pacing: the stall onset replayed - the idle peace swap waits for the corpse use's answer, then goes; no swap to the mode you're in", OnsetModeChangeHeld);
-        r.Add("pacing: moves, turns and redundant stops wait while the server answers; a real stop and the cast nudge go through", MovesHeld);
+        r.Add("pacing: moves and turns wait while the server answers; a stop with nothing of ours moving waits too, is never dropped; a real stop and the cast nudge go through", MovesHeld);
+        r.Add("pacing (stop burst, flight 63260): a held stop goes out once the server answers, before the next start", HeldStopSentAfterAnswer);
+        r.Add("pacing (stop burst): no cast goes out while a stop is held - the stop is sent first", CastWaitsForHeldStop);
+        r.Add("pacing (stop burst): a stop for our own autorun goes through however long ago it was turned on", OldAutorunStopGoesThrough);
         r.Add("pacing: no answer - each kind's time limit lets the next action go, logged, and nothing is force-cleared", TimeLimits);
         r.Add("pacing: heals (a plain heal waits for a corpse use's answer, 300 ms at Emergency, one behind a cast's result, 300 ms after the stance reads)", HealRules);
         r.Add("pacing (vitals): Drakkon 07:03 - a cast whose result is in waits for its UseDone: one cast, not a too-busy flood", CastWaitsForUseDone);
@@ -201,14 +204,17 @@ internal static class ActionPacingTests
         Check.False(host.SetAutoRunBy("Nav", true), "nav can't start running");
         Check.False(host.TurnToHeadingBy("Nav", 90f), "nor turn");
         Check.False(host.SetMotionBy("Combat", 0x6500000D, true), "nor start a turn motion");
-        Check.False(host.StopCompletelyBy("Arbiter"), "a stop with nothing of ours moving is a redundant movement packet: held");
-        Check.False(host.SetMotionBy("Combat", 0x6500000D, false), "Combat's turn-off with no turn on: held");
+        Check.False(host.StopCompletelyBy("Arbiter"), "a stop with nothing of ours moving waits for the answer");
+        Check.False(host.SetMotionBy("Combat", 0x6500000D, false), "Combat's turn-off with no turn on: waits too");
+        Check.True(MoveAudit.HasPendingStop, "the stops are kept, not dropped");
         Check.Eq(FakeHost.AutoRunCalls.Count, 0, "no autorun reached the client");
-        Check.Eq(FakeHost.Stops, 0, "no stop either");
+        Check.Eq(FakeHost.Stops, 0, "no stop yet either");
         Check.True(Logged("held (move/turn): the server is still answering the use of"), "the hold is logged");
+        Check.True(Logged("StopCompletely() waits (nothing of ours is moving; sent once the server has answered, before any cast)"), "the wait is logged");
 
         Check.True(host.SetAutoRunBy("Buff/Nudge", true) && host.SetAutoRunBy("Buff/Nudge", false), "the held-cast nudge is deliberate: it goes through");
         Check.True(host.StopCompletelyBy("MacroStop"), "a macro stop goes through");
+        Check.False(MoveAudit.HasPendingStop, "the macro StopCompletely covered the held ones");
 
         FakeHost.UseDone(0);
         Check.True(host.SetAutoRunBy("Nav", true), "answered: nav runs again");
@@ -216,6 +222,55 @@ internal static class ActionPacingTests
         FakeHost.Names[CorpseB] = "Corpse of Olthoi Swarm Drone";
         Check.True(host.StopCompletelyBy("Arbiter"), "while we really run, a stop always goes through");
         Check.False(MoveAudit.OwnMovementActive, "and we are not moving any more");
+    });
+
+    private static void HeldStopSentAfterAnswer() => Paced(() =>
+    {
+        World();
+        FakeHost.SetMotionCalls = true;
+        var host = FakeHost.Create(Player);
+        host.UseFor(Corpse, "Loot", "open the claimed corpse");
+        Check.False(host.SetAutoRunBy("Nav", false), "nav's stop with nothing of ours moving waits");
+        Check.False(host.SetMotionBy("Nav", 0x6500000D, false), "and its turn-off");
+        Check.False(MoveAudit.FlushPendingStops(host, "test"), "nothing is sent while the use is unanswered");
+        Check.Eq(FakeHost.Sent.Count, 0, "nothing reached the client");
+        FakeHost.UseDone(0);
+        Check.True(MoveAudit.FlushPendingStops(host, "once the server answered"), "answered: the held stops go out (RynthAi's tick)");
+        Check.True(FakeHost.Sent.SequenceEqual(new[] { "autorun off", "motion 0x6500000D off" }), $"autorun off, then the turn-off ({string.Join(", ", FakeHost.Sent)})");
+        Check.True(Logged("held stop(s) sent once the server answered"), "logged");
+        Check.False(MoveAudit.HasPendingStop, "nothing left");
+
+        // A start that goes through sends any held stop first, so the order is kept.
+        host.UseFor(CorpseB, "Loot", "open");
+        FakeHost.Names[CorpseB] = "Corpse of Olthoi Swarm Drone";
+        host.StopCompletelyBy("Arbiter");
+        FakeHost.UseDone(0);
+        FakeHost.Sent.Clear();
+        Check.True(host.SetAutoRunBy("Nav", true), "nav runs again");
+        Check.True(FakeHost.Sent.SequenceEqual(new[] { "stop", "autorun on" }), $"the held stop, then the start ({string.Join(", ", FakeHost.Sent)})");
+    });
+
+    private static void CastWaitsForHeldStop() => Paced(() =>
+    {
+        var host = World();
+        host.UseFor(Corpse, "Loot", "open the claimed corpse");
+        Check.False(host.StopCompletelyBy("Arbiter"), "held while the use is unanswered");
+        // A player command (asked) casts over the unanswered use: the stop still goes first.
+        host.CastSpellFor(Corpse, 5367, "Command", "spell 5367 (/ra cast)", asked: true);
+        Check.True(FakeHost.Sent.SequenceEqual(new[] { "stop", "cast 5367" }), $"stop, then the cast ({string.Join(", ", FakeHost.Sent)})");
+        Check.False(MoveAudit.HasPendingStop, "nothing held after the cast");
+        Check.True(Logged("held stop(s) sent before a cast"), "logged");
+    });
+
+    private static void OldAutorunStopGoesThrough() => Paced(() =>
+    {
+        var host = World();
+        Check.True(host.SetAutoRunBy("Nav", true), "nav runs");
+        _t += 10_000;   // nav's later autorun re-sends were held, or it simply ran on: well past the 3 s "fresh" window
+        host.UseFor(Corpse, "Loot", "open the claimed corpse");
+        Check.True(host.SetAutoRunBy("Nav", false), "our autorun is still on in AC: the stop goes through at once");
+        Check.True(FakeHost.AutoRunCalls.SequenceEqual(new[] { true, false }), "on, then off reached the client");
+        Check.False(MoveAudit.HasPendingStop, "nothing held");
     });
 
     private static void TimeLimits() => Paced(() =>

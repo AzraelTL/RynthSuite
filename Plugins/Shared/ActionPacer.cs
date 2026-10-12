@@ -579,6 +579,10 @@ internal static class ActionPacer
     /// </summary>
     public static bool CastSpellFor(this RynthCoreHost host, uint targetId, int spellId, string who, string label, bool asked = false)
     {
+        // No cast goes out with a held stop still waiting (2026-10-12): the stop is sent first. The
+        // engine runs a stop queued before a cast ahead of it, and sends its own pre-cast stop a
+        // server answer ahead of the cast, so the stop never rides in the cast's frame.
+        MoveAudit.FlushPendingStops(host, "before a cast", force: true);
         int seq = UseDoneSeqNow(host);
         bool ok = host.CastSpell(targetId, spellId);
         if (ok) Begin(host, PacedKind.Cast, unchecked((uint)spellId), label, who, seq);

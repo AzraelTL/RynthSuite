@@ -47,6 +47,12 @@ namespace RynthSort.Tests
             {
                 Run("rules: class and name matching, first match wins", RuleMatching);
                 Run("classify: item classes as RynthLua sees them", Classify);
+                Run("classify: scarabs, tapers and other spell components", ClassifyComponents);
+                Run("rules: a rule's pack by id, else its number", ResolveById);
+                Run("pack fix: imported Lua numbers (foci counted)", PackFixImported);
+                Run("pack fix: Drakkon's rules (edited after the import)", PackFixDrakkon);
+                Run("pack fix: in the loop (held until the packs settle)", PackFixLoop);
+                Run("window: pack labels and warnings", PackLabels);
                 Run("plan: settle time, force", PlanSettle);
                 Run("plan: pack choice (full pack, stacks, capacity)", PlanPackChoice);
                 Run("plan: worn, packs, foci and blocked items never move", PlanNeverMoves);
@@ -67,9 +73,19 @@ namespace RynthSort.Tests
                 Run("store: save and load", StoreRoundTrip);
                 Run("store: Lua script import", StoreLuaImport);
                 Run("store: odd files", StoreOddFiles);
+                Run("store: pack ids, the fix flag and the backup", StorePackIds);
                 Run("lua autostart warning", LuaAutostart);
                 Run("window: display lists parse in the engine", WindowParses);
+                Run("window: a bar button of its own", WindowBarButton);
                 Run("window: rule editing through events", WindowEvents);
+                Run("rules: several classes and names in one rule", MultiRules);
+                Run("store: old rules migrate to version 3", RuleMigration);
+                Run("order: inside a pack (A-Z, fewest moves, every order of up to 7)", InPackOrder);
+                Run("order: slot orders and the pack column", SlotOrders);
+                Run("plan: stacks and order inside packs", PlanInPack);
+                Run("moves: answers for moves within a pack", MoveAnswersInPlace);
+                Run("plan: a fixed inventory runs out of moves", Converges);
+                Run("loop: auto-sort tidies every pack, then stays still", ConvergesInTheLoop);
             }
             finally
             {
@@ -140,9 +156,11 @@ namespace RynthSort.Tests
             Check(!SortRules.Matches(off, gem), "a rule that is off matches nothing");
 
             var rules = new List<SortRule> { SortRule.ForName("taper", 5), SortRule.ForClass(ObjectClasses.SpellComponent, 1) };
-            Eq(SortRules.RuleFor(rules, comp)?.Pack, 5, "first match wins (name rule above the class rule)");
+            Eq(SortRules.RuleFor(rules, comp)?.Pack, 5, "a name match beats a class match");
             (rules[0], rules[1]) = (rules[1], rules[0]);
-            Eq(SortRules.RuleFor(rules, comp)?.Pack, 1, "reordered: the class rule wins");
+            Eq(SortRules.RuleFor(rules, comp)?.Pack, 5, "whatever the order");
+            var twoClass = new List<SortRule> { SortRule.ForClass(ObjectClasses.Gem, 2), SortRule.ForClass(ObjectClasses.Gem, 4) };
+            Eq(SortRules.RuleFor(twoClass, gem)?.Pack, 2, "two class matches: the rule saved first");
             Check(SortRules.RuleFor(Defaults, misc) == null, "no rule wants misc");
             Eq(SortRules.RuleFor(Defaults, salvage)?.Pack, 2, "default: salvage to pack 2");
             Eq(SortRules.RuleFor(Defaults, gem)?.Pack, 3, "default: gems to pack 3");
@@ -411,6 +429,13 @@ namespace RynthSort.Tests
             Check(w.Update(0x7000_0002, 7, 20_000), "the next corpse");
             Check(w.Update(0, 0, 20_500), "closed: 1.5 s more (the next corpse is a moment away)");
             Check(!w.Update(0, 0, 21_600), "then clear");
+
+            // An unreadable count (-1) between real reads is not a change (2026-10-11: paused for ever).
+            var f = new LootWatch();
+            Check(f.Update(0x7000_0003, 6, 30_000), "a corpse opened");
+            for (long t = 30_500; t < 40_000; t += 500)
+                f.Update(0x7000_0003, t % 1000 == 0 ? 6 : -1, t);
+            Check(!f.Update(0x7000_0003, 6, 40_000), "a flickering unreadable count doesn't keep it 'looting'");
         }
 
         private static void StatusJsonFallback()
@@ -466,14 +491,17 @@ namespace RynthSort.Tests
             public GateInputs Gate;
             public readonly List<SortMove> Sent = new();
             public bool EngineAccepts = true;
+            /// <summary>What the pretend engine can do (none: as an engine before API v80 without merges).</summary>
+            public SortAbilities Can;
             /// <summary>"land" moves the item at once; "refuse" answers with InventoryServerSaveFailed; "busy" with You're too busy; "silent" never answers.</summary>
             public string Server = "land";
             public int ErrorSeq = 3;
-            private readonly Dictionary<uint, uint> _where = new();
+            private readonly HashSet<uint> _gone = new();
 
             public SortInventory? ReadInventory() => Inv;
             public GateInputs ReadGate(bool sortInCombat, long nowMs) { GateInputs g = Gate; g.SortInCombat = sortInCombat; return g; }
             public int ErrorSeqNow() => ErrorSeq;
+            public SortAbilities Abilities => Can;
 
             public bool SendMove(in SortMove move)
             {
@@ -482,12 +510,7 @@ namespace RynthSort.Tests
                 switch (Server)
                 {
                     case "land":
-                        uint id = move.Item.Id;
-                        foreach (SortPack p in Inv.Packs.Prepend(Inv.Main)) p.Items.RemoveAll(i => i.Id == id);
-                        uint destId = move.Dest.Id;
-                        SortPack dest = destId == Inv.Main.Id ? Inv.Main : Inv.Packs.First(p => p.Id == destId);
-                        dest.Items.Add(move.Item);
-                        _where[id] = dest.Id;
+                        if (ServerApply(Inv, move)) _gone.Add(move.Item.Id);
                         break;
                     case "refuse":
                         ErrorSeq++;
@@ -504,13 +527,56 @@ namespace RynthSort.Tests
             private uint _refused;
             private bool _busy;
 
-            public MoveObservation Observe(uint itemId)
+            public MoveObservation Observe(in SortMove move)
             {
-                var o = new MoveObservation { Exists = true, Container = _where.TryGetValue(itemId, out uint c) ? c : Me, ErrorSeq = ErrorSeq };
+                uint itemId = move.Item.Id;
+                var o = new MoveObservation { Exists = !_gone.Contains(itemId), Container = Me, ErrorSeq = ErrorSeq, Slot = -1, Stack = move.Item.Stack };
+                foreach (SortPack p in Inv.Packs.Prepend(Inv.Main))
+                {
+                    int at = p.Items.FindIndex(i => i.Id == itemId);
+                    if (at < 0) continue;
+                    o.Container = p.Id;
+                    o.Slot = at;
+                    o.Stack = p.Items[at].Stack;
+                }
                 if (_refused == itemId) { o.ErrorEventType = 0xA0; o.ErrorObject = itemId; }
                 if (_busy) { o.Error = 0x1D; o.ErrorEventType = 0x28A; }
                 return o;
             }
+        }
+
+        /// <summary>
+        /// What ACE does with a move: a merge adds what fits to the other stack (the rest stays; a
+        /// stack emptied is gone: true); a move takes the item out and puts it in at its placement
+        /// (clamped), or at the end when it names none. Items keep their objects (the planner's
+        /// copies of stack sizes see the change, as a fresh read would).
+        /// </summary>
+        private static bool ServerApply(SortInventory inv, SortMove move)
+        {
+            uint id = move.Item.Id;
+            uint destId = move.Dest.Id;
+            SortPack? from = inv.Packs.Prepend(inv.Main).FirstOrDefault(p => p.Items.Any(i => i.Id == id));
+            if (from == null) return false;
+            SortItem item = from.Items.First(i => i.Id == id);
+            SortPack dest = destId == inv.Main.Id ? inv.Main : inv.Packs.First(p => p.Id == destId);
+            uint mergeInto = move.MergeInto;
+            if (mergeInto != 0)
+            {
+                SortItem? into = dest.Items.FirstOrDefault(i => i.Id == mergeInto);
+                if (into == null) return false;
+                int max = into.MaxStack > 1 ? into.MaxStack : item.MaxStack;
+                int amount = Math.Min(item.Stack, max - into.Stack);
+                if (amount <= 0) return false;
+                into.Stack += amount;
+                item.Stack -= amount;
+                if (item.Stack > 0) return false;
+                from.Items.Remove(item);
+                return true;
+            }
+            from.Items.Remove(item);
+            int at = move.Placement >= 0 ? Math.Clamp(move.Placement, 0, dest.Items.Count) : dest.Items.Count;
+            dest.Items.Insert(at, item);
+            return false;
         }
 
         private static SortController Controller(bool auto = true, int gapMs = 300, int settleSec = 0)
@@ -695,7 +761,7 @@ namespace RynthSort.Tests
             Ticks(c, w, 0, 600);
             Eq(w.Sent.Count, 2, "tidy moved both quickly (job gap, not the 3 s auto gap)");
             Eq(w.Inv.Packs[1].Items.Count, 2, "both in pack 2");
-            Check(c.Job == null && c.Log[0] == "Packs tidied", "job ends with a note");
+            Check(c.Job == null && c.Log[0] == "Packs sorted", "job ends with a note");
 
             // Unpack turns auto-sort off (and asks for a save) so nothing moves back.
             var w2 = new FakeWorld();
@@ -750,21 +816,23 @@ namespace RynthSort.Tests
         {
             SortStore st = TempStore("roundtrip");
             CharacterSortData d = st.Load("DreamWeave", "Drakkon", out string? problem);
-            Check(problem == null && d.Rules.Count == 5 && d.ImportedFrom.Length == 0, "no file: the defaults");
+            Check(problem == null && d.Rules.Count == 3 && d.ImportedFrom.Length == 0, "no file: the defaults");
+            Check(!d.Settings.WindowOpen, "no file: the window starts closed (the bar button opens it)");
             d.Rules.Add(SortRule.ForName("Pyreal \"Mote\"", 6));
             d.Rules[0].On = false;
             d.Settings.Auto = false;
             d.Settings.SettleSec = 12;
             d.Settings.GapMs = 900;
             d.Settings.SortInCombat = true;
-            d.Settings.WindowOpen = false;
+            d.Settings.WindowOpen = true;
             Check(st.Save("DreamWeave", "Drakkon", d) == null, "saved");
             Check(File.Exists(Path.Combine(st.Root, "characters", "DreamWeave_Drakkon.json")), "file named server_character");
             CharacterSortData back = st.Load("DreamWeave", "Drakkon", out problem);
             Check(problem == null, "read back");
-            Eq(back.Rules.Count, 6, "rules");
-            Check(!back.Rules[0].On && back.Rules[5].Kind == RuleKind.Name && back.Rules[5].Text == "Pyreal \"Mote\"" && back.Rules[5].Pack == 6, "rule fields");
-            Check(!back.Settings.Auto && back.Settings.SettleSec == 12 && back.Settings.GapMs == 900 && back.Settings.SortInCombat && !back.Settings.WindowOpen, "settings");
+            Eq(back.Rules.Count, 4, "rules");
+            Check(!back.Rules[0].On && back.Rules[3].Classes.Count == 0 && back.Rules[3].Names.Count == 1 && back.Rules[3].Names[0] == "Pyreal \"Mote\"" && back.Rules[3].Pack == 6, "rule fields");
+            Check(back.Rules[2].SameAs(SortRules.Defaults()[2]), "a rule with three classes comes back whole");
+            Check(!back.Settings.Auto && back.Settings.SettleSec == 12 && back.Settings.GapMs == 900 && back.Settings.SortInCombat && back.Settings.WindowOpen, "settings");
             Eq(SortStore.FileStem("Dream:Weave", "Con"), "Dream_Weave_Con", "unsafe characters replaced like RynthLua");
             Eq(SortStore.SafeFileName("CON"), "_CON", "reserved names guarded");
         }
@@ -782,9 +850,10 @@ namespace RynthSort.Tests
             Check(problem == null, "Lua file read");
             Eq(d.ImportedFrom, lua, "marked as imported");
             Eq(d.Rules.Count, 6, "six rules");
-            Check(d.Rules[5].Kind == RuleKind.Class && d.Rules[5].Class == ObjectClasses.HealingKit && d.Rules[5].Pack == 4, "healing kits to pack 4");
+            Check(d.Rules[5].Names.Count == 0 && d.Rules[5].Classes.Count == 1 && d.Rules[5].Classes[0] == ObjectClasses.HealingKit && d.Rules[5].Pack == 4, "healing kits to pack 4 (one class)");
             Check(!d.Settings.Auto && d.Settings.SettleSec == 5 && d.Settings.GapMs == 600, "settings taken over");
-            Check(d.Settings.WindowOpen && !d.Settings.SortInCombat, "plugin-only settings at their defaults");
+            Check(!d.Settings.SortInCombat, "plugin-only settings at their defaults");
+            Check(d.Settings.WindowOpen, "taken over from the Lua script: the window opens once to show the rules");
 
             // Once RynthSort has its own file, the Lua file is no longer read (and is left alone).
             d.Rules.RemoveAt(0);
@@ -804,7 +873,7 @@ namespace RynthSort.Tests
             Directory.CreateDirectory(Path.GetDirectoryName(own)!);
             File.WriteAllText(own, "{ not json");
             CharacterSortData d = st.Load("S", "A", out string? problem);
-            Check(problem != null && d.Rules.Count == 5, "broken file: defaults, problem reported");
+            Check(problem != null && d.Rules.Count == 3, "broken file: defaults, problem reported");
 
             // The Lua script saved an empty rule list as {}; numbers as doubles; out-of-range values clamped.
             File.WriteAllText(own, "{\"rules\":{},\"settings\":{\"auto\":true,\"settleSec\":99.0,\"gapMs\":5,\"x\":1}}");
@@ -815,9 +884,9 @@ namespace RynthSort.Tests
             File.WriteAllText(own, "{\"rules\":[{\"kind\":\"name\",\"text\":\"Key\",\"pack\":2.0},{\"class\":11,\"pack\":-4},7,{\"on\":false}]}");
             d = st.Load("S", "A", out _);
             Eq(d.Rules.Count, 3, "a non-object entry is skipped");
-            Check(d.Rules[0].Kind == RuleKind.Name && d.Rules[0].Pack == 2 && d.Rules[0].On, "missing 'on' = on; 2.0 = 2");
+            Check(d.Rules[0].Names.Count == 1 && d.Rules[0].Names[0] == "Key" && d.Rules[0].Classes.Count == 0 && d.Rules[0].Pack == 2 && d.Rules[0].On, "missing 'on' = on; 2.0 = 2");
             Eq(d.Rules[1].Pack, 1, "pack clamped to 1");
-            Check(!d.Rules[2].On && d.Rules[2].Class == ObjectClasses.SpellComponent, "defaults for missing fields");
+            Check(!d.Rules[2].On && d.Rules[2].Classes.Count == 1 && d.Rules[2].Classes[0] == ObjectClasses.SpellComponent, "defaults for missing fields");
         }
 
         private static void LuaAutostart()
@@ -869,6 +938,32 @@ namespace RynthSort.Tests
             maxOps = windows.Where(x => x.List != null).Select(x => x.List!.OpCount).DefaultIfEmpty(0).Max();
         }
 
+        private static unsafe List<ParsedWindow> ParseWindows(UiHost host)
+        {
+            int n = Write(host);
+            byte[] buf = SubmitBuffer(host);
+            List<ParsedWindow> windows;
+            fixed (byte* p = buf) DisplayListParser.Parse(p, n, 4000f, out _, out windows, out _);
+            return windows;
+        }
+
+        private static void WindowBarButton()
+        {
+            Eq(UiFormat.FlagBarButton, WindowFlags.BarButton, "the plugin's bit is the engine's");
+            var (_, panel, host, w) = Window();
+            Draw(w, panel);
+            List<ParsedWindow> windows = ParseWindows(host);
+            Check(windows.Count == 1 && windows[0].Title == "RynthSort", "one window, titled RynthSort (the button's tooltip)");
+            uint f = windows.Count == 1 ? windows[0].Flags : 0;
+            Check((f & WindowFlags.ShowInBar) != 0 && (f & WindowFlags.BarButton) != 0, "ShowInBar + BarButton survive the engine's parse");
+            w.MarkSubmitted(true);
+
+            w.ShowInBar = false;
+            windows = ParseWindows(host);
+            f = windows.Count == 1 ? windows[0].Flags : ~0u;
+            Check((f & (WindowFlags.ShowInBar | WindowFlags.BarButton)) == 0, "not in the bar: no button either");
+        }
+
         private static byte[] Event(ushort type, uint seq, uint window, uint key, byte[] payload)
         {
             var e = new byte[16 + payload.Length];
@@ -890,37 +985,65 @@ namespace RynthSort.Tests
             ParseAll(host, "default rules", out int ops);
             Check(ops > 10 && ops < 1500, $"ops in range ({ops})");
             string body = BodyText(w);
-            Check(body.Contains("Auto-sort") && body.Contains("Sort main pack") && body.Contains("Tidy all packs")
-                  && body.Contains("Empty side packs") && body.Contains("Clean packs"), "buttons and toggle");
-            Check(body.Contains("Rules (first match wins)") && body.Contains("1. Spell Component -> pack 1 (Pack 1)"), "rule list");
+            Check(body.Contains("Auto-sort") && body.Contains("Sort now") && body.Contains("Clean packs") && body.Contains("Empty side packs"), "buttons and toggle");
+            Check(body.Contains("Main pack (1/102)"), "the main pack's line");
+            Check(body.Contains("Pack 1: Pack 1 (24/24) - Junk 0, Junk 1, Junk 2"), "a section per pack, named with its room and contents");
+            Check(body.Contains("Pack 3: Pack 3 (0/24) - empty") && body.Contains("Gem, Key, Mana Stone"), "a rule with three classes as one row under its pack");
+            Check(body.Contains("Pack 4: Pack 4 (0/24) - empty") && body.Contains("No rules send items here."), "a pack without rules says so");
+            Check(body.IndexOf("Pack 1: ", StringComparison.Ordinal) < body.IndexOf("Spell Component", StringComparison.Ordinal)
+                  && body.IndexOf("Spell Component", StringComparison.Ordinal) < body.IndexOf("Pack 2: ", StringComparison.Ordinal), "a rule sits under its pack");
+            Check(!body.Contains("Classes:"), "no editor until a rule is picked");
             w.MarkSubmitted(true);
 
-            // A selected rule's editor (class, then name), the settings open, warnings and a log.
-            Apply(host, Event(1, 1, w.Hash, w.KeyOf("row.0"), Click));
+            // The gem rule's editor, the settings open, warnings and a log.
+            SortRule gemRule = c.Data.Rules[2];
+            Apply(host, Event(1, 1, w.Hash, w.KeyOf($"r{gemRule.Uid}.row"), Click));
             Apply(host, Event(6, 2, w.Hash, w.KeyOf("settings"), new byte[] { 1 }));
             c.Note("Prismatic Taper -> pack 1");
             panel.Warnings = () => new[] { "The RynthSort Lua script is set to start too" };
             Draw(w, panel);
-            ParseAll(host, "rule editor (class)", out _);
+            ParseAll(host, "rule editor", out _);
             body = BodyText(w);
-            Check(body.Contains("Rule 1") && body.Contains("Mana Stone") && body.Contains("Pack 1: Pack 1 (24/24)") && body.Contains("Pack 7 (none)"), "editor with class and pack choices");
-            Check(body.Contains("Settle (s)") && body.Contains("Gap (ms)") && body.Contains("Sort during fights"), "settings shown");
+            Check(body.Contains("Classes:") && body.Contains("Gem  x") && body.Contains("Key  x") && body.Contains("Mana Stone  x"), "the rule's classes as chips");
+            Check(body.Contains("Add a class...") && body.Contains("Name has") && body.Contains("Remove rule"), "add a class, add a name, remove");
+            Check(body.Contains("Pack 3: Pack 3 (0/24) - empty") && body.Contains("Pack 7 (none)"), "the pack picker");
+            Check(body.Contains("Settle (s)") && body.Contains("Gap (ms)") && body.Contains("Sort during fights")
+                  && body.Contains("Put items in order inside packs") && body.Contains("Group by kind first"), "settings shown");
+            Check(body.Contains("plugin API 80"), "an engine that can't read orders: said in the settings");
             Check(body.Contains("Lua script is set to start"), "warning shown");
             w.MarkSubmitted(true);
 
-            c.Data.Rules[0].Kind = RuleKind.Name;
-            c.Data.Rules[0].Text = "Taper";
-            c.Data.Rules[0].Class = 999;
+            gemRule.AddName("Opal");
+            gemRule.AddName("a##b");
             Draw(w, panel);
-            ParseAll(host, "rule editor (name)", out _);
-            Check(BodyText(w).Contains("Name has"), "name editor");
-            c.Data.Rules[0].Kind = RuleKind.Class;
+            ParseAll(host, "rule editor with names", out _);
+            body = BodyText(w);
+            Check(body.Contains("Names:") && body.Contains("\"Opal\"  x"), "names as chips");
+            Check(body.Contains("Gem, Key, Mana Stone, name has \"a# #b\", name has \"Opal\""), "the row: classes, then names, A-Z (## shown apart)");
+
+            // A rule whose pack isn't carried: its own section, grouped by what the pack was.
+            var gone = SortRule.ForClass(ObjectClasses.Lockpick, 9);
+            gone.PackId = 0x4000AAAA;
+            gone.PackNote = "Sack - Gems";
+            c.Data.Rules.Add(gone);
+            var inv = Inv(4);
+            Fill(inv.Packs[0], 24, 1000);
+            inv.Packs[0].OrderKnown = true;
+            c.Planner.Plan(inv, c.Data.Rules, SortScope.All, true, 0, 0, PlanOptions.Full);
             Draw(w, panel);
-            ParseAll(host, "rule editor (class the editor doesn't offer)", out _);
-            Check(BodyText(w).Contains("class 999"), "an unknown class stays shown");
+            ParseAll(host, "missing pack", out _);
+            body = BodyText(w);
+            Check(body.Contains("Rules for packs you don't have (1)") && body.Contains("A pack you don't have (it was Sack - Gems):") && body.Contains("Lockpick"), "missing-pack section");
+            Check(body.Contains("Pack 1: Pack 1 (24/24)") && body.Contains("in order"), "a pack in order says so");
+
+            // Two rules naming the same class for different packs: the losing pack says so.
+            c.Data.Rules.Add(SortRule.ForClass(ObjectClasses.Gem, 4));
+            Draw(w, panel);
+            ParseAll(host, "conflict", out _);
+            Check(BodyText(w).Contains("Gem: also in a rule for pack 3, which wins"), "conflict shown under the losing pack");
 
             // Many rules still fit.
-            for (int i = 0; i < SortStore.MaxRules; i++) c.Data.Rules.Add(SortRule.ForName("x" + i, 1 + i % 8));
+            for (int i = 0; i < SortStore.MaxRules; i++) c.Data.Rules.Add(SortRule.For(1 + i % 8, new[] { ObjectClasses.Armor, ObjectClasses.Food }, "x" + i, "y" + i));
             Draw(w, panel);
             ParseAll(host, "64+ rules", out int many);
             Check(many < 1500, $"many rules fit ({many} ops)");
@@ -932,64 +1055,107 @@ namespace RynthSort.Tests
             Check(BodyText(w).Contains("Log in"), "logged-out text");
         }
 
+        private static byte[] TextEvent(string text, bool submitted)
+        {
+            byte[] t = Encoding.UTF8.GetBytes(text);
+            var payload = new byte[3 + t.Length];
+            payload[0] = submitted ? (byte)1 : (byte)0;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(1), (ushort)t.Length);
+            t.CopyTo(payload, 3);
+            return payload;
+        }
+
         private static void WindowEvents()
         {
             var (c, panel, host, w) = Window();
             Draw(w, panel);
             int rules = c.Data.Rules.Count;
+            uint seq = 0;
+            void Send(ushort type, string id, byte[] payload)
+            {
+                Apply(host, Event(type, ++seq, w.Hash, w.KeyOf(id), payload));
+                Draw(w, panel);
+            }
 
-            Apply(host, Event(1, 1, w.Hash, w.KeyOf("rule.add"), Click));
+            // "+ Add rule" in pack 4's section: a new, empty rule for pack 4, its editor open.
+            Send(1, "add.40000004", Click);
             Eq(c.Data.Rules.Count, rules + 1, "Add rule");
-            Eq(panel.Selected, rules, "the new rule is selected");
-            Draw(w, panel);
+            SortRule r = panel.Selected!;
+            Check(r != null && r.IsEmpty && r.PackId == 0x40000004 && r.Pack == 4, "the new rule is selected, empty, for that pack");
+            Check(BodyText(w).Contains("(empty: add a class or a name)"), "an empty rule says what to do");
+            string k = "r" + r!.Uid;
 
-            Apply(host, Event(1, 2, w.Hash, w.KeyOf("rule.up"), Click));
-            Eq(panel.Selected, rules - 1, "Up moves the selection with the rule");
-            Draw(w, panel);
+            // Classes through the picker (its first line is "Add a class...").
+            Send(3, k + ".addclass", BitConverter.GetBytes(ObjectClasses.ChoiceIndex(ObjectClasses.Armor) + 1));
+            Check(r.Classes.Count == 1 && r.HasClass(ObjectClasses.Armor), "picker adds Armor");
+            int clothing = ObjectClasses.Choices.Where(x => x != ObjectClasses.Armor).ToList().IndexOf(ObjectClasses.Clothing) + 1;
+            Send(3, k + ".addclass", BitConverter.GetBytes(clothing));
+            Check(r.HasClass(ObjectClasses.Clothing) && r.Classes.Count == 2, "and Clothing (the picker leaves out what the rule has)");
+            Send(3, k + ".addclass", BitConverter.GetBytes(0));
+            Eq(r.Classes.Count, 2, "the picker's first line adds nothing");
 
-            // The new rule: make it a name rule for "opal" to pack 4.
-            Apply(host, Event(3, 3, w.Hash, w.KeyOf("rule.kind"), BitConverter.GetBytes(1)));
-            Draw(w, panel);
-            byte[] text = Encoding.UTF8.GetBytes("opal");
-            var payload = new byte[3 + text.Length];
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(1), (ushort)text.Length);
-            text.CopyTo(payload, 3);
-            Apply(host, Event(5, 4, w.Hash, w.KeyOf("rule.text"), payload));
-            Apply(host, Event(3, 5, w.Hash, w.KeyOf("rule.pack"), BitConverter.GetBytes(3)));
-            SortRule r = c.Data.Rules[rules - 1];
-            Check(r.Kind == RuleKind.Name && r.Text == "opal" && r.Pack == 4, "edited through the combo, text box and pack combo");
-            Draw(w, panel);
+            // Names: typed and Enter, or typed and Add.
+            Send(5, k + ".draft", TextEvent("Shield", true));
+            Check(r.Names.Count == 1 && r.HasName("Shield"), "Enter adds the name");
+            Send(5, k + ".draft", TextEvent("Buckler", false));
+            Eq(r.Names.Count, 1, "typing alone adds nothing");
+            Send(1, k + ".addname", Click);
+            Check(r.HasName("Buckler") && r.Names.Count == 2, "Add adds it");
+            Send(5, k + ".draft", TextEvent("shield", true));
+            Eq(r.Names.Count, 2, "the same name in another case isn't added twice");
+            Check(BodyText(w).Contains("Armor, Clothing, name has \"Buckler\", name has \"Shield\""), "the row lists them");
 
-            // Its checkbox turns it off.
-            Apply(host, Event(2, 6, w.Hash, w.KeyOf("on." + (rules - 1)), new byte[] { 0 }));
-            Check(!r.On, "checkbox turns the rule off");
-            Draw(w, panel);
+            // Chips take entries out.
+            Send(1, $"{k}.c{ObjectClasses.Clothing}", Click);
+            Check(!r.HasClass(ObjectClasses.Clothing) && r.HasClass(ObjectClasses.Armor), "a class chip removes its class");
+            Send(1, k + ".n0", Click);
+            Check(!r.HasName("Buckler") && r.HasName("Shield"), "a name chip removes its name (A-Z: Buckler first)");
 
-            Apply(host, Event(1, 7, w.Hash, w.KeyOf("rule.down"), Click));
-            Eq(c.Data.Rules.IndexOf(r), rules, "Down");
-            Draw(w, panel);
-            Apply(host, Event(1, 8, w.Hash, w.KeyOf("rule.remove"), Click));
-            Check(!c.Data.Rules.Contains(r) && c.Data.Rules.Count == rules, "Remove");
-            Draw(w, panel);
+            // Another pack through the picker.
+            Send(3, k + ".pack", BitConverter.GetBytes(1));
+            Check(r.Pack == 2 && r.PackId == 0x40000002 && r.PackNote.StartsWith("Pack 2 - "), $"moved to pack 2, kept by its id ({r.PackNote})");
+            string body = BodyText(w);
+            Check(body.IndexOf("Pack 2: ", StringComparison.Ordinal) < body.IndexOf("Armor, name has", StringComparison.Ordinal)
+                  && body.IndexOf("Armor, name has", StringComparison.Ordinal) < body.IndexOf("Pack 3: ", StringComparison.Ordinal), "now listed under pack 2");
 
-            // Class combo on rule 1.
-            Apply(host, Event(1, 9, w.Hash, w.KeyOf("row.0"), Click));
-            Draw(w, panel);
-            Apply(host, Event(3, 10, w.Hash, w.KeyOf("rule.class"), BitConverter.GetBytes(ObjectClasses.ChoiceIndex(ObjectClasses.HealingKit))));
-            Eq(c.Data.Rules[0].Class, ObjectClasses.HealingKit, "class combo");
+            // On and off.
+            Send(2, k + ".on", new byte[] { 0 });
+            Check(!r.On, "the box turns the rule off");
+            Send(2, k + ".on", new byte[] { 1 });
+            Check(r.On, "and on");
+
+            // Merge rules: a second rule for pack 3 joins the first.
+            Send(1, "add.40000003", Click);
+            SortRule second = panel.Selected!;
+            Send(3, "r" + second.Uid + ".addclass", BitConverter.GetBytes(ObjectClasses.ChoiceIndex(ObjectClasses.Lockpick) + 1));
+            Check(BodyText(w).Contains("Merge rules"), "two rules in a pack: Merge rules offered");
+            int before = c.Data.Rules.Count;
+            Send(1, "merge.40000003", Click);
+            Eq(c.Data.Rules.Count, before - 1, "two rules became one");
+            SortRule merged = c.Data.Rules.Single(x => x.PackId == 0x40000003 || x.Pack == 3);
+            Check(merged.HasClass(ObjectClasses.Gem) && merged.HasClass(ObjectClasses.Key) && merged.HasClass(ObjectClasses.ManaStone) && merged.HasClass(ObjectClasses.Lockpick),
+                "the merged rule has every class");
+
+            // Remove.
+            Send(1, k + ".row", Click);
+            Check(ReferenceEquals(panel.Selected, r), "picked again");
+            Send(1, k + ".remove", Click);
+            Check(!c.Data.Rules.Contains(r) && panel.Selected == null, "Remove");
 
             // Settings and buttons.
-            Apply(host, Event(6, 11, w.Hash, w.KeyOf("settings"), new byte[] { 1 }));
-            Draw(w, panel);
-            Apply(host, Event(3, 12, w.Hash, w.KeyOf("settle"), BitConverter.GetBytes(12)));
-            Apply(host, Event(3, 13, w.Hash, w.KeyOf("gap"), BitConverter.GetBytes(50_000)));
-            Apply(host, Event(2, 14, w.Hash, w.KeyOf("combat"), new byte[] { 1 }));
+            Send(6, "settings", new byte[] { 1 });
+            Send(3, "settle", BitConverter.GetBytes(12));
+            Send(3, "gap", BitConverter.GetBytes(50_000));
+            Send(2, "combat", new byte[] { 1 });
             Check(c.Data.Settings.SettleSec == 12 && c.Data.Settings.GapMs == SortSettings.GapMax && c.Data.Settings.SortInCombat, "sliders (clamped) and the fights box");
-            Apply(host, Event(2, 15, w.Hash, w.KeyOf("auto"), new byte[] { 0 }));
+            Send(2, "order", new byte[] { 0 });
+            Send(2, "orderkind", new byte[] { 1 });
+            Check(!c.Data.Settings.OrderInPacks && c.Data.Settings.OrderKindFirst, "the order boxes");
+            Send(2, "auto", new byte[] { 0 });
             Check(!c.Data.Settings.Auto, "auto-sort box");
-            Apply(host, Event(1, 16, w.Hash, w.KeyOf("job.all"), Click));
-            Eq(c.Job, SortScope.All, "Tidy button");
-            Apply(host, Event(1, 17, w.Hash, w.KeyOf("job.unpack"), Click));
+            Send(1, "job.all", Click);
+            Eq(c.Job, SortScope.All, "Sort now button");
+            Send(1, "job.unpack", Click);
             Check(c.Job == SortScope.Unpack && c.UnpackWhich == null, "Empty side packs button");
         }
     }

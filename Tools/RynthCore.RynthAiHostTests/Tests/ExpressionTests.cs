@@ -57,6 +57,21 @@ internal static class ExpressionTests
         r.Add("expr: list text saved before escaping reads the same", OldListTextReadsTheSame);
         r.Add("expr: # takes a regex pattern without backticks, as documented", RegexOperatorUnquoted);   // was a known failure; fixed by c34b39c
         r.Add("expr: vitae[] reports no penalty when it cannot read vitae", VitaeWithoutHost);   // was a known failure; fixed by 33f23f7
+
+        // UtilityBelt expression reference audit (2026-10-11): each test pins a documented
+        // behaviour we got wrong. The doc is Expressions.html (utilitybelt.gitlab.io/docs/expressions).
+        r.Add("expr doc: ; runs each expression in turn", DocSemicolon);
+        r.Add("expr doc: && and || skip the side that can't change the answer", DocShortCircuit);
+        r.Add("expr doc: unquoted text keeps its spaces, backslash escapes a character", DocStrings);
+        r.Add("expr doc: true and false are 1 and 0", DocTrueFalse);
+        r.Add("expr doc: @name and &name read pvars and gvars, $ takes an expression", DocVarShorthand);
+        r.Add("expr doc: {index}, {key} and slices on lists, dicts and text", DocIndexAndSlice);
+        r.Add("expr: $x = value assigns (UB syntax real metas use)", AssignmentSyntax);
+        r.Add("expr doc: listadd, listpop and friends change the list in its variable", DocListsChangeInPlace);
+        r.Add("expr doc: a dictionary kept in a variable lives on", DocDictsPersist);
+        r.Add("expr doc: iif, istrue, isfalse and getobjectinternaltype", DocLogicAndTypes);
+        r.Add("expr doc: name, regex, state and setting arguments may be expressions", DocTextArguments);
+        r.Add("expr doc: getheadingto across landblocks, casts of unknown spells, getknownspells", DocLiveState);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -205,7 +220,7 @@ internal static class ExpressionTests
         Is(e, "", "");
         Is(e, "   ", "");
         Is(e, "1 2", "1");             // text after a complete expression is ignored
-        Is(e, "hello world", "hello"); // so a bare two-word value keeps only the first word
+        Is(e, "hello world", "hello world"); // text of letters and spaces is one value (reference)
         Is(e, "@", "");
         Is(e, "!1", "");               // there is no logical not; use ==0 or isfalse[]
         Is(e, "a.b_c9", "a.b_c9");     // identifiers keep dots and underscores
@@ -262,7 +277,7 @@ internal static class ExpressionTests
         Is(e, "testvar[a]+testvar[b]", "0");
         Is(e, "setvar[s, `two words`]", "two words");
         Is(e, "$s", "two words");
-        Is(e, "setvar[t, two words]", "two");    // unquoted: only the first word
+        Is(e, "setvar[t, two words]", "two words");   // unquoted text keeps all its words
         e.SetVariable("host_set", "7");
         Is(e, "$host_set", "7");
     }
@@ -346,15 +361,18 @@ internal static class ExpressionTests
         Is(e, "listgetitem[$l,3]", "b");
         Is(e, "listgetitem[$l,4]", "");
         Is(e, "listgetitem[$l,-1]", "");
-        Is(e, "listadd[$l,d]", "[a,b,c,b,d]");
-        Is(e, "$l", "[a,b,c,b]");                 // lists are values: listadd returns a new one
-        Is(e, "listinsert[$l,z,0]", "[z,a,b,c,b]");
-        Is(e, "listinsert[$l,z,4]", "[a,b,c,b,z]");
-        Is(e, "listinsert[$l,z,5]", "0");
-        Is(e, "listremove[$l,b]", "[a,c,b]");     // first match only
-        Is(e, "listremove[$l,q]", "[a,b,c,b]");
-        Is(e, "listremoveat[$l,1]", "[a,c,b]");
-        Is(e, "listremoveat[$l,9]", "0");
+        // listcopy[...] is not a variable, so these give a changed copy and $l stays.
+        Is(e, "listadd[listcopy[$l],d]", "[a,b,c,b,d]");
+        Is(e, "$l", "[a,b,c,b]");
+        Is(e, "listinsert[listcopy[$l],z,0]", "[z,a,b,c,b]");
+        Is(e, "listinsert[listcopy[$l],z,4]", "[a,b,c,b,z]");
+        Is(e, "listinsert[listcopy[$l],z,5]", "0");
+        Is(e, "listremove[listcopy[$l],b]", "[a,c,b]");     // first match only
+        Is(e, "listremove[listcopy[$l],q]", "[a,b,c,b]");
+        Is(e, "listremoveat[listcopy[$l],1]", "[a,c,b]");
+        Is(e, "listremoveat[listcopy[$l],9]", "0");
+        Is(e, "listinsert[$l,z,5]", "0");                   // a failed change leaves $l alone
+        Is(e, "$l", "[a,b,c,b]");
         Is(e, "listcontains[$l,C]", "1");         // ignores case
         Is(e, "listcontains[$l,q]", "0");
         Is(e, "listindexof[$l,b]", "1");
@@ -364,11 +382,11 @@ internal static class ExpressionTests
         Is(e, "listcopy[$l]", "[a,b,c,b]");
         Is(e, "listcopy[x]", "[]");
         Is(e, "listreverse[$l]", "[b,c,b,a]");
-        Is(e, "listpop[$l]", "b");
-        Is(e, "listpop[$l,0]", "a");
-        Is(e, "listpop[$l,-5]", "b");             // any negative index means the last item
+        Is(e, "listpop[listcopy[$l]]", "b");
+        Is(e, "listpop[listcopy[$l],0]", "a");
+        Is(e, "listpop[listcopy[$l],-5]", "b");   // any negative index means the last item
         Is(e, "listpop[listcreate[]]", "");
-        Is(e, "listclear[$l]", "[]");
+        Is(e, "listclear[listcopy[$l]]", "[]");
         Is(e, "listfromrange[1,3]", "[1,2,3]");
         Is(e, "listfromrange[3,1]", "[3,2,1]");
         Is(e, "listfromrange[2,2]", "[2]");
@@ -404,10 +422,10 @@ internal static class ExpressionTests
         var e = Engine();
         Is(e, "dictcreate[a,1,b,2]", "D:0");
         Is(e, "dictgetitem[dictcreate[a,1,b,2],b]", "2");
-        Is(e, "setvar[d, dictcreate[a,1]] && dictadditem[$d,a,9]", "1");   // one evaluation: the handle is live
-        // Dicts last for one top-level evaluation; a handle kept in a variable goes dead.
-        Is(e, "dictgetitem[$d,a]", "");
-        Is(e, "dictsize[$d]", "0");
+        Is(e, "setvar[d, dictcreate[a,1]] && dictadditem[$d,a,9]", "1");
+        // A handle kept in a variable stays live in later evaluations (reference audit).
+        Is(e, "dictgetitem[$d,a]", "9");
+        Is(e, "dictsize[$d]", "1");
         Is(e, "setvar[d, dictcreate[k,v]] && dictadditem[$d,n,1]==0 && dicthaskey[$d,n] && dictsize[$d]==2", "1");
         Is(e, "setvar[d, dictcreate[k,v]] && dictremovekey[$d,k] && dictremovekey[$d,k]==0 && dictsize[$d]==0", "1");
         Is(e, "listcount[dictkeys[dictcreate[a,1,b,2,c,3]]]", "3");
@@ -415,7 +433,7 @@ internal static class ExpressionTests
         Is(e, "dicthaskey[dictcreate[Key,1],key]", "0");   // dict keys are case-sensitive
         Is(e, "setvar[d, dictcreate[a,1]] && setvar[c, dictcopy[$d]] && dictadditem[$c,z,1]==0 && dicthaskey[$d,z]==0", "1");
         Is(e, "dictsize[dictclear[dictcreate[a,1]]]", "0");
-        Is(e, "dictcreate[a]", "D:0");                     // odd argument count: the last key is dropped
+        Check.True(e.Evaluate("dictcreate[a]").StartsWith("D:"), "odd argument count: still a dict");   // the last key is dropped
         Is(e, "dictsize[dictcreate[a]]", "0");
         Is(e, "dictgetitem[D:99,a]", "");
     }
@@ -453,7 +471,8 @@ internal static class ExpressionTests
         Is(e, "atan2[0,1]", "0");
         Is(e, "cos[0]", "1");
         Is(e, "isfalse[0]", "1");
-        Is(e, "istrue[2]", "1");
+        Is(e, "istrue[2]", "0");                 // "equal to true (1)" (reference)
+        Is(e, "istrue[1]", "1");
         Is(e, "istrue[abc]", "0");               // text is not a true number here, though ToBool says true
         Is(e, "spellname[1332]", "Strength Self VI");
         Is(e, "spellname[99999999]", "Unknown Spell (99999999)");
@@ -473,8 +492,8 @@ internal static class ExpressionTests
         Is(e, "testvar[b]", "0");                 // the other branch never ran
         Is(e, "iif[0, x]", "");
         Is(e, "iif[1]", "");
-        Is(e, "iif[abc, yes, no]", "yes");        // lazy iif uses ToBool: text is true
-        Is(e, "iif[0.0, yes, no]", "yes");        // "0.0" is not "0"
+        Is(e, "iif[abc, yes, no]", "no");         // "false or not a number" takes the third (reference)
+        Is(e, "iif[0.0, yes, no]", "no");         // 0.0 is the number 0
         Is(e, "if[1, setvar[c,1]]", "1");
         Is(e, "if[0, setvar[d,1]]", "");
         Is(e, "testvar[d]", "0");
@@ -544,7 +563,7 @@ internal static class ExpressionTests
         Is(e, "getobjectinternaltype[stopwatchcreate[]]", "7");
         Is(e, "getobjectinternaltype[dictcreate[]]", "7");
         Is(e, "getobjectinternaltype[`[WorldObject] 0x50000001: Sword`]", "7");
-        Is(e, "getobjectinternaltype[listcreate[1,2]]", "3");   // lists are text
+        Is(e, "getobjectinternaltype[listcreate[1,2]]", "7");   // a list is an object (reference audit)
 
         Is(e, "raoptget[nope]", "0");
         Is(e, "raoptset[mode, hunt]", "1");
@@ -748,7 +767,7 @@ internal static class ExpressionTests
         Is(e, "getgameticks[]", "27435600");
         Is(e, "getgameyear[]", "10");
         Is(e, "getgamemonth[]", "0");
-        Is(e, "getgameday[]", "0");
+        Is(e, "getgameday[]", "1");                  // days are 1-30 (reference)
         Is(e, "getgamehour[]", "7");
         Is(e, "getisday[]", "1");
         Is(e, "getisnight[]", "0");
@@ -756,6 +775,9 @@ internal static class ExpressionTests
         Is(e, "getminutesuntilday[]", "0");
         Is(e, "getgamemonthname[0]", "Morningthaw");
         Is(e, "getgamemonthname[11]", "Wintersebb");
+        Is(e, "getgamemonthname[6]", "Harvestgain");   // spelled as the reference lists it
+        Is(e, "getmonthname[1]", "Solclaim");          // the reference example's name
+        Is(e, "getgamehourname[1]", "Darktide-and-Half");
         Is(e, "getgamemonthname[12]", "");
         Is(e, "getgamemonthname[x]", "");
         Is(e, "getgamehourname[0]", "Darktide");
@@ -964,6 +986,324 @@ internal static class ExpressionTests
         e.Evaluate("setvar[lastchat, `You killed the olthoi!`]");
         Check.Eq(e.Evaluate("getvar[name] # ^Virindi"), "1", "getvar[name] # ^Virindi");
         Check.Eq(e.Evaluate("getvar[lastchat] # killed.*olthoi"), "1", "getvar[lastchat] # killed.*olthoi");
+    }
+
+    // ── UtilityBelt reference audit ──────────────────────────────────────────
+
+    private static void DocSemicolon()
+    {
+        var e = Engine();
+        // The doc's own example (with listcreate, its createlist is a typo).
+        Is(e, "setvar[myList,listcreate[1,2,3]]; setvar[n,4]", "4");
+        Is(e, "$myList", "[1,2,3]");
+        Is(e, "getvar[n]", "4");
+        // The stopwatch pattern real metas use: the second half used to be dropped.
+        Is(e, "setvar[T, stopwatchcreate[]];stopwatchstart[getvar[T]]", "SW:0");
+        Is(e, "setvar[a,1];;setvar[b,2];", "2");          // empty parts are skipped
+        Is(e, "testvar[a]+testvar[b]", "2");
+        Is(e, "1+1; 2+2", "4");                            // the value is the last expression's
+        // Inside a template, as in the doc's listsort example.
+        Is(e, "listmap[listcreate[1,2], `setvar[t,$1*10];$t+1`]", "[11,21]");
+        Is(e, "getvar[a] # 1;setvar[c,3]", "3");           // an unquoted # pattern ends at ;
+    }
+
+    private static void DocShortCircuit()
+    {
+        var e = Engine();
+        Is(e, "0 && setvar[x,1]", "0");
+        Is(e, "testvar[x]", "0");                          // the right side never ran
+        Is(e, "1 || setvar[y,1]", "1");
+        Is(e, "testvar[y]", "0");
+        Is(e, "1 && setvar[z,1]", "1");
+        Is(e, "testvar[z]", "1");
+        Is(e, "0 || setvar[w,5]", "1");
+        Is(e, "getvar[w]", "5");
+        // Real meta idiom: cond && action, with nested calls and backticks in the skipped part.
+        Is(e, "setvar[debug,0]; $debug>=2&&setvar[said, `[x], y`]", "0");
+        Is(e, "testvar[said]", "0");
+        Is(e, "0 && (setvar[p,1] || setvar[q,1]) || setvar[r,1]", "1");
+        Is(e, "testvar[p]+testvar[q]", "0");
+        Is(e, "getvar[r]", "1");
+        Is(e, "0 && 1 || 1", "1");                         // results are as before
+        Is(e, "1 && 0", "0");
+    }
+
+    private static void DocStrings()
+    {
+        var e = Engine();
+        // The reference's examples: "123 test" escaped as \1\2\3 test, "p@cMan$)" as p\@cMan\$\).
+        Is(e, "setvar[a, \\1\\2\\3 test]", "123 test");
+        Is(e, "setvar[b, p\\@cMan\\$\\)]", "p@cMan$)");
+        Is(e, "setvar[c, some example string]", "some example string");
+        Is(e, "strlen[some example string]", "19");
+        // Real meta text: an escaped '!' and comma, a chat command joined with +.
+        Is(e, "setvar[m, Not in a fellowship\\!]", "Not in a fellowship!");
+        Is(e, "listcount[listcreate[a\\,b, c]]", "2");           // \, is a comma, not a separator
+        e.Evaluate("setvar[nav, Hunt Loop]");
+        Is(e, "\\/vt nav load +getvar[nav]", "/vt nav load Hunt Loop");
+        Is(e, "\\/t +getvar[nav]+\\, Removed as bell user\\.", "/t Hunt Loop, Removed as bell user.");
+        Is(e, "\\/ub jumpw 180 +cstr[750-5]", "/ub jumpw 180 745");
+        Is(e, "getvar[nav] == Hunt Loop && 1", "1");             // compared as the whole text
+        Is(e, "setvar[d, ILT Mega.met]", "ILT Mega.met");
+        Is(e, "1 2", "1");                                       // a number is one word
+        Is(e, "abc def[] ghi", "abc");                           // a function name is not text
+        Is(e, "listcount[listcreate[`a]`, b]]", "2");            // a ']' inside backticks is text
+        Is(e, "echo[`x`, 1] ; strlen[`a\\`b`]", "3");             // \` inside backticks still works
+        // Inside backticks \\ is one backslash (real metas nest templates this way); any other
+        // \x stays, as in the reference's getregexmatch[`test 123`,`\d+`].
+        Is(e, "getregexmatch[`test 123`,`\\d+`]", "123");
+        Is(e, "getregexmatch[`test 123`,`\\\\d+`]", "123");      // `\\d+` is the regex \d+
+        Is(e, "exec[`setvar[cmd, \\\\/vt forcebuff]`]", "/vt forcebuff");
+        Is(e, "strlen[`a\\\\b`]", "3");
+    }
+
+    private static void DocTrueFalse()
+    {
+        var e = Engine();
+        Is(e, "true", "1");
+        Is(e, "false", "0");
+        Is(e, "True == 1", "1");
+        Is(e, "FALSE == 0", "1");
+        Is(e, "setvar[flag, False]", "0");
+        Is(e, "iif[true, yes, no]", "yes");
+        Is(e, "true story", "true story");                       // only the word on its own
+        Is(e, "`true`", "true");                                 // and not in backticks
+    }
+
+    private static void DocVarShorthand()
+    {
+        FakeHost.Reset();
+        FakeHost.Names[Player] = "Sunnuj";
+        var e = Engine(FakeHost.Create(), playerId: Player);
+        Is(e, "setpvar[myPersistentVariable, 5]", "5");
+        Is(e, "@myPersistentVariable", "5");
+        Is(e, "@myPersistentVariable * 2", "10");
+        Is(e, "@unsetPvar", "0");
+        Is(e, "setgvar[myGlobalVariable, hi]", "hi");
+        Is(e, "&myGlobalVariable", "hi");
+        Is(e, "&unsetGvar", "0");
+        Is(e, "7&3", "3");                                   // & between values is still bitwise
+        Is(e, "6 & 3", "2");
+        Is(e, "1 && &myGlobalVariable == hi", "1");
+        // "$wobjectgetname[wobjectgetplayer[]]" is getvar[wobjectgetname[wobjectgetplayer[]]].
+        Is(e, "setvar[Sunnuj, mine]", "mine");
+        Is(e, "$wobjectgetname[0x50000A01]", "mine");
+        Is(e, "setvar[which, Sunnuj]", "Sunnuj");
+        Is(e, "$getvar[which]", "mine");
+        Is(e, "@", "");                                      // a stray sigil reads nothing, as before
+    }
+
+    private static void DocIndexAndSlice()
+    {
+        var e = Engine();
+        e.Evaluate("setvar[list, listcreate[a,b,c,d]]");
+        Is(e, "$list{0}", "a");
+        Is(e, "$list{3}", "d");
+        Is(e, "$list{-1}", "d");
+        Is(e, "$list{9}", "");
+        Is(e, "$list{:-1}", "[a,b,c]");                      // the reference's slice example
+        Is(e, "$list{1:3}", "[b,c]");
+        Is(e, "$list[1:3]", "[b,c]");                        // its other spelling
+        Is(e, "$list{2:}", "[c,d]");
+        Is(e, "$list{3:1}", "[]");
+        Is(e, "listcount[$list{1:}]", "3");
+        Is(e, "test[1:]", "est");                            // "Strings support slices like arrays"
+        Is(e, "test[:-1]", "tes");
+        Is(e, "`hello`{1}", "e");
+        Is(e, "setvar[i, 2]; $list{$i}", "c");               // the index is an expression
+        Is(e, "listcreate[x,y]{1}", "y");
+        // A dict by key, in one evaluation (keeping dicts across evaluations is a separate test).
+        Is(e, "setvar[d, dictcreate[a,2,params,p]]; $d{a}+$d{params}", "2p");
+        Is(e, "setvar[d, dictcreate[c, dictcreate[name,Bob]]]; $d{c}{name}", "Bob");
+        Is(e, "nosuchfn[1]", "");                            // no ':' : still an unknown function
+    }
+
+    private static void AssignmentSyntax()
+    {
+        FakeHost.Reset();
+        var e = Engine(FakeHost.Create());
+        Is(e, "$x=5", "5");
+        Is(e, "$x", "5");
+        Is(e, "$x == 5", "1");                               // == is still a comparison
+        Is(e, "$x = $x + 1", "6");
+        Is(e, "@TotalWins=@TotalWins+1", "1");
+        Is(e, "@TotalWins=@TotalWins+1", "2");
+        Is(e, "&g = hello", "hello");
+        Is(e, "getgvar[g]", "hello");
+        // Real meta: the value stops at &&, so the list is stored and then counted.
+        Is(e, "$found=listcreate[a,b] && listcount[$found]>0", "1");
+        Is(e, "$found", "[a,b]");
+        Is(e, "1 && $later=7", "1");
+        Is(e, "$later", "7");
+        Is(e, "0 && $never=1", "0");
+        Is(e, "testvar[never]", "0");
+        Is(e, "$a=1;$b=$a+1;$b", "2");
+    }
+
+    private static void DocListsChangeInPlace()
+    {
+        FakeHost.Reset();
+        FakeHost.Names[Player] = "List Toon";
+        var e = Engine(FakeHost.Create(), playerId: Player);
+        // The reference's overview example.
+        Is(e, "setvar[myList,listcreate[1,2,3]]; listadd[$myList,4]", "[1,2,3,4]");
+        Is(e, "$myList", "[1,2,3,4]");
+        // Real meta: no setvar around it.
+        e.Evaluate("setvar[CharList, listcreate[]]");
+        e.Evaluate("listadd[getvar[CharList], Drakkon]");
+        e.Evaluate("listadd[getvar[CharList], Lucy McJuicy]");
+        Is(e, "$CharList", "[Drakkon,Lucy McJuicy]");
+        Is(e, "listinsert[getvar[CharList], Zed, 0]", "[Zed,Drakkon,Lucy McJuicy]");
+        Is(e, "listremove[$CharList, Drakkon]", "[Zed,Lucy McJuicy]");
+        Is(e, "listremoveat[$CharList, 0]", "[Lucy McJuicy]");
+        Is(e, "$CharList", "[Lucy McJuicy]");
+        // listpop removes and returns; with no index, the last item.
+        e.Evaluate("setvar[q, listcreate[a,b,c]]");
+        Is(e, "listpop[$q]", "c");
+        Is(e, "listpop[getvar[q],0]", "a");
+        Is(e, "$q", "[b]");
+        Is(e, "listclear[$q]", "[]");
+        Is(e, "$q", "[]");
+        Is(e, "listpop[$q]", "");                              // empty: nothing to pop
+        // pvars and gvars too, and setvar around it still works.
+        e.Evaluate("setpvar[pl, listcreate[x]]");
+        e.Evaluate("listadd[@pl, y]");
+        Is(e, "getpvar[pl]", "[x,y]");
+        e.Evaluate("setgvar[gl, listcreate[1]]");
+        e.Evaluate("listadd[getgvar[gl], 2]");
+        Is(e, "&gl", "[1,2]");
+        Is(e, "setvar[s, listadd[$myList, 5]]", "[1,2,3,4,5]");
+        Is(e, "$s", "[1,2,3,4,5]");
+        // Not a variable, or not a list: nothing is written.
+        Is(e, "setvar[n, 7]; listadd[$n, 1]", "0");
+        Is(e, "$n", "7");
+        Is(e, "listadd[getvar[q]+x, 1]", "0");
+    }
+
+    private static void DocDictsPersist()
+    {
+        var e = Engine();
+        Is(e, "setvar[myDict,dictcreate[]]", "D:0");
+        Is(e, "dictadditem[getvar[myDict],foo,1]", "0");
+        Is(e, "dictadditem[getvar[myDict],foo,2]", "1");          // overwrote
+        Is(e, "dictgetitem[getvar[myDict],foo]", "2");
+        Is(e, "$myDict{foo}", "2");
+        Is(e, "dictsize[dictcreate[a,b,c,d]]", "2");              // the reference's example
+        Is(e, "dicthaskey[$myDict,foo]", "1");
+        // A new dict never takes a stored dict's id (they used to restart at D:0 each time).
+        string other = e.Evaluate("dictcreate[x,1]");
+        Check.True(other != "D:0", $"new dict {other} is not D:0");
+        Is(e, "dictsize[$myDict]", "1");
+        Is(e, "setvar[cfg, dictcreate[inner, dictcreate[name,Bob]]]; 1", "1");
+        Is(e, "$cfg{inner}{name}", "Bob");
+        Is(e, "setvar[copy, dictcopy[$myDict]]; dictadditem[$copy,bar,1]; dictsize[$myDict]", "1");
+        Is(e, "dictsize[$copy]", "2");
+
+        // Unreferenced dicts are swept once there are many; referenced ones (also nested) stay.
+        for (int i = 0; i < 400; i++) e.Evaluate("dictcreate[t,1]");
+        e.Evaluate("1");
+        Is(e, "dictgetitem[$myDict,foo]", "2");
+        Is(e, "$cfg{inner}{name}", "Bob");
+        Is(e, "dictsize[$copy]", "2");
+        Check.True(e.Evaluate("dictgetitem[D:5,t]") == "", "an unreferenced dict was swept");
+    }
+
+    private static void DocLogicAndTypes()
+    {
+        var e = Engine();
+        Is(e, "iif[1,2,3]", "2");                                // the reference's example
+        Is(e, "iif[0,2,3]", "3");
+        Is(e, "iif[abc,2,3]", "3");                              // not a number: the third
+        Is(e, "iif[``,2,3]", "3");
+        Is(e, "iif[-1,2,3]", "2");
+        Is(e, "isfalse[0]", "1");                                // the reference's examples
+        Is(e, "istrue[1]", "1");
+        Is(e, "isfalse[abc]", "0");                              // text is not false (0)...
+        Is(e, "istrue[abc]", "0");                               // ...nor true (1)
+        Is(e, "istrue[2]", "0");
+        Is(e, "isfalse[1]", "0");
+        Is(e, "istrue[3<10]", "1");
+        Is(e, "getobjectinternaltype[``]", "0");                 // 0=none, 1=number, 3=string, 7=object
+        Is(e, "getobjectinternaltype[5]", "1");
+        Is(e, "getobjectinternaltype[test]", "3");
+        Is(e, "getobjectinternaltype[listcreate[]]", "7");
+        Is(e, "getobjectinternaltype[coordinateparse[`1.2N, 3.4E`]]", "7");
+        Is(e, "getobjectinternaltype[dictcreate[]]", "7");
+        Is(e, "getobjectinternaltype[`1|2`]", "3");
+    }
+
+    private static void DocTextArguments()
+    {
+        FakeHost.Reset();
+        const uint kit = 0x60000001, key = 0x60000002, token = 0x60000003, essence = 0x60000004;
+        FakeHost.Names[kit] = "Healing Kit";
+        FakeHost.Names[key] = "The Baron's Key";
+        FakeHost.Names[token] = "High-Stakes Gambling Token";
+        FakeHost.Names[essence] = "Wisp Essence";
+        FakeHost.Ints[(kit, 12)] = 5;
+        var host = FakeHost.Create();
+        var cache = FakeHost.MakeCache(host, Player, new[] { kit, key, token, essence }, new Dictionary<uint, float>());
+        var e = Engine(host, playerId: Player, settings: new LegacyUiSettings { EnableCombat = true });
+        e.SetObjectCache(cache);
+
+        // Expressions are evaluated (they used to be searched for as typed).
+        e.Evaluate("setvar[itemname, Healing Kit]");
+        Is(e, "wobjectfindininventorybyname[$itemname]", "[WorldObject] 0x60000001: Healing Kit");
+        Is(e, "wobjectfindininventorybyname[getvar[itemname]]", "[WorldObject] 0x60000001: Healing Kit");
+        Is(e, "getitemcountininventorybyname[$itemname]", "5");
+        Is(e, "getitemcountininventorybynamerx[`^`+$itemname+`$`]", "5");
+        Is(e, "wobjectfindininventorybynamerx[\\(Knight\\|Wisp\\)\\.\\+Essence]", "[WorldObject] 0x60000004: Wisp Essence");
+        Is(e, "listcount[wobjectfindallinventorybynamerx[getvar[itemname]]]", "1");
+        // Plain text with punctuation is still taken as typed.
+        Is(e, "wobjectfindininventorybyname[The Baron's Key]", "[WorldObject] 0x60000002: The Baron's Key");
+        Is(e, "wobjectfindininventorybyname[High-Stakes Gambling Token]", "[WorldObject] 0x60000003: High-Stakes Gambling Token");
+        Is(e, "wobjectfindininventorybynamerx[(Essence)]", "[WorldObject] 0x60000004: Wisp Essence");
+        Is(e, "listcount[wobjectfindallinventorybynamerx[Wis[p]]]", "1");   // a regex that looks like a call
+        Check.False(FakeHost.Logs.Exists(l => l.Contains("unknown expression function 'wis'")), "and isn't logged as an unknown function");
+        Is(e, "getitemcountininventorybyname[Healing Kit]", "5");
+
+        // Meta state and setting names, and the cstrf format.
+        e.Evaluate("setvar[next, Turn In]");
+        Is(e, "vtsetmetastate[getvar[next]]", "1");
+        Is(e, "vtgetmetastate[]", "Turn In");
+        Is(e, "vtsetmetastate[Hunt - Phase 2]", "1");                      // typed text with a '-'
+        Is(e, "vtgetmetastate[]", "Hunt - Phase 2");
+        e.Evaluate("setvar[opt, EnableCombat]");
+        Is(e, "vtgetsetting[$opt]", "1");
+        Is(e, "vtsetsetting[$opt, 0]", "1");
+        Is(e, "vtgetsetting[EnableCombat]", "0");
+        e.Evaluate("setvar[fmt, N3]");
+        Is(e, "cstrf[3.14159,$fmt]", "3.142");
+        Is(e, "cstrf[3.14159,`N3`]", "3.142");                             // the reference's example
+    }
+
+    private static void DocLiveState()
+    {
+        FakeHost.Reset();
+        const uint north = 0x80000021, east = 0x80000022, near = 0x80000023;
+        FakeHost.PlayerPose = (0xA9B4001Cu, 96f, 96f, 0f);
+        FakeHost.Positions[north] = (0xA9B50001u, 96f, 10f, 0f);   // the landblock to the north, low y
+        FakeHost.Positions[east]  = (0xAAB40001u, 10f, 96f, 0f);   // the landblock to the east, low x
+        FakeHost.Positions[near]  = (0xA9B4001Cu, 96f, 150f, 0f);
+        FakeHost.KnownSpells.Add(2931);
+        FakeHost.Spellbook.AddRange(new uint[] { 2931, 1 });
+        var e = Engine(FakeHost.Create(), playerId: Player);
+
+        // "heading in degrees (0-360 clockwise, 0 is north) from your player to the target"
+        Is(e, "getheadingto[0x80000021]", "0");           // was 180: the local y alone is south
+        Is(e, "getheadingto[0x80000022]", "90");          // was 270
+        Is(e, "getheadingto[0x80000023]", "0");
+        Is(e, "getheadingto[0]", "0");
+
+        // "2 if the attempt is impossible": a spell the character doesn't know.
+        Is(e, "actiontrycastbyid[1]", "2");
+        Is(e, "actiontrycastbyidontarget[1, 0x80000023]", "2");
+        Check.Eq(FakeHost.Casts.Count, 0, "nothing cast for an unknown spell");
+        Is(e, "actiontrycastbyid[2931]", "0");             // known: not in magic mode yet, one step taken
+
+        Is(e, "getknownspells[]", "[2931,1]");
+        Is(e, "listcontains[getknownspells[], 2931]", "1");
+        Is(Engine(), "getknownspells[]", "[]");             // no host
     }
 
     private static void VitaeWithoutHost()

@@ -49,6 +49,7 @@ internal static class WeaponTests
         r.Add("slayer: the element follows the chosen weapon", SlayerElement);
         r.Add("slayer: read through the host (int 166, float 138, monster int 2), cached by wcid", SlayerFromHost);
         r.Add("weapon choice: an unlisted wand is never picked (Damage tab, learned, pack, name)", UnlistedNeverPicked);
+        r.Add("Items list: a listed item no longer carried is reported missing (pack, hand, unknown)", MissingFromPack);
         r.Add("weapon swap: one in flight, confirmed, retry cap, then what's in hand", SwapOneInFlight);
         r.Add("weapon swap: no flip-flop between two weapons", SwapNoFlipFlop);
         r.Add("weapon swap: a server refusal counts as a failed try", SwapRefused);
@@ -666,6 +667,37 @@ internal static class WeaponTests
         }
     }
 
+    private static void MissingFromPack()
+    {
+        // 2026-10-11: Drakkon's buff wand left his pack and the Items slot still just said "Wand".
+        const int InPack = 0x7000A001, InHand = 0x7000A002, Gone = 0x7000A003, Unknown = 0x7000A004;
+        var known = new Dictionary<int, WorldObject>
+        {
+            [InPack] = new WorldObject(InPack, "Silver Wand", AcObjectClass.WandStaffOrb),
+            [InHand] = new WorldObject(InHand, "Ken", AcObjectClass.MeleeWeapon),
+            [Gone] = new WorldObject(Gone, "Wand", AcObjectClass.WandStaffOrb),   // the client still knows it
+        };
+        WorldObject? Look(int id) => known.TryGetValue(id, out var wo) ? wo : null;
+        var rules = new List<ItemRule>
+        {
+            new() { Id = InPack, Name = "Silver Wand" },
+            new() { Id = InHand, Name = "Ken" },
+            new() { Id = Gone, Name = "Wand" },
+            new() { Id = Unknown, Name = "Old Bow" },
+            new() { Id = 0, Name = "never resolved" },
+        };
+        var pack = new[] { known[InPack], new WorldObject(0x7000A0FF, "Pyreal", AcObjectClass.Money) };
+        var missing = WeaponList.MissingIds(rules, pack, Look, wo => wo.Id == InHand);
+        Check.True(!missing.Contains(InPack), "in the pack: carried");
+        Check.True(!missing.Contains(InHand), "wielded (not in the pack list): carried");
+        Check.True(missing.Contains(Gone), "left the pack, the client still knows it: missing");
+        Check.True(missing.Contains(Unknown), "the client doesn't know it at all: missing");
+        Check.Eq(missing.Count, 2, "only those two (id 0 is never reported)");
+
+        missing = WeaponList.MissingIds(rules, Array.Empty<WorldObject>(), Look, _ => false);
+        Check.Eq(missing.Count, 0, "inventory not known yet (empty, logging in): nothing reported missing");
+    }
+
     private static void UnlistedNeverPicked()
     {
         var rig = new Rig(1535, "Ethereal Wisp");
@@ -683,9 +715,22 @@ internal static class WeaponTests
         var cache = FakeHost.MakeCache(FakeHost.Create(), Player, new[] { ListedWand, FireWand, NamedJunk });
         WorldObject? Look(int id) => cache[id];
         var inv = new[] { cache[unchecked((int)FireWand)]!, cache[unchecked((int)NamedJunk)]! };
-        int got = WeaponList.FindWand(rig.S.ItemRules, Look, _ => false, inv, allowUnlisted: true, out bool unlisted);
-        Check.Eq(unchecked((uint)got), ListedWand, "a wand is listed: that one, never the pack's");
+        var invWithListed = new[] { cache[unchecked((int)ListedWand)]!, cache[unchecked((int)FireWand)]!, cache[unchecked((int)NamedJunk)]! };
+        int got = WeaponList.FindWand(rig.S.ItemRules, Look, _ => false, invWithListed, allowUnlisted: true, out bool unlisted);
+        Check.Eq(unchecked((uint)got), ListedWand, "a wand is listed and carried: that one, never another from the pack");
         Check.False(unlisted, "not from the pack");
+
+        // 2026-10-11: the listed wand left the pack (the client still knows the object). It is
+        // not returned - the server ignores a wield of it and every buff was parked.
+        got = WeaponList.FindWand(rig.S.ItemRules, Look, _ => false, inv, allowUnlisted: false, out _);
+        Check.Eq(got, 0, "listed wand not carried, setting off: no wand (buffs go bare-handed), not the gone one");
+        got = WeaponList.FindWand(rig.S.ItemRules, Look, _ => false, inv, allowUnlisted: true, out unlisted);
+        Check.Eq(unchecked((uint)got), FireWand, "listed wand not carried, setting on: a caster from the pack");
+        got = WeaponList.FindWand(rig.S.ItemRules, Look, wo => wo.Id == unchecked((int)ListedWand), inv, allowUnlisted: false, out _);
+        Check.Eq(unchecked((uint)got), ListedWand, "a listed wand in hand counts as carried");
+        var sameName = new WorldObject(0x7000ABCD, cache[unchecked((int)ListedWand)]!.Name, AcObjectClass.WandStaffOrb);
+        got = WeaponList.FindWand(rig.S.ItemRules, Look, _ => false, new[] { sameName }, allowUnlisted: false, out _);
+        Check.Eq(got, 0x7000ABCD, "listed wand gone: another of the same name in the pack stands in");
 
         var none = new List<ItemRule>();
         got = WeaponList.FindWand(none, Look, _ => false, new[] { cache[unchecked((int)NamedJunk)]! }, allowUnlisted: true, out _);

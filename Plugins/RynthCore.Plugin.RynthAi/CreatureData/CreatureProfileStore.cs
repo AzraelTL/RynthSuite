@@ -28,7 +28,8 @@ namespace RynthCore.Plugin.RynthAi.CreatureData;
 /// </summary>
 internal sealed class CreatureProfileStore
 {
-    internal static readonly string Folder = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "CreatureData");
+    /// <summary>Where creatures.json lives (the offline tests point it at a scratch folder).</summary>
+    internal static string Folder = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "CreatureData");
     private const string FileName = "creatures.json";
 
     private readonly object _lock = new();
@@ -102,7 +103,12 @@ internal sealed class CreatureProfileStore
                 if (dict != null)
                 {
                     foreach (var kv in dict)
-                        _byKey[kv.Key] = kv.Value;
+                    {
+                        // Player characters appraised before e52ccc8 (wcid 1 / 4) are not
+                        // creatures: dropped, and the next save writes the file without them.
+                        if (kv.Value != null && PlayerWeenies.IsPlayerWcid(kv.Value.Wcid)) { _dirty = true; continue; }
+                        _byKey[kv.Key] = kv.Value!;
+                    }
                 }
                 _lastSavedJson = json;
             }
@@ -212,6 +218,7 @@ internal sealed class CreatureProfileStore
     public void Upsert(CreatureProfile sample, int difficulty = 0)
     {
         if (string.IsNullOrEmpty(sample.Name)) return;
+        if (PlayerWeenies.IsPlayerWcid(sample.Wcid)) return;   // a player character, never creature data
 
         lock (_lock)
         {

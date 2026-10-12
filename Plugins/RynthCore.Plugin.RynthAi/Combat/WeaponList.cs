@@ -148,6 +148,34 @@ internal static class WeaponList
         return list;
     }
 
+    /// <summary>Appended to a listed item's name in the pickers when it isn't carried (<see cref="MissingIds"/>).</summary>
+    public const string MissingSuffix = " (missing)";
+
+    /// <summary>
+    /// The listed items the character no longer carries: neither in the pack
+    /// (<paramref name="inventory"/>, WorldObjectCache.GetInventory) nor wielded. The client
+    /// can still know an object that left (sold, given, on a mule), so the saved name alone
+    /// looked fine while combat couldn't use it (2026-10-11, Drakkon's buff wand 0x8000EF07,
+    /// shown as "Wand"). An empty inventory means it isn't known yet (logging in): nothing is
+    /// reported missing then. For the Items panel's warning and the pickers' "(missing)".
+    /// </summary>
+    public static HashSet<int> MissingIds(IEnumerable<ItemRule> rules, IEnumerable<WorldObject> inventory,
+        Func<int, WorldObject?> lookup, Func<WorldObject, bool> isWielded)
+    {
+        var missing = new HashSet<int>();
+        var carried = new HashSet<int>();
+        foreach (var wo in inventory) carried.Add(wo.Id);
+        if (carried.Count == 0) return missing;
+        foreach (var r in rules)
+        {
+            if (r.Id == 0 || carried.Contains(r.Id)) continue;
+            var wo = lookup(r.Id);
+            if (wo != null && isWielded(wo)) continue;
+            missing.Add(r.Id);
+        }
+        return missing;
+    }
+
     /// <summary>
     /// The Items panel's edited list, mapped onto the saved one by id: the saved name stays
     /// (the panel shows the full name; entries are matched and saved by id), an element the
@@ -194,19 +222,37 @@ internal static class WeaponList
     {
         unlisted = false;
         int first = 0;
-        bool anyListedWand = false;
+        bool anyListedCarried = false;
+        // Only a wand the character still carries (in the pack or in hand). A listed wand the
+        // client saw once but that left the pack (sold, given, on a mule) used to be returned:
+        // the server ignores a wield of it, every buff got parked "fighting unbuffed", and
+        // Drakkon died over and over (2026-10-11, wand 0x8000EF07 shown as '?').
+        var pack = inventory as ICollection<WorldObject> ?? new List<WorldObject>(inventory);
+        var carried = new HashSet<int>();
+        foreach (var wo in pack) carried.Add(wo.Id);
+        var gone = new List<(ItemRule Rule, WorldObject Wo)>();
         foreach (var r in rules)
         {
             var wo = lookup(r.Id);
             if (wo == null) continue;
             if (!IsWand(wo)) continue;
-            anyListedWand = true;
             if (isWielded(wo)) return r.Id;
+            if (!carried.Contains(wo.Id)) { gone.Add((r, wo)); continue; }
+            anyListedCarried = true;
             if (first == 0) first = r.Id;
         }
         if (first != 0) return first;
-        if (anyListedWand || !allowUnlisted) return 0;
-        foreach (var wo in inventory)
+        // A listed wand no longer carried: another of the same name in the pack stands in for it.
+        foreach (var (r, wo) in gone)
+        {
+            string name = !string.IsNullOrWhiteSpace(r.Name) ? r.Name : wo.Name ?? "";
+            if (name.Length < 3 || name == "?") continue;
+            foreach (var p in pack)
+                if (IsWand(p) && string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
+                    return p.Id;
+        }
+        if (anyListedCarried || !allowUnlisted) return 0;
+        foreach (var wo in pack)
             if (wo.ObjectClass == AcObjectClass.WandStaffOrb)
             {
                 unlisted = true;

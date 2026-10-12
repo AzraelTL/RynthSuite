@@ -11,19 +11,36 @@ internal interface ISortWorld
     SortInventory? ReadInventory();
     /// <summary>The "stay out of the way" inputs now.</summary>
     GateInputs ReadGate(bool sortInCombat, long nowMs);
-    /// <summary>Sends the move to the client (merge or plain move). False = the engine refused it.</summary>
+    /// <summary>Sends the move to the client (merge, move to a slot, or plain move). False = the engine refused it.</summary>
     bool SendMove(in SortMove move);
-    /// <summary>The moved item and the server's last refusal.</summary>
-    MoveObservation Observe(uint itemId);
+    /// <summary>The moved item (its slot too, for a reorder) and the server's last refusal.</summary>
+    MoveObservation Observe(in SortMove move);
     /// <summary>The engine's refusal counter now (0 when the engine can't say).</summary>
     int ErrorSeqNow();
+    /// <summary>What this engine lets the planner do beyond moving items to their packs.</summary>
+    SortAbilities Abilities { get; }
+}
+
+/// <summary>What the engine can do for RynthSort (the plugin asks the host; the tests say).</summary>
+internal struct SortAbilities
+{
+    /// <summary>Slot orders are readable (API v80 GetContainerOrder).</summary>
+    public bool ReadOrder;
+    /// <summary>A move can name its slot (API v80 PutItemInContainer, bound on this client).</summary>
+    public bool PlaceMoves;
+    /// <summary>Stacks can be merged (MergeStackInternal).</summary>
+    public bool Merge;
+
+    public static SortAbilities All => new() { ReadOrder = true, PlaceMoves = true, Merge = true };
 }
 
 /// <summary>
 /// The sorting loop, one step per plugin tick: one move at a time, each waited on until the
 /// server answers it (the item lands, or it is refused, or the time limit passes), then a gap.
-/// Auto-sort moves new main-pack items after the settle time, one per gap; a job asked for
-/// (Sort now, Tidy, Clean, Unpack) goes as fast as the server answers. Nothing is sent while the
+/// Auto-sort keeps every pack tidy (<see cref="SortScope.All"/>): new main-pack items go to their
+/// packs after the settle time, misplaced side-pack items to theirs, then stacks are joined and
+/// items put in order inside each pack, one move per gap; a job asked for (Sort now, Clean,
+/// Unpack) goes as fast as the server answers. Nothing is sent while the
 /// gate says why not (<see cref="SortGate"/>). An item that fails is left alone for a minute, and
 /// failures in a row hold every move off longer and longer (<see cref="MoveTracker.BackoffMs"/>).
 /// </summary>
@@ -52,16 +69,25 @@ internal sealed class SortController
     public RynthAiActivity? LastBot { get; private set; }
     /// <summary>The last few moves and job results, newest first.</summary>
     public readonly List<string> Log = new();
+    /// <summary>What the engine allowed at the last tick (the window says when ordering isn't possible).</summary>
+    public SortAbilities Abilities { get; private set; }
     public int Moved { get; private set; }
     public int Failed { get; private set; }
 
     /// <summary>Settings changed by a command (auto-sort off for Unpack): the plugin saves.</summary>
     public Action? SettingsChanged;
+    /// <summary>The one-time pack fix ran (<see cref="PackFix"/>): its lines and how many rules it changed. The plugin logs and saves.</summary>
+    public Action<List<string>, int>? PacksFixed;
+
+    /// <summary>How long the side-slot layout must read the same before the one-time pack fix runs.</summary>
+    public const long FixSettleMs = 3000;
 
     private MoveInFlight? _inFlight;
     private long _nextStepMs;
     private long _nextViewMs;
     private int _failuresInARow;
+    private string? _fixLayout;
+    private long _fixLayoutSince;
 
     public bool HasMoveOut => _inFlight != null;
 
@@ -73,6 +99,7 @@ internal sealed class SortController
         _inFlight = null;
         _nextStepMs = _nextViewMs = 0;
         _failuresInARow = 0;
+        _fixLayout = null;
         Job = null;
         UnpackWhich = null;
         LastBot = null;
@@ -107,6 +134,25 @@ internal sealed class SortController
         SettingsChanged?.Invoke();
     }
 
+    // Items put in order in one pack go in the log as one line that counts up.
+    private string? _reorderRunLine;
+    private int _reorderRunPack = -1, _reorderRunCount;
+
+    private void NoteReorderRun(in SortMove m)
+    {
+        if (_reorderRunLine != null && _reorderRunPack == m.DestIndex && Log.Count > 0 && ReferenceEquals(Log[0], _reorderRunLine))
+        {
+            _reorderRunCount++;
+            Log[0] = _reorderRunLine = $"{_reorderRunCount} items put in order in {m.DestLabel}";
+            return;
+        }
+        _reorderRunPack = m.DestIndex;
+        _reorderRunCount = 1;
+        string name = m.Item.Name.Length > 0 ? m.Item.Name : $"0x{m.Item.Id:X8}";
+        Note($"{name} {m.Done}");
+        _reorderRunLine = Log[0];
+    }
+
     public void Note(string line)
     {
         Log.Insert(0, line);
@@ -117,9 +163,10 @@ internal sealed class SortController
 
     public void Tick(ISortWorld world, long nowMs)
     {
+        Abilities = world.Abilities;
         if (_inFlight != null)
         {
-            MoveObservation o = world.Observe(_inFlight.Move.Item.Id);
+            MoveObservation o = world.Observe(in _inFlight.Move);
             MoveOutcome outcome = MoveTracker.Observe(_inFlight, in o, nowMs);
             if (outcome == MoveOutcome.Pending) return;
             Finish(_inFlight.Move, outcome, nowMs);
@@ -128,12 +175,12 @@ internal sealed class SortController
         }
         if (nowMs < _nextStepMs) return;
 
-        SortScope? scope = Job ?? (Data.Settings.Auto ? SortScope.Main : null);
+        SortScope? scope = Job ?? (Data.Settings.Auto ? SortScope.All : null);
         if (scope == null)
         {
             Status = "off";
             LastBot = null;
-            RefreshView(world, SortScope.Main, nowMs);
+            RefreshView(world, SortScope.All, nowMs);
             _nextStepMs = nowMs + PollMs;
             return;
         }
@@ -157,9 +204,17 @@ internal sealed class SortController
             return;
         }
         _nextViewMs = nowMs + ViewMs;
+        if (!AfterRead(inv, nowMs))
+        {
+            // Rules not tied to their packs yet: nothing moves by a number that may be wrong.
+            Status = "reading your packs";
+            Planner.Plan(inv, Data.Rules, SortScope.Main, force: false, nowMs, Data.Settings.SettleSec * 1000, Options(world));
+            _nextStepMs = nowMs + PollMs;
+            return;
+        }
         List<SortMove> moves = scope == SortScope.Unpack
             ? Planner.PlanUnpack(inv, UnpackWhich, nowMs)
-            : Planner.Plan(inv, Data.Rules, scope.Value, force: Job != null, nowMs, Data.Settings.SettleSec * 1000);
+            : Planner.Plan(inv, Data.Rules, scope.Value, force: Job != null, nowMs, Data.Settings.SettleSec * 1000, Options(world));
 
         if (moves.Count == 0)
         {
@@ -174,12 +229,26 @@ internal sealed class SortController
         Status = scope == SortScope.Unpack ? "unpacking" : "sorting";
         SortMove m = moves[0];
         int seq = world.ErrorSeqNow();
+        int stack = m.Item.Stack;   // as read before the send (a merge's answer is a smaller stack)
         if (!world.SendMove(in m))
         {
             Finish(m, MoveOutcome.Refused, nowMs, "the engine refused the move");
             return;
         }
-        _inFlight = new MoveInFlight { Move = m, SentMs = nowMs, ErrorSeqAtSend = seq, StackAtSend = m.Item.Stack };
+        _inFlight = new MoveInFlight { Move = m, SentMs = nowMs, ErrorSeqAtSend = seq, StackAtSend = stack };
+    }
+
+    /// <summary>What the planner may do: the engine's abilities and the settings.</summary>
+    internal PlanOptions Options(ISortWorld world)
+    {
+        SortAbilities a = world.Abilities;
+        return new PlanOptions
+        {
+            Order = a.ReadOrder && a.PlaceMoves && Data.Settings.OrderInPacks,
+            KindFirst = Data.Settings.OrderKindFirst,
+            Place = a.ReadOrder && a.PlaceMoves,
+            Merge = a.Merge,
+        };
     }
 
     private void NoteJobDone(SortScope job)
@@ -189,7 +258,7 @@ internal sealed class SortController
         {
             case SortScope.Unpack: Note(v.MainFull ? "Main pack is full: unpacking stopped" : "Side packs emptied"); break;
             case SortScope.Clean: Note(v.MainFull ? "Main pack is full: some strays left" : "Packs cleaned"); break;
-            case SortScope.All: Note(v.Waiting > 0 ? $"Packs tidied ({v.Waiting} can't move yet)" : "Packs tidied"); break;
+            case SortScope.All: Note(v.Waiting > 0 ? $"Packs sorted ({v.Waiting} can't move yet)" : "Packs sorted"); break;
             default: Note(v.Waiting > 0 ? $"Main pack sorted ({v.Waiting} can't move yet)" : "Main pack sorted"); break;
         }
     }
@@ -203,7 +272,16 @@ internal sealed class SortController
             case MoveOutcome.Done:
                 Moved++;
                 _failuresInARow = 0;
-                Note($"{name} -> {m.DestLabel}");
+                if (m.Kind == MoveKind.Reorder)
+                {
+                    Planner.NoteReorder(m.Item.Id, nowMs);
+                    NoteReorderRun(m);
+                }
+                else
+                {
+                    _reorderRunLine = null;
+                    Note($"{name} {m.Done}");
+                }
                 _nextStepMs = nowMs + gap;
                 return;
             case MoveOutcome.TooBusy:
@@ -223,6 +301,32 @@ internal sealed class SortController
         }
     }
 
+    /// <summary>
+    /// After each read: the one-time pack fix once the side slots have read the same for
+    /// <see cref="FixSettleMs"/> (a pack whose capacity isn't readable yet could pass for a focus),
+    /// then each rule's number kept on its pack. False while imported rules still wait for the fix
+    /// (their numbers may name the wrong pack); rules saved by RynthSort meant what they say and
+    /// sort on meanwhile.
+    /// </summary>
+    private bool AfterRead(SortInventory inv, long nowMs)
+    {
+        if (!Data.PacksFixed)
+        {
+            bool hold = Data.ImportedFrom.Length > 0;
+            if (!PackFix.Ready(inv)) { _fixLayout = null; return !hold; }
+            string layout = PackFix.Layout(inv);
+            if (layout != _fixLayout) { _fixLayout = layout; _fixLayoutSince = nowMs; return !hold; }
+            if (nowMs - _fixLayoutSince < FixSettleMs) return !hold;
+            List<string> lines = PackFix.Apply(Data.Rules, inv, hold, Data.LuaRules, out int changed);
+            Data.PacksFixed = true;
+            Data.LuaRules = null;
+            if (hold) Note($"Imported pack numbers fixed: {changed} of {lines.Count} rules");
+            PacksFixed?.Invoke(lines, changed);
+        }
+        if (PackFix.Sync(Data.Rules, inv)) SettingsChanged?.Invoke();
+        return true;
+    }
+
     /// <summary>Re-reads the packs for the window now and then while nothing moves.</summary>
     private void RefreshView(ISortWorld world, SortScope scope, long nowMs)
     {
@@ -230,7 +334,8 @@ internal sealed class SortController
         _nextViewMs = nowMs + ViewMs;
         SortInventory? inv = world.ReadInventory();
         if (inv == null) return;
+        AfterRead(inv, nowMs);
         if (scope == SortScope.Unpack) Planner.PlanUnpack(inv, UnpackWhich, nowMs);
-        else Planner.Plan(inv, Data.Rules, scope, force: false, nowMs, Data.Settings.SettleSec * 1000);
+        else Planner.Plan(inv, Data.Rules, scope, force: false, nowMs, Data.Settings.SettleSec * 1000, Options(world));
     }
 }

@@ -114,11 +114,11 @@ internal static class InstallPathsTests
         Check.Eq(RynthCore.Plugin.RynthAi.Loot.LootEditorBridge.LootFolder, @"C:\Games\RynthSuite\RynthAi\LootProfiles", "loot profiles");
         Check.Eq(RynthCore.Plugin.RynthAi.Vendor.AutoVendorManager.MainProfileDir, @"C:\Games\RynthSuite\RynthAi\AutoVendor", "AutoVendor");
         Check.Eq(RynthCore.Plugin.RynthAi.Trade.AutoTradeManager.MainProfileDir, @"C:\Games\RynthSuite\RynthAi\AutoTrade", "AutoTrade");
-        Check.Eq(RynthCore.Plugin.RynthAi.CreatureData.CreatureProfileStore.Folder, @"C:\Games\RynthSuite\RynthAi\CreatureData", "creature data");
         Check.Eq(RynthCore.Plugin.RynthAi.CreatureData.CreatureWeakness.WeaknessFile, @"C:\Games\RynthSuite\RynthAi\Data\creature_weakness.json", "weakness file");
         Check.Eq(PrivateStatic(typeof(RynthCore.Plugin.RynthAi.RadarWallRenderer), "ExploredDir"), @"C:\Games\RynthSuite\RynthAi\ExploredDungeons", "explored dungeons");
         // The tests point the store at their scratch folder (Program.Main); this is its value before that.
         Check.Eq(Program.LiveHazardFolder, @"C:\Games\RynthSuite\RynthAi\DungeonHazards", "dungeon hazards");
+        Check.Eq(Program.LiveCreatureFolder, @"C:\Games\RynthSuite\RynthAi\CreatureData", "creature data");
     }
 
     private static string? PrivateStatic(Type type, string field)

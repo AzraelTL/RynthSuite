@@ -51,26 +51,28 @@ internal static class MoveAudit
     public static bool SetAutoRunBy(this RynthCoreHost host, string who, bool on)
     {
         if (on && HeldForUse(host, who, "SetAutoRun(True)")) return false;
-        if (HeldForAction(host, who, on ? "SetAutoRun(True)" : "SetAutoRun(False)", isStop: !on)) return false;
+        if (HeldForAction(host, who, on ? "SetAutoRun(True)" : "SetAutoRun(False)", isStop: !on, deferAs: on ? null : PendingStop.AutoRunOff())) return false;
+        if (on) FlushPendingStops(host, "before a start");
         Note(host, who, "SetAutoRun", on ? "True" : "False", collapseByKindOnly: false);
-        lock (Gate) { _autoRunOn = on; if (on) _lastStartMs = NowMs(); }
+        lock (Gate) { _autoRunOn = on; if (on) _lastStartMs = NowMs(); else _pendingAutoRunOff = null; }
         return host.SetAutoRun(on);
     }
 
     public static bool StopCompletelyBy(this RynthCoreHost host, string who)
     {
-        if (HeldForAction(host, who, "StopCompletely()", isStop: true)) return false;
+        if (HeldForAction(host, who, "StopCompletely()", isStop: true, deferAs: PendingStop.Complete())) return false;
         Note(host, who, "StopCompletely", "", collapseByKindOnly: false);
-        lock (Gate) { _autoRunOn = false; _motionsOn.Clear(); }
+        lock (Gate) { _autoRunOn = false; _motionsOn.Clear(); ClearPendingLocked(); }   // clears everything AC has on
         return host.StopCompletely();
     }
 
     public static bool SetMotionBy(this RynthCoreHost host, string who, uint motion, bool on)
     {
         if (on && HeldForUse(host, who, $"SetMotion(0x{motion:X8}, True)")) return false;
-        if (HeldForAction(host, who, $"SetMotion(0x{motion:X8}, {(on ? "True" : "False")})", isStop: !on, motion)) return false;
+        if (HeldForAction(host, who, $"SetMotion(0x{motion:X8}, {(on ? "True" : "False")})", isStop: !on, motion, on ? null : PendingStop.MotionOff(motion))) return false;
+        if (on) FlushPendingStops(host, "before a start");
         Note(host, who, "SetMotion", $"0x{motion:X8}, {(on ? "True" : "False")}", collapseByKindOnly: false);
-        lock (Gate) { if (on) { _motionsOn.Add(motion); _lastStartMs = NowMs(); } else _motionsOn.Remove(motion); }
+        lock (Gate) { if (on) { _motionsOn.Add(motion); _lastStartMs = NowMs(); } else { _motionsOn.Remove(motion); _pendingMotionOff.Remove(motion); } }
         return host.SetMotion(motion, on);
     }
 
@@ -78,6 +80,7 @@ internal static class MoveAudit
     {
         if (HeldForUse(host, who, $"DoMovement(0x{motion:X8})")) return false;
         if (HeldForAction(host, who, $"DoMovement(0x{motion:X8})", isStop: false)) return false;
+        FlushPendingStops(host, "before a start");
         Note(host, who, "DoMovement", $"0x{motion:X8}, {speed:0.##}, {holdKey}", collapseByKindOnly: false);
         lock (Gate) { _motionsOn.Add(motion); _lastStartMs = NowMs(); }
         return host.DoMovement(motion, speed, holdKey);
@@ -89,9 +92,16 @@ internal static class MoveAudit
     // or a stop cancels the walk/turn to a used object, and a cast's end waits for its gesture.
     // While ActionPacer has one outstanding:
     //   * starting to move or turning is held (returns false, one log line per action and caller);
-    //   * a stop goes through only when RynthAi itself has the character moving (autorun, or the
-    //     motion it turned on); a stop with nothing of ours moving would only send a redundant
-    //     movement packet in the middle of the action, so it is held as well;
+    //   * a stop goes through at once when RynthAi itself turned that movement on (autorun, or the
+    //     motion it turned on) and has not turned it off since - however long ago (2026-10-12: the
+    //     3 s "fresh" window used to apply to stops too, so a nav stop more than 3 s after the
+    //     last autorun-on that got through was taken as redundant while AC's autorun was still on);
+    //   * any other stop waits, but is never dropped (2026-10-12): it is kept as a pending stop and
+    //     sent as soon as nothing is outstanding (FlushPendingStops, every RynthAi tick, before the
+    //     next start, and always before the next cast - CastSpellFor). RynthAi can't see AC's own
+    //     motion state, and a stop left out leaves AC's autorun/motion on for the cast's
+    //     FreeHandsAndCastSpell -> MaybeStopCompletely to flush in the cast's frame: the stray
+    //     stop burst that came before every run of casts that never landed (flight 63260);
     //   * the deliberate kick for a held cast (Buff/Nudge), a macro stop and typed commands pass.
     // Off unless ActionPacer.Enabled (RynthAi only).
 
@@ -115,20 +125,25 @@ internal static class MoveAudit
         get { lock (Gate) return (_autoRunOn || _motionsOn.Count > 0) && NowMs() - _lastStartMs < OwnMovementFreshMs; }
     }
 
-    /// <summary>True when the call must wait for an unanswered paced action (internal for the tests).</summary>
-    internal static bool HeldForAction(RynthCoreHost host, string who, string call, bool isStop, uint motion = 0)
+    /// <summary>
+    /// True when the call must wait for an unanswered paced action (internal for the tests). A stop
+    /// that waits is kept as <paramref name="deferAs"/> and sent later (FlushPendingStops): a stop is
+    /// never dropped.
+    /// </summary>
+    internal static bool HeldForAction(RynthCoreHost host, string who, string call, bool isStop, uint motion = 0, PendingStop? deferAs = null)
     {
         if (!ActionPacer.Enabled || IsExemptFromActionHold(who)) return false;
         if (isStop)
         {
             bool moving;
-            lock (Gate) moving = (motion != 0 ? _motionsOn.Contains(motion) : (_autoRunOn || _motionsOn.Count > 0))
-                                 && NowMs() - _lastStartMs < OwnMovementFreshMs;
-            if (moving) return false;   // a real stop always goes through
+            lock (Gate) moving = motion != 0 ? _motionsOn.Contains(motion) : (_autoRunOn || _motionsOn.Count > 0);
+            if (moving) return false;   // a real stop always goes through, however old the start
         }
         var pending = ActionPacer.Current(host);
         if (pending == null) return false;
         if (!ActionPacer.HoldsMovement(host, out string what)) return false;
+        if (isStop && deferAs != null)
+            lock (Gate) AddPendingLocked(deferAs, who);
         bool log;
         lock (Gate)
         {
@@ -137,11 +152,150 @@ internal static class MoveAudit
         }
         if (log)
         {
-            string kind = isStop ? "redundant stop, nothing of ours is moving" : "move/turn";
-            try { host.Log($"[Move] {PluginName}/{who} {call} held ({kind}): the server is still answering {what}"); }
+            string line = isStop
+                ? $"[Move] {PluginName}/{who} {call} waits (nothing of ours is moving; sent once the server has answered, before any cast): the server is still answering {what}"
+                : $"[Move] {PluginName}/{who} {call} held (move/turn): the server is still answering {what}";
+            try { host.Log(line); }
             catch { }
         }
         return true;
+    }
+
+    // ── Pending stops (2026-10-12) ──────────────────────────────────────────────
+    // A stop held by HeldForAction waits here until FlushPendingStops sends it. A StopCompletely
+    // covers everything else; an autorun-off and each motion-off are kept once (the last caller
+    // wins). A stop that goes through for real clears what it covers; a start that goes through
+    // sends the pending stops first, so the order the bot asked for is kept.
+
+    internal enum PendingStopKind { AutoRunOff, MotionOff, StopMovement, Complete }
+
+    /// <summary>One stop waiting to be sent.</summary>
+    internal sealed class PendingStop
+    {
+        public PendingStopKind Kind;
+        public uint Motion;
+        public int HoldKey;
+        public static PendingStop AutoRunOff() => new() { Kind = PendingStopKind.AutoRunOff };
+        public static PendingStop MotionOff(uint motion) => new() { Kind = PendingStopKind.MotionOff, Motion = motion };
+        public static PendingStop StopMovement(uint motion, int holdKey) => new() { Kind = PendingStopKind.StopMovement, Motion = motion, HoldKey = holdKey };
+        public static PendingStop Complete() => new() { Kind = PendingStopKind.Complete };
+    }
+
+    private static string? _pendingComplete;                                   // who
+    private static string? _pendingAutoRunOff;                                 // who
+    private static readonly System.Collections.Generic.Dictionary<uint, string> _pendingMotionOff = new();
+    private static readonly System.Collections.Generic.Dictionary<uint, (int holdKey, string who)> _pendingStopMovement = new();
+    private static long _pendingSinceMs;
+    private static long _deferredStopsSent;
+
+    /// <summary>Held stops sent later by FlushPendingStops (status, tests).</summary>
+    internal static long DeferredStopsSent { get { lock (Gate) return _deferredStopsSent; } }
+
+    /// <summary>True while a held stop is waiting to be sent.</summary>
+    internal static bool HasPendingStop
+    {
+        get { lock (Gate) return HasPendingLocked(); }
+    }
+
+    private static bool HasPendingLocked() =>
+        _pendingComplete != null || _pendingAutoRunOff != null || _pendingMotionOff.Count > 0 || _pendingStopMovement.Count > 0;
+
+    private static void AddPendingLocked(PendingStop stop, string who)
+    {
+        if (!HasPendingLocked()) _pendingSinceMs = NowMs();
+        switch (stop.Kind)
+        {
+            case PendingStopKind.Complete: _pendingComplete = who; break;
+            case PendingStopKind.AutoRunOff: _pendingAutoRunOff = who; break;
+            case PendingStopKind.MotionOff: _pendingMotionOff[stop.Motion] = who; break;
+            case PendingStopKind.StopMovement: _pendingStopMovement[stop.Motion] = (stop.HoldKey, who); break;
+        }
+    }
+
+    private static void ClearPendingLocked()
+    {
+        _pendingComplete = null;
+        _pendingAutoRunOff = null;
+        _pendingMotionOff.Clear();
+        _pendingStopMovement.Clear();
+    }
+
+    /// <summary>
+    /// Sends the held stops once nothing is outstanding (or at once with <paramref name="force"/>:
+    /// a cast is about to go out, and no cast goes out with a stop still held). RynthAi calls it
+    /// every tick; the starts and CastSpellFor call it first. Returns true when something was sent.
+    /// </summary>
+    internal static bool FlushPendingStops(RynthCoreHost host, string why, bool force = false)
+    {
+        lock (Gate) { if (!HasPendingLocked()) return false; }
+        if (!force && ActionPacer.Current(host) != null) return false;
+
+        string? complete, autoRunOff;
+        System.Collections.Generic.KeyValuePair<uint, string>[] motionOff;
+        System.Collections.Generic.KeyValuePair<uint, (int holdKey, string who)>[] stopMovement;
+        long waited;
+        lock (Gate)
+        {
+            if (!HasPendingLocked()) return false;
+            complete = _pendingComplete;
+            autoRunOff = _pendingAutoRunOff;
+            motionOff = new System.Collections.Generic.KeyValuePair<uint, string>[_pendingMotionOff.Count];
+            ((System.Collections.Generic.ICollection<System.Collections.Generic.KeyValuePair<uint, string>>)_pendingMotionOff).CopyTo(motionOff, 0);
+            stopMovement = new System.Collections.Generic.KeyValuePair<uint, (int, string)>[_pendingStopMovement.Count];
+            ((System.Collections.Generic.ICollection<System.Collections.Generic.KeyValuePair<uint, (int, string)>>)_pendingStopMovement).CopyTo(stopMovement, 0);
+            waited = NowMs() - _pendingSinceMs;
+            ClearPendingLocked();
+        }
+
+        var sent = new System.Collections.Generic.List<string>();
+        try
+        {
+            if (complete != null)
+            {
+                // StopCompletely clears autorun and every motion in AC: nothing else is needed.
+                if (host.HasStopCompletely)
+                {
+                    host.StopCompletely();
+                    lock (Gate) { _autoRunOn = false; _motionsOn.Clear(); _deferredStopsSent++; }
+                    sent.Add($"StopCompletely() for {complete}");
+                }
+                else
+                {
+                    autoRunOff ??= complete;   // no StopCompletely on this engine: at least autorun off
+                }
+            }
+            if (complete == null || !host.HasStopCompletely)
+            {
+                if (autoRunOff != null)
+                {
+                    host.SetAutoRun(false);
+                    lock (Gate) { _autoRunOn = false; _deferredStopsSent++; }
+                    sent.Add($"SetAutoRun(False) for {autoRunOff}");
+                }
+                foreach (var m in motionOff)
+                {
+                    if (!host.HasSetMotion) break;
+                    host.SetMotion(m.Key, false);
+                    lock (Gate) { _motionsOn.Remove(m.Key); _deferredStopsSent++; }
+                    sent.Add($"SetMotion(0x{m.Key:X8}, False) for {m.Value}");
+                }
+                foreach (var s in stopMovement)
+                {
+                    if (!host.HasStopMovement) break;
+                    host.StopMovement(s.Key, s.Value.holdKey);
+                    lock (Gate) { _motionsOn.Remove(s.Key); _deferredStopsSent++; }
+                    sent.Add($"StopMovement(0x{s.Key:X8}) for {s.Value.who}");
+                }
+            }
+        }
+        catch { }
+
+        if (sent.Count > 0 && Enabled)
+        {
+            try { host.Log($"[Move] {PluginName} held stop(s) sent {why} after {waited} ms: {string.Join(", ", sent)}"); }
+            catch { }
+        }
+        return sent.Count > 0;
     }
 
     // ── Hold while a door/corpse use is in flight (2026-10-06) ─────────────────────
@@ -175,9 +329,9 @@ internal static class MoveAudit
 
     public static bool StopMovementBy(this RynthCoreHost host, string who, uint motion, int holdKey)
     {
-        if (HeldForAction(host, who, $"StopMovement(0x{motion:X8})", isStop: true, motion)) return false;
+        if (HeldForAction(host, who, $"StopMovement(0x{motion:X8})", isStop: true, motion, PendingStop.StopMovement(motion, holdKey))) return false;
         Note(host, who, "StopMovement", $"0x{motion:X8}, {holdKey}", collapseByKindOnly: false);
-        lock (Gate) _motionsOn.Remove(motion);
+        lock (Gate) { _motionsOn.Remove(motion); _pendingStopMovement.Remove(motion); }
         return host.StopMovement(motion, holdKey);
     }
 
@@ -243,6 +397,9 @@ internal static class MoveAudit
             _lastStartMs = long.MinValue / 2;
             _actionHoldLogged.Clear();
             _actionHoldLoggedFor = long.MinValue;
+            ClearPendingLocked();
+            _pendingSinceMs = 0;
+            _deferredStopsSent = 0;
         }
     }
 }

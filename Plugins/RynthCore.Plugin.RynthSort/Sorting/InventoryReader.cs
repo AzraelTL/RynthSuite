@@ -10,6 +10,12 @@ namespace RynthCore.Plugin.RynthSort.Sorting;
 /// worn and wielded items; each side pack's items come from GetContainerContents(pack). A side
 /// pack is a container that holds items (ItemsCapacity above 0); foci hold none and are skipped,
 /// as are worn and wielded items. Names, classes and stack limits are kept per item id once read.
+/// GetContainerContents sorts by object id; with the engine's slot orders (API v80
+/// GetContainerOrder: what the server sent at login and with every move) each pack's items are put
+/// in their real slot order and the side packs in the pack column's order, top first, whenever
+/// that order names exactly what was read (<see cref="SortPack.ApplyOrder"/>,
+/// <see cref="SortInventory.ApplyPackOrder"/>). Without it the id order stays and nothing is
+/// reordered inside packs.
 /// </summary>
 internal sealed class InventoryReader
 {
@@ -39,6 +45,7 @@ internal sealed class InventoryReader
 
     private readonly Dictionary<uint, Known> _known = new();
     private uint[] _buf = new uint[512];
+    private uint[] _order = new uint[128];
 
     public void Reset() => _known.Clear();
 
@@ -59,12 +66,17 @@ internal sealed class InventoryReader
         foreach (uint id in top)
         {
             if (id == 0) continue;
-            if (Wielded(host, id)) continue;
             uint type = host.TryGetItemType(id, out uint t) ? t : 0;
-            if ((type & ItemTypeContainer) != 0)
+            bool isContainer = (type & ItemTypeContainer) != 0;
+            int cap = 0;
+            bool capRead = isContainer && host.TryGetObjectIntProperty(id, IntItemsCapacity, out cap);
+            // Every container entry, foci too and before the wielded check: the Lua script's count.
+            if (isContainer) inv.Slots.Add(new SortSlot(id, capRead ? Math.Max(cap, 0) : -1));
+            if (Wielded(host, id)) continue;
+            if (isContainer)
             {
                 // A side pack holds items; foci (containers that hold none) aren't packs or items.
-                if (host.TryGetObjectIntProperty(id, IntItemsCapacity, out int cap) && cap > 0)
+                if (capRead && cap > 0)
                 {
                     var pack = new SortPack { Id = id, Capacity = cap, Name = host.TryGetObjectName(id, out string pn) ? pn : string.Empty };
                     foreach (uint inner in Contents(host, id))
@@ -80,7 +92,21 @@ internal sealed class InventoryReader
             }
             inv.Main.Items.Add(Item(host, id, type));
         }
+        if (host.HasContainerOrder)
+        {
+            if (host.TryGetContainerOrder(player, false, ref _order, out int n)) inv.Main.ApplyOrder(_order, n);
+            foreach (SortPack p in inv.Packs)
+                if (host.TryGetContainerOrder(p.Id, false, ref _order, out n)) p.ApplyOrder(_order, n);
+            if (host.TryGetContainerOrder(player, true, ref _order, out n)) inv.ApplyPackOrder(_order, n);
+        }
         return inv;
+    }
+
+    /// <summary>The slot <paramref name="itemId"/> holds in <paramref name="container"/> (the engine's slot order), or -1.</summary>
+    public int SlotOf(RynthCoreHost host, uint container, uint itemId)
+    {
+        if (!host.HasContainerOrder || !host.TryGetContainerOrder(container, false, ref _order, out int n)) return -1;
+        return Array.IndexOf(_order, itemId, 0, n);
     }
 
     private uint[] Contents(RynthCoreHost host, uint container)

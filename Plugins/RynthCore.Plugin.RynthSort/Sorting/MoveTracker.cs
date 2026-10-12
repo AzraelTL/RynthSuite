@@ -23,6 +23,8 @@ internal struct MoveObservation
     public uint Container;
     public uint Wielder;
     public int Stack;
+    /// <summary>Its slot in its container (the engine's slot order), or -1 when unknown. Read for reorders only.</summary>
+    public int Slot;
     /// <summary>The engine's refusal counter (TryGetLastWeenieError seq; 0 when unknown).</summary>
     public int ErrorSeq;
     public uint Error;
@@ -52,16 +54,35 @@ internal static class MoveTracker
     /// <summary>The longest hold after refusals in a row.</summary>
     public const long MaxBackoffMs = 30_000;
 
+    /// <summary>The container reads as this when the engine can't say (no ownership info).</summary>
+    public const uint UnknownContainer = 0xFFFFFFFF;
     public const uint EventInventoryServerSaveFailed = 0x00A0;
     public const uint ErrorYoureTooBusy = 0x001D;
     public const uint ErrorTooManyActions = 0x0045;
 
+    /// <summary>
+    /// What the client says about the move so far. A move within one pack (a stack joined, a slot
+    /// changed) can't be judged by the item's container, which it never left: a join is answered
+    /// when the item is gone or smaller, a reorder when the item sits at its slot (or left the pack).
+    /// </summary>
     public static MoveOutcome Observe(MoveInFlight m, in MoveObservation o, long nowMs)
     {
         SortMove mv = m.Move;
         if (!o.Exists) return MoveOutcome.Done;                                   // merged on arrival
-        if (o.Container == mv.Dest.Id && o.Wielder == 0) return MoveOutcome.Done;
-        if (mv.MergeInto != 0 && o.Stack < m.StackAtSend) return MoveOutcome.Done; // part of it joined the stack
+        switch (mv.Kind)
+        {
+            case MoveKind.Stack:
+                if (o.Stack < m.StackAtSend) return MoveOutcome.Done;
+                break;
+            case MoveKind.Reorder:
+                if (o.Container == mv.Dest.Id && o.Slot == mv.Placement) return MoveOutcome.Done;
+                if (o.Container != mv.Dest.Id && o.Container != UnknownContainer) return MoveOutcome.Done;   // someone moved it away
+                break;
+            default:
+                if (o.Container == mv.Dest.Id && o.Wielder == 0) return MoveOutcome.Done;
+                if (mv.MergeInto != 0 && o.Stack < m.StackAtSend) return MoveOutcome.Done; // part of it joined the stack
+                break;
+        }
         if (o.ErrorSeq != 0 && o.ErrorSeq != m.ErrorSeqAtSend)
         {
             if (o.Error == ErrorYoureTooBusy || o.Error == ErrorTooManyActions) return MoveOutcome.TooBusy;

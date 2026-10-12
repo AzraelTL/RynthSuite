@@ -20,6 +20,9 @@ internal static class Program
     /// <summary>DungeonHazardStore's folder before Main pointed it at the scratch folder.</summary>
     public static string LiveHazardFolder { get; private set; } = "";
 
+    /// <summary>CreatureProfileStore's folder before Main pointed it at the scratch folder.</summary>
+    public static string LiveCreatureFolder { get; private set; } = "";
+
     private static int Main(string[] args)
     {
         if (Directory.Exists(TempRoot)) Directory.Delete(TempRoot, recursive: true);
@@ -36,6 +39,9 @@ internal static class Program
         // A sighted lava/acid hotspot is persisted under C:\Games\RynthSuite\RynthAi\DungeonHazards.
         LiveHazardFolder = RynthCore.Plugin.RynthAi.DungeonHazardStore.Folder;
         RynthCore.Plugin.RynthAi.DungeonHazardStore.Folder = Path.Combine(TempRoot, "DungeonHazards");
+        // Appraised creatures are saved to C:\Games\RynthSuite\RynthAi\CreatureData\creatures.json.
+        LiveCreatureFolder = RynthCore.Plugin.RynthAi.CreatureData.CreatureProfileStore.Folder;
+        RynthCore.Plugin.RynthAi.CreatureData.CreatureProfileStore.Folder = Path.Combine(TempRoot, "CreatureData");
 
         // Spell names (item spells, spell expiry by name) come from the plugin's embedded table.
         SpellDatabase.Load();
@@ -90,6 +96,9 @@ internal static class Program
         CustomDebuffTests.Register(runner);
         ProfileLoadTests.Register(runner);
         ActivityInterfaceTests.Register(runner);
+        CastNoDamageTests.Register(runner);
+        ManaReserveTests.Register(runner);
+        DamageRowsTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }

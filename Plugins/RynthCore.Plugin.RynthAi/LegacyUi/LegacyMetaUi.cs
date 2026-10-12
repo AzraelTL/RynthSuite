@@ -326,6 +326,7 @@ internal sealed class LegacyMetaUi
                             ActionData = rule.ActionData,
                             CallReturnState = rule.CallReturnState,
                             ChatColors = rule.ChatColors,
+                            Name = rule.Name,
                             Children = CloneChildren(rule.Children),
                             ActionChildren = CloneChildren(rule.ActionChildren)
                         };
@@ -1025,6 +1026,7 @@ internal sealed class LegacyMetaUi
                 ActionData     = r.ActionData,
                 CallReturnState = r.CallReturnState,
                 ChatColors     = r.ChatColors,
+                Name           = r.Name,
                 Children       = CloneChildren(r.Children),
                 ActionChildren = CloneChildren(r.ActionChildren)
             });

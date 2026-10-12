@@ -758,6 +758,9 @@ public sealed class ItemsBridgePayload
     public int                  ManaTapMinMana    { get; set; }
     public int                  ManaStoneKeepCount { get; set; }
     public string               CurrentTargetName { get; set; } = string.Empty;
+    /// <summary>Listed weapons the character no longer carries (not in the pack, not wielded), by
+    /// id: the engine's Items face shows them as missing. Display only, never read back.</summary>
+    public List<int>            MissingIds        { get; set; } = new();
 }
 
 // ── Nav bridge types ─────────────────────────────────────────────────────────
@@ -1096,6 +1099,11 @@ public sealed class MetaRule
     /// never evaluate. Default true; missing in old JSON/.af → stays true
     /// (the property initializer runs, so backward-compatible).</summary>
     public bool Enabled { get; set; } = true;
+
+    /// <summary>A name to find the rule by in the Meta panel (optional; only top-level rules have
+    /// one). Saved in .af as a "~~ @name ..." line before the rule's IF: (a plain comment to
+    /// other tools, like "~~ @disabled"); .met has no place for it.</summary>
+    public string Name { get; set; } = string.Empty;
 
     [JsonIgnore]
     public bool HasFired { get; set; }

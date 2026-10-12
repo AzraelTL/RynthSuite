@@ -1,35 +1,132 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading;
 
 namespace RynthCore.Plugin.RynthSort.Sorting;
 
-/// <summary>Which test a rule makes.</summary>
-internal enum RuleKind
-{
-    /// <summary>The item's ObjectClass equals <see cref="SortRule.Class"/>.</summary>
-    Class = 0,
-    /// <summary>The item's name contains <see cref="SortRule.Text"/> (any case).</summary>
-    Name = 1,
-}
-
 /// <summary>
-/// One rule: items it matches go to side pack <see cref="Pack"/> (1 = the first side pack, top to
-/// bottom). The same fields as the Lua script's rules: { on, kind = "class" | "name", class, text, pack }.
+/// One rule: items whose class is one of <see cref="Classes"/>, or whose name contains one of
+/// <see cref="Names"/> (any case), go to the side pack <see cref="PackId"/> names while it is
+/// carried, else to side pack number <see cref="Pack"/> (1 = the top side pack when the pack
+/// order is known). "Armor, Clothing, name has Shield -> pack 4" is one rule.
+/// A rule saved before rules held several entries (the Lua script's { kind, class | text }, and
+/// RynthSort's file versions 1 and 2) loads as a rule with one entry.
 /// </summary>
 internal sealed class SortRule
 {
+    public const int MaxClasses = 32, MaxNames = 16, MaxNameLength = 64;
+
+    private static int _nextUid;
+
+    /// <summary>Stable for the session (never saved): the window's widget ids, so a rule keeps its row while the list resorts.</summary>
+    public readonly int Uid = Interlocked.Increment(ref _nextUid);
+
     public bool On = true;
-    public RuleKind Kind = RuleKind.Class;
-    /// <summary>An ObjectClass number (<see cref="ObjectClasses"/>).</summary>
-    public int Class = ObjectClasses.SpellComponent;
-    public string Text = string.Empty;
+    /// <summary>ObjectClass numbers (<see cref="ObjectClasses"/>), each once.</summary>
+    public readonly List<int> Classes = new();
+    /// <summary>Parts of item names (any case), each once.</summary>
+    public readonly List<string> Names = new();
+    /// <summary>The pack's number: the fallback when <see cref="PackId"/> isn't carried (or is 0), and what the window shows.</summary>
     public int Pack = 1;
+    /// <summary>The side pack's object id (0 = none yet: the number decides). Pack order and foci can't shift it.</summary>
+    public uint PackId;
+    /// <summary>What the pack was when it was picked ("Sack - Salvage, Gems"), for the warning when it's gone.</summary>
+    public string PackNote = string.Empty;
 
-    public SortRule Clone() => new() { On = On, Kind = Kind, Class = Class, Text = Text, Pack = Pack };
+    /// <summary>No class and no name: it matches nothing (a rule just added, before anything is put in it).</summary>
+    public bool IsEmpty => Classes.Count == 0 && Names.Count == 0;
 
-    public static SortRule ForClass(int cls, int pack) => new() { Kind = RuleKind.Class, Class = cls, Pack = pack };
-    public static SortRule ForName(string text, int pack) => new() { Kind = RuleKind.Name, Text = text, Pack = pack };
+    public bool HasClass(int cls) => Classes.Contains(cls);
+
+    public bool HasName(string text) => IndexOfName(text) >= 0;
+
+    private int IndexOfName(string text)
+    {
+        for (int i = 0; i < Names.Count; i++)
+            if (string.Equals(Names[i], text, StringComparison.OrdinalIgnoreCase)) return i;
+        return -1;
+    }
+
+    /// <summary>Adds a class (false when it's there already or the rule is full).</summary>
+    public bool AddClass(int cls)
+    {
+        if (cls < 0 || Classes.Contains(cls) || Classes.Count >= MaxClasses) return false;
+        Classes.Add(cls);
+        return true;
+    }
+
+    public bool RemoveClass(int cls) => Classes.Remove(cls);
+
+    /// <summary>Adds a name part, trimmed and cut to <see cref="MaxNameLength"/> (false when blank, there already, or the rule is full).</summary>
+    public bool AddName(string? text)
+    {
+        string t = Clean(text);
+        if (t.Length == 0 || IndexOfName(t) >= 0 || Names.Count >= MaxNames) return false;
+        Names.Add(t);
+        return true;
+    }
+
+    public bool RemoveName(string text)
+    {
+        int i = IndexOfName(text);
+        if (i < 0) return false;
+        Names.RemoveAt(i);
+        return true;
+    }
+
+    public static string Clean(string? text)
+    {
+        string t = (text ?? string.Empty).Trim();
+        return t.Length > MaxNameLength ? t[..MaxNameLength].TrimEnd() : t;
+    }
+
+    /// <summary>Everything of <paramref name="other"/>'s classes and names this rule doesn't have yet.</summary>
+    public void TakeEntriesOf(SortRule other)
+    {
+        foreach (int c in other.Classes) AddClass(c);
+        foreach (string n in other.Names) AddName(n);
+    }
+
+    public SortRule Clone()
+    {
+        var r = new SortRule { On = On, Pack = Pack, PackId = PackId, PackNote = PackNote };
+        r.Classes.AddRange(Classes);
+        r.Names.AddRange(Names);
+        return r;
+    }
+
+    /// <summary>The same classes and names (in any order, names any case) and the same pack number: what an untouched imported rule looks like.</summary>
+    public bool SameAs(SortRule o)
+    {
+        if (Pack != o.Pack || Classes.Count != o.Classes.Count || Names.Count != o.Names.Count) return false;
+        foreach (int c in Classes) if (!o.Classes.Contains(c)) return false;
+        foreach (string n in Names) if (!o.HasName(n)) return false;
+        return true;
+    }
+
+    public static SortRule ForClass(int cls, int pack)
+    {
+        var r = new SortRule { Pack = pack };
+        r.AddClass(cls);
+        return r;
+    }
+
+    public static SortRule ForName(string text, int pack)
+    {
+        var r = new SortRule { Pack = pack };
+        r.AddName(text);
+        return r;
+    }
+
+    /// <summary>A rule with several classes (and names): "Gem, Mana Stone, Key -> pack 3".</summary>
+    public static SortRule For(int pack, int[] classes, params string[] names)
+    {
+        var r = new SortRule { Pack = pack };
+        foreach (int c in classes) r.AddClass(c);
+        foreach (string n in names) r.AddName(n);
+        return r;
+    }
 }
 
 /// <summary>
@@ -90,39 +187,130 @@ internal static class ObjectClasses
 
     public static string Label(int cls) =>
         cls >= 0 && cls < Names.Length ? Spaced(Names[cls]) : "class " + cls;
+
+    /// <summary>A class as a pack's contents read: "Components", "Gems", "Salvage".</summary>
+    public static string Plural(int cls) => cls switch
+    {
+        SpellComponent => "Components",
+        Salvage => "Salvage",
+        Gem => "Gems",
+        ManaStone => "Mana Stones",
+        Key => "Keys",
+        HealingKit => "Healing Kits",
+        Lockpick => "Lockpicks",
+        Food => "Food",
+        Scroll => "Scrolls",
+        TradeNote => "Trade Notes",
+        Money => "Money",
+        Plant => "Plants",
+        Jewelry => "Jewelry",
+        Armor => "Armor",
+        Clothing => "Clothing",
+        MeleeWeapon => "Melee Weapons",
+        MissileWeapon => "Missile Weapons",
+        WandStaffOrb => "Casters",
+        Book => "Books",
+        Journal => "Journals",
+        Ust => "Ust",
+        _ => Label(cls),
+    };
 }
 
 internal static class SortRules
 {
-    /// <summary>The Lua script's defaults: components, salvage, then gems, stones and keys together.</summary>
+    /// <summary>The Lua script's defaults: components, salvage, then gems, stones and keys together (one rule).</summary>
     public static List<SortRule> Defaults() => new()
     {
         SortRule.ForClass(ObjectClasses.SpellComponent, 1),
         SortRule.ForClass(ObjectClasses.Salvage, 2),
-        SortRule.ForClass(ObjectClasses.Gem, 3),
-        SortRule.ForClass(ObjectClasses.ManaStone, 3),
-        SortRule.ForClass(ObjectClasses.Key, 3),
+        SortRule.For(3, new[] { ObjectClasses.Gem, ObjectClasses.ManaStone, ObjectClasses.Key }),
     };
 
-    public static bool Matches(SortRule r, SortItem item)
+    /// <summary>The item's name contains one of the rule's names (any case).</summary>
+    public static bool MatchesName(SortRule r, SortItem item)
     {
-        if (!r.On) return false;
-        if (r.Kind == RuleKind.Name)
-        {
-            string t = r.Text ?? string.Empty;
-            return t.Length > 0 && (item.Name ?? string.Empty).Contains(t, StringComparison.OrdinalIgnoreCase);
-        }
-        return item.ObjectClass == r.Class;
+        string name = item.Name ?? string.Empty;
+        if (name.Length == 0) return false;
+        foreach (string t in r.Names)
+            if (t.Length > 0 && name.Contains(t, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
     }
 
-    /// <summary>The first rule that matches (rules are tried in order), or null.</summary>
+    public static bool MatchesClass(SortRule r, SortItem item) => r.Classes.Contains(item.ObjectClass);
+
+    public static bool Matches(SortRule r, SortItem item) => r.On && (MatchesName(r, item) || MatchesClass(r, item));
+
+    /// <summary>
+    /// The rule an item follows, or null. A name match beats a class match (it is the more
+    /// specific: "Armor -> 4" and "name has Shield -> 5" send shields to 5, whatever the order);
+    /// between two rules that match the same way, the one saved first wins (the window warns
+    /// when two rules name the same class or name).
+    /// </summary>
     public static SortRule? RuleFor(IReadOnlyList<SortRule> rules, SortItem item)
     {
         for (int i = 0; i < rules.Count; i++)
-            if (Matches(rules[i], item)) return rules[i];
+            if (rules[i].On && MatchesName(rules[i], item)) return rules[i];
+        for (int i = 0; i < rules.Count; i++)
+            if (rules[i].On && MatchesClass(rules[i], item)) return rules[i];
         return null;
     }
 
-    public static string Describe(SortRule r) =>
-        r.Kind == RuleKind.Name ? $"name has \"{r.Text}\"" : ObjectClasses.Label(r.Class);
+    /// <summary>"Gem, Key, Mana Stone, name has "Opal"": the classes (A-Z), then the names (A-Z).</summary>
+    public static string Describe(SortRule r)
+    {
+        if (r.IsEmpty) return "(empty: add a class or a name)";
+        var parts = new List<string>(r.Classes.Count + r.Names.Count);
+        foreach (string l in ClassLabels(r)) parts.Add(l);
+        foreach (string n in SortedNames(r)) parts.Add($"name has \"{n}\"");
+        return string.Join(", ", parts);
+    }
+
+    /// <summary>The rule's classes as labels, A-Z.</summary>
+    public static List<string> ClassLabels(SortRule r)
+    {
+        var labels = r.Classes.ConvertAll(ObjectClasses.Label);
+        labels.Sort(StringComparer.OrdinalIgnoreCase);
+        return labels;
+    }
+
+    /// <summary>The rule's classes ordered by label, A-Z.</summary>
+    public static List<int> SortedClasses(SortRule r)
+    {
+        var list = new List<int>(r.Classes);
+        list.Sort((a, b) => string.Compare(ObjectClasses.Label(a), ObjectClasses.Label(b), StringComparison.OrdinalIgnoreCase));
+        return list;
+    }
+
+    public static List<string> SortedNames(SortRule r)
+    {
+        var list = new List<string>(r.Names);
+        list.Sort(StringComparer.OrdinalIgnoreCase);
+        return list;
+    }
+
+    /// <summary>The order rules are listed in under their pack: by <see cref="Describe"/>, A-Z (empty rules last).</summary>
+    public static int CompareForList(SortRule a, SortRule b)
+    {
+        if (a.IsEmpty != b.IsEmpty) return a.IsEmpty ? 1 : -1;
+        int c = string.Compare(Describe(a), Describe(b), StringComparison.OrdinalIgnoreCase);
+        return c != 0 ? c : a.Uid.CompareTo(b.Uid);
+    }
+
+    /// <summary>
+    /// The side pack the rule sends items to: 1-based index into <paramref name="inv"/>'s packs, or 0
+    /// when it has none. The pack <see cref="SortRule.PackId"/> names when that is carried; else
+    /// pack number <see cref="SortRule.Pack"/> when there is one (<paramref name="fellBack"/>: its id was set but isn't carried).
+    /// </summary>
+    public static int Resolve(SortRule r, SortInventory inv, out bool fellBack)
+    {
+        fellBack = false;
+        int byId = inv.IndexOf(r.PackId);
+        if (byId > 0) return byId;
+        if (r.Pack >= 1 && r.Pack <= inv.Packs.Count)
+        {
+            fellBack = r.PackId != 0;
+            return r.Pack;
+        }
+        return 0;
+    }
 }

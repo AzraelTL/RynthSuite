@@ -65,10 +65,20 @@ internal static class AfFileWriter
 
     // ── Rule writing ────────────────────────────────────────────────────────
 
+    /// <summary>A rule name on one line (it is written as a "~~ @name" comment line).</summary>
+    internal static string OneLine(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        return text.Replace("\r", " ").Replace("\n", " ").Replace("\t", " ").Trim();
+    }
+
     private static void WriteRule(TextWriter writer, MetaRule rule)
     {
-        // Disabled marker (backward-compatible: a plain ~~ comment to old
-        // parsers, recognised by AfFileParser to set Enabled=false).
+        // Name and disabled markers (backward-compatible: plain ~~ comments to old
+        // parsers and other tools; AfFileParser reads them back).
+        string name = OneLine(rule.Name);
+        if (name.Length > 0)
+            writer.WriteLine("\t~~ @name " + name);
         if (!rule.Enabled)
             writer.WriteLine("\t~~ @disabled");
 

@@ -3,7 +3,8 @@
   <!--
     RynthSort: keeps a character's packs sorted while they play or while RynthAi hunts. New
     items that land in the main pack move to the side pack their rule names, after a settle
-    time; Tidy, Clean and Unpack on demand; /rsort. Replaces the RynthSort Lua script (its saved
+    time; misplaced items move to theirs, stacks are joined and items are put in order inside
+    each pack (slot orders, API v80); Sort now, Clean and Unpack on demand; /rsort. Replaces the RynthSort Lua script (its saved
     rules are imported on first run). Pack moves wait for RynthAi through its read-only
     "RynthAi.Activity" interface (Shared/RynthAiActivityApi.cs). UI: the engine's script
     windows (ImGui), no Avalonia.
@@ -26,8 +27,8 @@
     <Platforms>x86</Platforms>
     <!-- Plugin manifest (embedded in the DLL; Plugins\Directory.Build.targets). minEngineApi is the
          highest API use NOT behind a Has*/version check. Script windows (v71, HasUi) draw the
-         window; vendor info (v67), plugin interfaces (v68), refusals (v70) and trade (v72) are
-         each checked first. Below v71 it still sorts (/rsort on|off|now|tidy|clean|unpack). -->
+         window; vendor info (v67), plugin interfaces (v68), refusals (v70), trade (v72) and slot
+         orders / moves to a slot (v80: in-pack order, top-to-bottom pack numbers) are each checked first. Below v71 it still sorts (/rsort on|off|now|tidy|clean|unpack). -->
     <RynthPluginMinEngineApi>66</RynthPluginMinEngineApi>
     <RynthPluginDescription>Keeps your packs sorted: new loot goes to the pack its rule names.</RynthPluginDescription>
   </PropertyGroup>

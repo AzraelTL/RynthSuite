@@ -57,9 +57,12 @@ public sealed class RynthOraclePlugin : RynthPluginBase
         {
             DefaultWidth = 620f, DefaultHeight = 560f, MinWidth = 420f, MinHeight = 260f,
         });
+        // The Void window is opened from the Oracle window: no bar button (and no Scripts menu
+        // line, which would bring back the Scripts button just for it).
         _void = _ui.Add(new UiWindow("RynthOracle/Void", "Void")
         {
             DefaultWidth = 220f, DefaultHeight = 150f, MinWidth = 160f, MinHeight = 110f,
+            ShowInBar = false,
         });
         _mainView.SetVoidWindow = v => { if (_void != null) { _void.Visible = v; _void.NeedsPass = true; } };
         _mainView.VoidWindowVisible = () => _void?.Visible ?? false;

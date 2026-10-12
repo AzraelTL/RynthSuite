@@ -4,7 +4,12 @@
     Offline checks for RynthSort: rule matching, pack choice (a full pack only takes an item that
     joins a stack there), Tidy / Clean / Unpack planning, the "stay out of the way" gates (looting,
     vendor, trade, busy, portal space and RynthAi's activity bits), one move at a time with the
-    gap and the back-off after refusals, the per-character file and the Lua script import, and that
+    gap and the back-off after refusals, the per-character file and the Lua script import, rules
+    tied to pack ids (and the one-time fix of the Lua script's pack numbers, which counted foci),
+    rules with several classes and names (and old files migrating to them), the order inside
+    packs (every order of up to 7 items, shuffled packs to 102), slot orders and the pack column,
+    stacks joined in place, that a fixed inventory runs out of moves (planner and loop),
+    the pack picker's labels, spell component classification, and that
     the window's display list is accepted by the engine's own parser (RynthCore
     src/RynthCore.Engine/UI/ScriptWindows/DisplayListParser.cs, compiled in from the sibling
     RynthCore checkout). Nothing native is loaded: no AC, no ImGui context. Files go to a temp

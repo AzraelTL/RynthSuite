@@ -11,12 +11,14 @@ using RynthCore.PluginCore;
 namespace RynthCore.Plugin.RynthSort;
 
 /// <summary>
-/// RynthSort: keeps your packs sorted while you play or RynthAi hunts. New items that land in the
-/// main pack move to the side pack their rule names once they have sat there for the settle time;
-/// Tidy also moves misplaced items between side packs, Clean sends items no rule wants back to the
-/// main pack, Unpack empties the side packs. Rules are tried in order and the first that matches
-/// wins: by item class or by part of the name. Rules and settings are kept per character; the
-/// RynthSort Lua script's saved rules are taken over on a character's first run.
+/// RynthSort: keeps your packs sorted while you play or RynthAi hunts. Auto-sort keeps every pack
+/// tidy: new items that land in the main pack move to the side pack their rule names once they have
+/// sat there for the settle time, items in the wrong side pack move to theirs, stacks of one kind
+/// are joined and (with the engine's slot orders, API v80) items are put in order, A-Z, inside
+/// each pack. Clean also sends items no rule wants back to the main pack; Unpack empties the side
+/// packs. A rule lists classes and parts of names and the pack they go to; a name match beats a
+/// class match. Rules and settings are kept per character; the RynthSort Lua script's saved rules
+/// are taken over on a character's first run.
 ///
 /// It stays out of the way (Sorting/SortGate.cs): nothing moves while a corpse or chest is being
 /// looted, a vendor or trade window is open, the character is busy or animating, in portal space,
@@ -28,7 +30,7 @@ namespace RynthCore.Plugin.RynthSort;
 /// </summary>
 public sealed class RynthSortPlugin : RynthPluginBase
 {
-    public const string Version = "0.1.0";
+    public const string Version = "0.3.0";
     private const long IdentityRetryMs = 1000;
     private const long SaveDelayMs = 750;
     private const long PassIntervalMs = 500;
@@ -51,6 +53,7 @@ public sealed class RynthSortPlugin : RynthPluginBase
     private long _saveDueMs;
     private bool _vendorOpen;
     private bool _noUiLogged;
+    private bool _backupOnSave;
     private readonly List<string> _warnings = new();
 
     public override int Initialize()
@@ -58,6 +61,7 @@ public sealed class RynthSortPlugin : RynthPluginBase
         _ui.Log = msg => Host.Log(msg);
         _world = new HostSortWorld(Host, _reader, _loot, () => _vendorOpen);
         _sort.SettingsChanged = RequestSave;
+        _sort.PacksFixed = OnPacksFixed;
         _panel = new SortPanel(_sort, RequestSave)
         {
             Warnings = () => _warnings,
@@ -143,8 +147,6 @@ public sealed class RynthSortPlugin : RynthPluginBase
                 Print("Auto-sort " + word);
                 break;
             case "now":
-                _sort.StartJob(SortScope.Main);
-                break;
             case "tidy":
                 _sort.StartJob(SortScope.All);
                 break;
@@ -227,6 +229,7 @@ public sealed class RynthSortPlugin : RynthPluginBase
         if (problem != null) Host.Log($"[RynthSort] couldn't read the saved rules ({problem}); using defaults.");
         _sort.Data = data;
         _identityKnown = true;
+        _backupOnSave = false;
 
         string own = _store.PathFor(server, name);
         if (data.ImportedFrom.Length > 0 && !File.Exists(own))
@@ -281,6 +284,25 @@ public sealed class RynthSortPlugin : RynthPluginBase
         return false;
     }
 
+    /// <summary>The one-time pack fix ran: one log line per rule, a chat line, and a save (keeping a .bak of an imported file).</summary>
+    private void OnPacksFixed(List<string> lines, int changed)
+    {
+        bool imported = _sort.Data.ImportedFrom.Length > 0;
+        foreach (string line in lines) Host.Log("[RynthSort] pack fix: " + line);
+        if (imported)
+        {
+            int left = lines.Count - changed;
+            Print($"The rules taken over from the RynthSort script counted foci as packs: {changed} now point at the right pack"
+                  + (left > 0 ? $", {left} left as they were (see the log)." : "."));
+            _backupOnSave = true;
+        }
+        else if (changed > 0)
+        {
+            Host.Log($"[RynthSort] pack fix: {changed} rule(s) now remember their pack by id");
+        }
+        RequestSave();
+    }
+
     private void RequestSave()
     {
         if (_window != null) _window.NeedsPass = true;
@@ -292,8 +314,9 @@ public sealed class RynthSortPlugin : RynthPluginBase
         _saveDueMs = 0;
         if (!_identityKnown) return;
         _sort.Data.Settings.Clamp();
-        string? error = _store.Save(_server, _character, _sort.Data);
+        string? error = _store.Save(_server, _character, _sort.Data, _backupOnSave);
         if (error != null) Host.Log("[RynthSort] save failed: " + error);
+        else _backupOnSave = false;
     }
 
     /// <summary>A pass when one is wanted, or on the refresh interval while visible (the status ticks on).</summary>

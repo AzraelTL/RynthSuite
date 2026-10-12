@@ -282,6 +282,19 @@ internal sealed class LegacyDashboardRenderer
         return withElement ? WeaponNames.WithElement(name, r.Element) : name;
     }
 
+    /// <summary>The listed weapons the character no longer carries (WeaponList.MissingIds); none before the cache is set.</summary>
+    internal HashSet<int> MissingWeaponIds()
+    {
+        var cache = _weaponCache;
+        if (cache == null) return new HashSet<int>();
+        return WeaponList.MissingIds(_settings.ItemRules ?? new List<ItemRule>(), cache.GetInventory(),
+            id => cache[id], wo => WorldObjectCache.IsWieldedByPlayer(_host, wo));
+    }
+
+    /// <summary>A picker's name for a listed weapon: <see cref="WeaponDisplayName"/> plus " (missing)" when it isn't carried.</summary>
+    private string WeaponPickerName(ItemRule r, HashSet<int> missing) =>
+        WeaponDisplayName(r, withElement: true) + (missing.Contains(r.Id) ? WeaponList.MissingSuffix : "");
+
     public void SetMissileCraftingManager(MissileCraftingManager mgr) => _advancedSettingsUi.SetMissileCraftingManager(mgr);
     public void SetAutoVendorStatusProvider(Func<string> status) => _advancedSettingsUi.SetAutoVendorStatusProvider(status);
     public void SetAutoTradeStatusProvider(Func<string> status) => _advancedSettingsUi.SetAutoTradeStatusProvider(status);
@@ -788,12 +801,13 @@ internal sealed class LegacyDashboardRenderer
     {
         try
         {
+            var missing = MissingWeaponIds();
             var payload = new MonstersBridgePayload
             {
                 Rules = _settings.MonsterRules ?? new List<MonsterRule>(),
                 // Full names with the element ("Silver Wand (Fire)"); saved choices are by id.
                 Items = (_settings.ItemRules ?? new List<ItemRule>())
-                    .Select(r => new MonsterBridgeItem { Id = r.Id, Name = WeaponDisplayName(r, withElement: true) }).ToList(),
+                    .Select(r => new MonsterBridgeItem { Id = r.Id, Name = WeaponPickerName(r, missing) }).ToList(),
                 CurrentTargetName = _currentTargetId != 0 ? (_targetLabel ?? string.Empty) : string.Empty,
             };
 
@@ -833,6 +847,7 @@ internal sealed class LegacyDashboardRenderer
         try
         {
             var items = _settings.ItemRules ?? new List<ItemRule>();
+            var missing = MissingWeaponIds();
             var sb = new System.Text.StringBuilder();
             sb.Append('[');
             bool first = true;
@@ -840,7 +855,7 @@ internal sealed class LegacyDashboardRenderer
             {
                 if (!first) sb.Append(',');
                 first = false;
-                sb.Append("{\"id\":").Append(it.Id).Append(",\"name\":").Append(JsonString(WeaponDisplayName(it, withElement: true))).Append('}');
+                sb.Append("{\"id\":").Append(it.Id).Append(",\"name\":").Append(JsonString(WeaponPickerName(it, missing))).Append('}');
             }
             sb.Append(']');
             return sb.ToString();
@@ -1331,6 +1346,8 @@ internal sealed class LegacyDashboardRenderer
                 ManaTapMinMana    = _settings.ManaTapMinMana,
                 ManaStoneKeepCount = _settings.ManaStoneKeepCount,
                 CurrentTargetName = _currentTargetId != 0 ? (_targetLabel ?? string.Empty) : string.Empty,
+                // The engine's Items face marks these "(missing)"; display only (ApplyItemsJson ignores it).
+                MissingIds        = MissingWeaponIds().OrderBy(id => id).ToList(),
             };
             return JsonSerializer.Serialize(payload, RynthAiJsonContext.Default.ItemsBridgePayload);
         }
@@ -2949,6 +2966,7 @@ internal sealed class LegacyDashboardRenderer
         sb.Append("\"children\":"); AppendMetaRuleArray(sb, r.Children ?? new List<MetaRule>()); sb.Append(',');
         sb.Append("\"actionChildren\":"); AppendMetaRuleArray(sb, r.ActionChildren ?? new List<MetaRule>()); sb.Append(',');
         sb.Append("\"enabled\":").Append(r.Enabled ? "true" : "false").Append(',');
+        if (!string.IsNullOrEmpty(r.Name)) { sb.Append("\"name\":\""); AppendEscaped(sb, r.Name); sb.Append("\","); }
         long ms = r.LastFiredAt == DateTime.MinValue ? 99999L : (long)(DateTime.Now - r.LastFiredAt).TotalMilliseconds;
         sb.Append("\"lastFiredMs\":").Append(ms.ToString(System.Globalization.CultureInfo.InvariantCulture));
         sb.Append('}');
@@ -3069,7 +3087,8 @@ internal sealed class LegacyDashboardRenderer
                 case "update_rule":
                     // The engine's editor saves every change (2026-10-05): keep the running rule's
                     // latch (no re-fire) and the fields the panel can't send (MetaRuleEdits).
-                    if (cmd.Rule != null && MetaRuleEdits.Replace(_settings.MetaRules, cmd.Index, DtoToMetaRule(cmd.Rule)))
+                    if (cmd.Rule != null && MetaRuleEdits.Replace(_settings.MetaRules, cmd.Index, DtoToMetaRule(cmd.Rule),
+                            keepName: cmd.Rule.Name == null))
                         TryAutoSaveMetaCmd();
                     break;
 
@@ -3103,6 +3122,7 @@ internal sealed class LegacyDashboardRenderer
                     {
                         var copy = DtoToMetaRule(cmd.Rule);
                         MetaRuleEdits.KeepHidden(_settings.MetaRules[cmd.Index], copy);   // CallState return / ChatCapture colours
+                        if (cmd.Rule.Name == null) copy.Name = _settings.MetaRules[cmd.Index].Name;
                         _settings.MetaRules.Insert(cmd.Index + 1, copy);
                         TryAutoSaveMetaCmd();
                     }
@@ -3162,6 +3182,7 @@ internal sealed class LegacyDashboardRenderer
             Action        = (MetaActionType)dto.Action,
             ActionData    = dto.ActionData ?? "",
             Enabled       = dto.Enabled,
+            Name          = AfFileWriter.OneLine(dto.Name),
         };
         foreach (var c in dto.Children ?? new List<MetaRuleDto>())
             r.Children.Add(DtoToMetaRule(c));

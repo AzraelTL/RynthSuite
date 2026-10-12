@@ -19,12 +19,14 @@ namespace RynthCore.Plugin.RynthAi.Meta;
 internal static class MetaRuleEdits
 {
     /// <summary>Puts <paramref name="edited"/> at <paramref name="index"/>, keeping the old rule's
-    /// runtime latch and the fields the panel can't send. False when the index is out of range.</summary>
-    public static bool Replace(List<MetaRule> rules, int index, MetaRule edited)
+    /// runtime latch and the fields the panel can't send. <paramref name="keepName"/>: the edit came
+    /// from an engine without rule names, so the rule keeps its name. False when the index is out of range.</summary>
+    public static bool Replace(List<MetaRule> rules, int index, MetaRule edited, bool keepName = false)
     {
         if (index < 0 || index >= rules.Count) return false;
         MetaRule old = rules[index];
         KeepHidden(old, edited);
+        if (keepName) edited.Name = old.Name;
         edited.HasFired = old.HasFired;
         edited.LastFiredAt = old.LastFiredAt;
         rules[index] = edited;

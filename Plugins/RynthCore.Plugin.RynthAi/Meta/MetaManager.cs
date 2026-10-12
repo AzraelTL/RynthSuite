@@ -135,6 +135,13 @@ internal sealed class MetaManager
     public void SetMtCommandHandler(Func<string, bool> handler) => _mtCommandHandler = handler;
     public void SetRaCommandHandler(Action<string> handler) => _raCommandHandler = handler;
 
+    /// <summary>Embedded Nav Route's "Patrol" (any case): the dungeon patrol instead of a route,
+    /// unless the meta or NavProfiles has a route by that name.</summary>
+    internal const string PatrolRoute = "Patrol";
+
+    internal static bool IsPatrolRoute(string routeName) =>
+        string.Equals(routeName?.Trim(), PatrolRoute, StringComparison.OrdinalIgnoreCase);
+
     public void SetObjectCache(WorldObjectCache cache)
     {
         _objectCache = cache;
@@ -921,6 +928,18 @@ internal sealed class MetaManager
                                 break;
                             }
                         }
+                    }
+
+                    // "Patrol" with no route of that name: the dungeon patrol (/ra dunnav-patrol, a
+                    // circular hunt through every cell of this dungeon, no nav file). The Meta panel
+                    // offers it first in Embedded Nav Route's list. A real route called Patrol wins.
+                    if (IsPatrolRoute(routeName) && !_settings.EmbeddedNavs.ContainsKey(routeName)
+                        && !File.Exists(Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "NavProfiles", routeName + ".nav")))
+                    {
+                        _host.Log("[Meta] EmbedNav: Patrol -> /ra dunnav-patrol");
+                        if (_raCommandHandler != null) _raCommandHandler("/ra dunnav-patrol");
+                        else _host.WriteToChat("[RynthAi Meta] Patrol: no /ra command handler", 1);
+                        break;
                     }
 
                     if (_settings.EmbeddedNavs.TryGetValue(routeName, out var embedded))

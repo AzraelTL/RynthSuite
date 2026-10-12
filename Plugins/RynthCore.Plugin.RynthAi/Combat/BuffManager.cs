@@ -285,6 +285,189 @@ public class BuffManager : IDisposable
     private const double LowManaHealRestSec = 2;
     private const double LowManaFamilyRestSec = 15;
 
+    // ── Mana reserve (2026-10-11) ──
+    // A void mage at 1/383 mana kept casting Corruption at Rampagers and never Stamina to Mana.
+    // Combat drained mana under what Stamina to Mana itself costs; the server refused it ("You
+    // don't have enough Mana"), which rested the family 15 s; no mana potion was listed, so no
+    // vitals flag held the arbiter, and combat spent every point that regenerated on attacks
+    // that were refused too. Now, for a character that fights with magic:
+    //  - the refill line is the larger of Get Mana At (Top Off Mana idle) and ManaReserveFactor
+    //    times the cost of the best Stamina to Mana it can cast (ManaUnderLine);
+    //  - under it, while Stamina to Mana or a listed mana potion can refill, vitals hold the tick
+    //    (WantsManaNow, part of WantsVitalRecharge, read every tick so combat can't take the
+    //    tick that follows a UseDone) and combat holds its casts (OffensiveCastHold);
+    //  - under Stamina to Mana's cost, the highest level it can pay for goes; with none, mana
+    //    regenerates while attacks wait, and a vital refused for mana rests only LowManaHealRestSec.
+    // No peace-stance switch to regenerate faster: ACE's stance modifier skips mana
+    // (Creature.GetStanceMod returns 1.0 for MaxMana), and the switch back would cost the swap.
+    internal const double ManaReserveFactor = 1.5;
+    private const double ManaUnavailableMs = 5000;
+    private const double ManaRefusalMemoryMs = 5000;
+    private DateTime _manaUnavailableUntil = DateTime.MinValue;
+    private DateTime _lastManaRefusalAt = DateTime.MinValue;
+    private bool _manaStarvedLogged;
+    private int _topS2MId;
+    private DateTime _topS2MAt = DateTime.MinValue;
+
+    /// <summary>Tests: a spell's mana cost instead of the dat's (0 = unknown). FakeHost.Reset sets
+    /// it to "unknown" so tests don't depend on a portal.dat on the PC.</summary>
+    internal static Func<int, int>? ManaCostOverride;
+
+    /// <summary>Tests: whether a monster is within Monster Range (else CombatManager decides).</summary>
+    internal Func<bool>? InCombatOverride { get; set; }
+
+    private bool InCombatNow() => InCombatOverride?.Invoke()
+        ?? _combatManager?.HasCloseThreat(System.Math.Max(1, _settings.MonsterRange)) == true;
+
+    /// <summary>
+    /// A spell's mana cost: its BaseMana from the portal.dat SpellTable, the most it can cost
+    /// (ACE Creature.CalculateManaUsage; Mana Conversion only lowers it on a skill roll, so the
+    /// base is the one number that is sure to be enough). No dat: an estimate from the spell's
+    /// level. 0 = unknown.
+    /// </summary>
+    internal static int SpellManaCost(int spellId)
+    {
+        if (spellId == 0) return 0;
+        if (ManaCostOverride != null) return Math.Max(0, ManaCostOverride(spellId));
+        if (ComponentDatabase.TryGetSpellBaseMana(spellId, out int mana)) return mana;
+        int level = SpellTableStub.GetById(spellId)?.Level ?? 0;
+        return EstimatedManaCost(level);
+    }
+
+    /// <summary>Retail's base mana by spell level (I 10 ... VI 50, VII 70, VIII 80; the dat can differ
+    /// per spell). Used only when the dat can't be read.</summary>
+    internal static int EstimatedManaCost(int level) => level switch
+    {
+        <= 0 => 0,
+        <= 7 => level * 10,
+        _ => 80,
+    };
+
+    /// <summary>The Stamina to Mana level vitals would cast now (0 = none: unknown, or Life Magic
+    /// not usable). Cached for a second: the arbiter asks every tick.</summary>
+    private int TopStaminaToManaId()
+    {
+        if ((DateTime.Now - _topS2MAt).TotalMilliseconds < 1000) return _topS2MId;
+        _topS2MAt = DateTime.Now;
+        _topS2MId = IsSkillUsable(AcSkillType.LifeMagic)
+            ? _spellManager.GetDynamicSelfBuffId("Stamina to Mana Self", AcSkillType.LifeMagic, LevelLacksComponents)
+            : 0;
+        return _topS2MId;
+    }
+
+    /// <summary>The mana the reserve keeps for Stamina to Mana: ManaReserveFactor x its cost, never
+    /// above halfway between the cost and max mana (a small pool would refill when nearly full).
+    /// 0 = no reserve (no Stamina to Mana, cost unknown, or more than max mana).</summary>
+    internal int ManaReserve()
+    {
+        int cost = SpellManaCost(TopStaminaToManaId());
+        int max = (int)_vitals.MaxMana;
+        if (cost <= 0 || max <= 0 || cost >= max) return 0;
+        int reserve = (int)Math.Ceiling(cost * ManaReserveFactor);
+        return Math.Min(reserve, cost + (max - cost) / 2);
+    }
+
+    /// <summary>Combat fights with magic (CombatManager's chosen weapon is a wand; before it chose,
+    /// the stance). A melee character's attacks don't spend mana, so the reserve doesn't hold them.</summary>
+    private bool FightsWithMagic() => _combatManager?.FightsWithMagic ?? CurrentCombatMode == CombatMode.Magic;
+
+    /// <summary>Mana is under the line vitals refill at: the % line (Get Mana At in combat, Top Off
+    /// Mana idle; 0 = off) or, for a caster, the reserve. <paramref name="line"/>: the line in points.</summary>
+    internal bool ManaUnderLine(bool inCombat, out int line)
+    {
+        line = 0;
+        int pctLine = inCombat ? _settings.GetManaAt : _settings.TopOffMana;
+        int max = (int)_vitals.MaxMana;
+        if (pctLine <= 0 || max <= 0) return false;
+        line = (int)Math.Ceiling(max * pctLine / 100.0);
+        bool under = _vitals.ManaPct < pctLine;
+        if (FightsWithMagic())
+        {
+            int reserve = ManaReserve();
+            if (reserve > line) line = reserve;
+            if (reserve > 0 && _vitals.CurrentMana < reserve) under = true;
+        }
+        return under;
+    }
+
+    /// <summary>Stamina to Mana (not parked by a hard refusal; the short rest after a mana refusal
+    /// doesn't count) or a listed mana potion can refill mana.</summary>
+    private bool ManaRefillPossible()
+    {
+        if (_settings.UsePotions && HasListedPotion("ManaPotion")) return true;
+        int id = TopStaminaToManaId();
+        if (id == 0 || !StaminaAllowsStaminaToMana()) return false;
+        int family = SpellTableStub.GetById(id)?.Family ?? 0;
+        return !(family != 0 && _buffFailCooldownUntil.TryGetValue(family, out DateTime until)
+                 && (until - DateTime.Now).TotalSeconds > LowManaHealRestSec);
+    }
+
+    /// <summary>Stamina lets Stamina to Mana go: over 15%, or a stamina kit or listed stamina potion
+    /// can bring it there. Not Revitalize: it costs mana itself, and trading mana for stamina and
+    /// back while attacks wait could keep a caster from attacking for minutes.</summary>
+    private bool StaminaAllowsStaminaToMana() => _vitals.StaminaPct > 15
+        || BestPackStaminaKit() != null
+        || (_settings.UsePotions && HasListedPotion("StaminaPotion", "Stamina"));
+
+    /// <summary>
+    /// Mana can't pay for Stamina to Mana: under the cost of its lowest known level when costs are
+    /// known (the highest level it can pay for is cast first, see AttemptVitalCast), or refused
+    /// for mana in the last ManaRefusalMemoryMs when they aren't.
+    /// </summary>
+    internal bool ManaStarved(out int cost, out string spellName)
+    {
+        int id = TopStaminaToManaId();
+        cost = SpellManaCost(id);
+        spellName = id != 0 ? SpellTableStub.GetById(id)?.Name ?? "Stamina to Mana" : "Stamina to Mana";
+        if (id == 0 || _vitals.MaxMana == 0) return false;
+        if (cost > 0) return _vitals.CurrentMana < cost && AffordableVitalId("Stamina to Mana Self") == 0;
+        return (DateTime.Now - _lastManaRefusalAt).TotalMilliseconds < ManaRefusalMemoryMs;
+    }
+
+    /// <summary>The highest level of a vital spell whose known cost current mana can pay (a level
+    /// with an unknown cost counts as payable). 0 = none.</summary>
+    private int AffordableVitalId(string baseName)
+    {
+        uint cur = _vitals.CurrentMana;
+        return _spellManager.GetDynamicSelfBuffId(baseName, AcSkillType.LifeMagic,
+            id => LevelLacksComponents(id) || SpellManaCost(id) > cur);
+    }
+
+    /// <summary>
+    /// In combat, a caster's mana under the refill line with something able to refill it (now, or
+    /// once mana regenerates to Stamina to Mana's cost): vitals want the tick. Read by
+    /// WantsVitalRecharge every tick, like WantsHealNow, so it doesn't depend on CheckVitals having
+    /// run (it doesn't while a gesture animates or the client is busy). Backs off ManaUnavailableMs
+    /// after a check that found nothing able to refill.
+    /// </summary>
+    internal bool WantsManaNow()
+    {
+        if (!_settings.IsMacroRunning || _vitals.MaxMana == 0) return false;
+        if (DateTime.Now < _manaUnavailableUntil) return false;
+        if (!InCombatNow() || !FightsWithMagic()) return false;
+        return ManaUnderLine(true, out _) && ManaRefillPossible();
+    }
+
+    /// <summary>
+    /// For CombatManager, before an attack or debuff cast: a reason to hold it, or null. Held when
+    /// mana is under the spell's own cost (it would be refused), or under the refill line while
+    /// vitals can refill it (Stamina to Mana goes first).
+    /// </summary>
+    internal string? OffensiveCastHold(int spellId)
+    {
+        if (!_settings.IsMacroRunning || _vitals.MaxMana == 0) return null;
+        uint cur = _vitals.CurrentMana;
+        int cost = SpellManaCost(spellId);
+        if (cost > 0 && cur < cost)
+            return $"mana {cur}/{_vitals.MaxMana} is under {SpellTableStub.GetById(spellId)?.Name ?? "the spell"}'s cost ({cost})";
+        if (WantsManaNow())
+        {
+            ManaUnderLine(true, out int line);
+            return $"mana {cur}/{_vitals.MaxMana} is under the reserve ({line}): Stamina to Mana goes first";
+        }
+        return null;
+    }
+
     private readonly Dictionary<int, DateTime> _castIssuedAtByFamily = new();
     private readonly Dictionary<int, DateTime> _expiryAtCastByFamily = new();
     private const double AuditSettleMs = 15_000.0;
@@ -669,7 +852,7 @@ public class BuffManager : IDisposable
     /// and they need the same mid-cast protection a buff gets. Side-effect free:
     /// CheckVitals repopulates these flags every cycle it reaches.
     /// </summary>
-    public bool WantsVitalRecharge => _isHealingSelf || _isRechargingMana || _isRechargingStamina || WantsHealNow();
+    public bool WantsVitalRecharge => _isHealingSelf || _isRechargingMana || _isRechargingStamina || WantsHealNow() || WantsManaNow();
 
     // Health below a heal line wins the arbiter's tick by itself. The flags above are only set on
     // a tick where CheckVitals actually ran and acted, and it doesn't run while the client is busy
@@ -751,7 +934,7 @@ public class BuffManager : IDisposable
                 return _kitIsStamina ? LabelStamina : LabelHealing;
             if (_isHealingSelf || WantsHealNow()) return LabelHealing;
             if (_pendingSpellId != 0) return LabelBuffing;
-            if (_isRechargingMana) return LabelMana;
+            if (_isRechargingMana || WantsManaNow()) return LabelMana;
             if (_isRechargingStamina) return LabelStamina;
             return LabelBuffing;
         }
@@ -1450,7 +1633,7 @@ public class BuffManager : IDisposable
         // Otherwise idle → top up to the HIGH (TopOffHP / TopOffStam /
         // TopOffMana) thresholds so we re-engage at full. Thresholds are
         // strict "<": set a value to 0 to disable that vital in that mode.
-        bool inCombat = _combatManager?.HasCloseThreat(System.Math.Max(1, _settings.MonsterRange)) == true;
+        bool inCombat = InCombatNow();
         int hpThreshold   = inCombat ? _settings.HealAt    : _settings.TopOffHP;
         int manaThreshold = inCombat ? _settings.GetManaAt : _settings.TopOffMana;
         int stamThreshold = StaminaLine(inCombat, curStamPct, _settings, ref _restamRun, ref _restamRunCasts);
@@ -1501,12 +1684,44 @@ public class BuffManager : IDisposable
         if (HealthUnderAnyLine(curHealthPct, curStamPct))
             _healUnavailableUntil = DateTime.Now.AddMilliseconds(HealUnavailableMs);
 
-        if (curManaPct < manaThreshold
-            && ((curStamPct > 15 && AttemptVitalCast("Stamina to Mana Self")) || AttemptPotion("ManaPotion")))
+        // Mana: under Get Mana At / Top Off Mana, or (a caster) under the reserve kept for Stamina
+        // to Mana (ManaUnderLine; see "Mana reserve" at the top).
+        bool manaLow = curManaPct < manaThreshold || ManaUnderLine(inCombat, out _);
+        if (manaLow)
         {
-            _isRechargingMana = true;
-            return true;
+            _vitalWhy = "";
+            if ((curStamPct > 15 && AttemptVitalCast("Stamina to Mana Self")) || AttemptPotion("ManaPotion"))
+            {
+                _isRechargingMana = true;
+                return true;
+            }
+            // Stamina too low for Stamina to Mana: a stamina kit, Revitalize or a potion first,
+            // whatever Re-stam At says (it may be under 15 or off).
+            if (curStamPct <= 15 && TopStaminaToManaId() != 0
+                && (AttemptStaminaKitUse() || AttemptVitalCast("Revitalize Self") || AttemptPotion("StaminaPotion", "Stamina")))
+            {
+                _isRechargingStamina = true;
+                return true;
+            }
+            // Mana can't pay for any Stamina to Mana and nothing else refilled it: a caster's
+            // attacks wait while it regenerates (WantsManaNow holds the arbiter, OffensiveCastHold
+            // the casts), then Stamina to Mana goes. Not for a melee fighter: its attacks cost none.
+            if (FightsWithMagic() && ManaStarved(out int s2mCost, out string s2mName))
+            {
+                _isRechargingMana = true;
+                Hold("mana regenerating", $"mana {_vitals.CurrentMana}/{_vitals.MaxMana}, {s2mName} costs {s2mCost}");
+                if (!_manaStarvedLogged)
+                {
+                    _manaStarvedLogged = true;
+                    string costText = s2mCost > 0 ? $"under {s2mName}'s cost ({s2mCost})" : $"too low for {s2mName} (refused for mana)";
+                    _host.Log($"[RynthAi] Vitals: mana {_vitals.CurrentMana}/{_vitals.MaxMana} is {costText}: attacks wait, regenerating.");
+                }
+                return true;
+            }
+            // Nothing can refill it (no Stamina to Mana, parked, no potion): don't hold the bot for it.
+            if (inCombat) _manaUnavailableUntil = DateTime.Now.AddMilliseconds(ManaUnavailableMs);
         }
+        else _manaStarvedLogged = false;
         // Stamina kits first, like healing kits for health: Lucy carried Greater Stamina Kits
         // and cast Revitalize/Robustification instead, because stamina never looked for a kit.
         // Melee first (Tom, 2026-10-06): out of Magic stance, Revitalize means switching the weapon
@@ -1664,6 +1879,22 @@ public class BuffManager : IDisposable
             }
         }
         if (spellId == 0) return VitalNo($"no known '{baseName}' spell at the allowed tiers");
+        // Stamina to Mana / Revitalize under their cost (the mana reserve, 2026-10-11): the server
+        // would refuse it. The highest level mana can pay for goes instead; with none, not handled
+        // (a potion gets its turn, or mana regenerates - CheckVitals). Mana Conversion can lower a
+        // cost only on a skill roll, so the base cost is the line. A heal still tries: it falls to
+        // its potion within LowManaHealRestSec if refused.
+        if (baseName is not ("Heal Self" or "Stamina to Health Self") && _vitals.MaxMana > 0)
+        {
+            int cost = SpellManaCost(spellId);
+            if (cost > 0 && _vitals.CurrentMana < cost)
+            {
+                int payable = AffordableVitalId(baseName);
+                if (payable == 0)
+                    return VitalNo($"mana {_vitals.CurrentMana} is under {SpellTableStub.GetById(spellId)?.Name ?? baseName}'s cost ({cost})");
+                spellId = payable;
+            }
+        }
         // Parked after a hard server refusal (see OnChatWindowText) — the same
         // per-family cooldown the buff selectors honour.
         int family = SpellTableStub.GetById(spellId)?.Family ?? 0;
@@ -1697,6 +1928,7 @@ public class BuffManager : IDisposable
             return VitalNo($"the client refused the cast (spell {spellId})");
         }
         NoteCastIssued(spellId);
+        if (_pendingVitalLabel == LabelMana) _manaStarvedLogged = false;   // the next starved spell logs again
         if (_pendingVitalLabel == LabelHealing)
         {
             _healSpellIds.Add(spellId);
@@ -2140,6 +2372,21 @@ public class BuffManager : IDisposable
         return false;
     }
 
+    // "[FR] skip ..." lines while a rebuff runs: the selector runs every tick (~30 ms), and a
+    // parked buff logged on each one - 47,000 lines in 10 minutes on 2026-10-11, so the log
+    // rotated every few minutes and held nothing from before. Once per buff and reason a minute.
+    private readonly Dictionary<string, DateTime> _diagSkipLoggedAt = new();
+    private void DiagSkip(string buff, string line)
+    {
+        int cut = line.IndexOf(" — ", StringComparison.Ordinal);
+        string reason = cut >= 0 ? line.Substring(cut, Math.Min(18, line.Length - cut)) : line;
+        string key = buff + "|" + reason;
+        DateTime now = DateTime.Now;
+        if (_diagSkipLoggedAt.TryGetValue(key, out DateTime at) && (now - at).TotalSeconds < 60) return;
+        _diagSkipLoggedAt[key] = now;
+        _host.Log(line);
+    }
+
     private bool CheckAndCastSelfBuffs()
     {
         // Auto batch-rebuff: when any buff drops below the configured threshold,
@@ -2172,7 +2419,7 @@ public class BuffManager : IDisposable
             if (!IsSkillUsable(castSkill))
             {
                 LastBuffSkipReason = $"skill not usable: {buffBaseName} ({castSkill})";
-                if (diagnose) _host.Log($"[FR] skip '{buffBaseName}' — skill {castSkill} not usable");
+                if (diagnose) DiagSkip(buffBaseName, $"[FR] skip '{buffBaseName}' — skill {castSkill} not usable");
                 continue;
             }
 
@@ -2180,14 +2427,14 @@ public class BuffManager : IDisposable
             if (spellId == 0)
             {
                 LastBuffSkipReason = $"not known / unresolvable: {buffBaseName}";
-                if (diagnose) _host.Log($"[FR] skip '{buffBaseName}' — FindBestSpellId returned 0");
+                if (diagnose) DiagSkip(buffBaseName, $"[FR] skip '{buffBaseName}' — FindBestSpellId returned 0");
                 continue;
             }
 
             if (IsBuffActive(spellId))
             {
                 LastBuffSkipReason = $"already active: {buffBaseName} (id={spellId})";
-                if (diagnose) _host.Log($"[FR] skip '{buffBaseName}' (id={spellId}) — already active");
+                if (diagnose) DiagSkip(buffBaseName, $"[FR] skip '{buffBaseName}' (id={spellId}) — already active");
                 continue;
             }
 
@@ -2200,7 +2447,7 @@ public class BuffManager : IDisposable
                 && DateTime.Now < coolUntil)
             {
                 LastBuffSkipReason = $"fail-cooldown: {buffBaseName} (fam={buffFamily}, {(coolUntil - DateTime.Now).TotalSeconds:0}s)";
-                if (diagnose) _host.Log($"[FR] skip '{buffBaseName}' (id={spellId}) — hard-fail cooldown {(coolUntil - DateTime.Now).TotalSeconds:0}s");
+                if (diagnose) DiagSkip(buffBaseName, $"[FR] skip '{buffBaseName}' (id={spellId}) — hard-fail cooldown {(coolUntil - DateTime.Now).TotalSeconds:0}s");
                 continue;
             }
 
@@ -3395,6 +3642,7 @@ public class BuffManager : IDisposable
         if (lower.Contains("enough mana"))
         {
             _cast.Result(null, "not enough mana", atStart: true);
+            _lastManaRefusalAt = DateTime.Now;   // a combat cast's refusal too: ManaStarved with costs unknown
             if (_pendingSpellId == 0) return;
             var pendingSpell = SpellTableStub.GetById(_pendingSpellId);
             double restSec = LowManaFamilyRestSec;
@@ -3405,11 +3653,13 @@ public class BuffManager : IDisposable
                     _itemSpellTimers.Remove(pendingSpell.Family);
                     SaveBuffTimers();
                 }
-                // A heal rests only LowManaHealRestSec (2026-10-05): long enough for the mana step
-                // after it to cast Stamina to Mana or drink, not 15 s with no Heal Self after the
-                // mana was back (a mage low on mana mid-fight).
-                bool healSpell = _pendingSpellId == _pendingVitalSpellId && _pendingVitalLabel == LabelHealing;
-                restSec = healSpell ? LowManaHealRestSec : LowManaFamilyRestSec;
+                // A vital rests only LowManaHealRestSec. A heal (2026-10-05): long enough for the
+                // mana step after it to cast Stamina to Mana or drink, not 15 s with no Heal Self
+                // after the mana was back. Stamina to Mana and Revitalize (2026-10-11): 15 s parked
+                // the only thing that refills mana, and combat spent what regenerated meanwhile; now
+                // mana regenerates to its cost while attacks wait (the mana reserve), then it goes.
+                bool vitalSpell = _pendingSpellId == _pendingVitalSpellId;
+                restSec = vitalSpell ? LowManaHealRestSec : LowManaFamilyRestSec;
                 _buffFailCooldownUntil[pendingSpell.Family] = DateTime.Now.AddSeconds(restSec);
             }
             _host.Log($"[BuffChat] CLEARED pending={_pendingSpellId} - not enough mana; resting the family {restSec:0}s, buffs {LowManaBuffPauseMs / 1000:0}s.");

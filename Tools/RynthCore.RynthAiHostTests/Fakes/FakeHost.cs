@@ -41,6 +41,9 @@ internal static unsafe class FakeHost
     public static readonly Dictionary<uint, uint[]> SpellIds = new();
     /// <summary>Data id properties (STypeDID): (object, key) -> value, e.g. a scroll's Spell 28.</summary>
     public static readonly Dictionary<(uint Id, uint Key), uint> DataIds = new();
+    /// <summary>Instance id properties (STypeIID): (object, key) -> object id, e.g. a pet's PetOwner 44.
+    /// When it has entries at Create() time the host also gets GetObjectInstanceIdProperty (opt-in).</summary>
+    public static readonly Dictionary<(uint Id, uint Key), uint> InstanceIds = new();
     public static readonly Dictionary<uint, uint[]> Palettes = new();
     public static readonly HashSet<uint> KnownSpells = new();
     public static readonly HashSet<uint> NotAttackable = new();
@@ -98,6 +101,13 @@ internal static unsafe class FakeHost
     public static bool StopCalls;
     /// <summary>StopCompletely calls (opt-in with <see cref="StopCalls"/>).</summary>
     public static int Stops;
+    /// <summary>Opt-in: wires SetMotion; calls land in <see cref="MotionCalls"/>.</summary>
+    public static bool SetMotionCalls;
+    /// <summary>Every SetMotion (motion, on), in order (opt-in with <see cref="SetMotionCalls"/>).</summary>
+    public static readonly List<(uint Motion, bool On)> MotionCalls = new();
+    /// <summary>Movement and cast calls in the order they reached the engine ("autorun on/off", "stop",
+    /// "motion 0x.. on/off", "cast N").</summary>
+    public static readonly List<string> Sent = new();
     /// <summary>Every UseObject (a wield, a use) and RequestId (an identify), in order.</summary>
     public static readonly List<uint> Uses = new();
     public static readonly List<uint> IdRequests = new();
@@ -193,16 +203,19 @@ internal static unsafe class FakeHost
         Names.Clear(); Positions.Clear(); ItemTypes.Clear();
         Ints.Clear(); Doubles.Clear(); Quads.Clear(); Bools.Clear(); Strings.Clear();
         Skills.Clear(); SkillLevels.Clear(); Attributes.Clear();
-        SpellIds.Clear(); DataIds.Clear(); Palettes.Clear(); KnownSpells.Clear(); NotAttackable.Clear(); Enchantments.Clear();
+        SpellIds.Clear(); DataIds.Clear(); InstanceIds.Clear(); Palettes.Clear(); KnownSpells.Clear(); NotAttackable.Clear(); Enchantments.Clear();
         Containers.Clear(); Wielders.Clear(); Bitfields.Clear();
         ServerTime = 0; Vitae = 1.0f; Portaling = false; PlayerPose = default; HasPose = true;
         Vitals = default; BaseVitals = default; WorldName = ""; AccountName = "";
         HeadingDeg = 0; Wcids.Clear(); Spellbook.Clear(); PlayerIdValue = 0;
         Logs.Clear(); Chat.Clear(); ChatCommands.Clear();
-        AutoRunCalls.Clear(); AutoRun = false; Jumps = 0; TapJumpCalls = false; TapJumps = 0; Turns = 0; Casts.Clear(); StopCalls = false; Stops = 0; GiveCalls = false; Gives.Clear(); GiveLands = true;
+        AutoRunCalls.Clear(); AutoRun = false; Jumps = 0; TapJumpCalls = false; TapJumps = 0; Turns = 0; Casts.Clear(); StopCalls = false; Stops = 0; SetMotionCalls = false; MotionCalls.Clear(); Sent.Clear(); GiveCalls = false; Gives.Clear(); GiveLands = true;
         Uses.Clear(); IdRequests.Clear(); Moves.Clear(); Appraised.Clear(); WeaponCalls = false; CombatModeValue = 1;
         VTankFlags = -1; VTankSeq = 0; LogCostMicros = 0;
         ServerGates = false; UseDoneSeq = 0; CastBusy = 0; LastUseDoneError = 0; LastUseDoneCalls = false;
+        // Spell mana costs "unknown" (no reserve beyond Get Mana At, no cost gate), so a portal.dat on
+        // the PC doesn't change results; the mana reserve tests set their own costs.
+        RynthCore.Plugin.RynthAi.BuffManager.ManaCostOverride = _ => 0;
         WieldCalls = false; Wields.Clear();
         SalvageCalls = false; ExternalMoves.Clear(); SalvageAdds.Clear(); SalvageExecutes.Clear();
         RefuseSalvageAdd.Clear(); OnSalvageExecute = null; Wielded.Clear(); _panelItems.Clear();
@@ -248,6 +261,8 @@ internal static unsafe class FakeHost
             api.GetObjectOwnershipInfoFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint*, uint*, uint*, int>)&GetObjectOwnershipInfo;
         if (Bitfields.Count > 0)
             api.GetObjectBitfieldFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint>)&GetObjectBitfield;
+        if (InstanceIds.Count > 0)
+            api.GetObjectInstanceIdPropertyFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint, uint*, int>)&GetObjectInstanceIdProperty;
         api.SetAutoRunFn            = (IntPtr)(delegate* unmanaged[Cdecl]<int, int>)&SetAutoRun;
         api.TurnToHeadingFn         = (IntPtr)(delegate* unmanaged[Cdecl]<float, int>)&TurnToHeading;
         api.JumpNonAutonomousFn     = (IntPtr)(delegate* unmanaged[Cdecl]<float, int>)&JumpNonAutonomous;
@@ -256,6 +271,8 @@ internal static unsafe class FakeHost
         api.CastSpellFn             = (IntPtr)(delegate* unmanaged[Cdecl]<uint, int, int>)&CastSpell;
         if (StopCalls)
             api.StopCompletelyFn    = (IntPtr)(delegate* unmanaged[Cdecl]<int>)&StopCompletely;
+        if (SetMotionCalls)
+            api.SetMotionFn         = (IntPtr)(delegate* unmanaged[Cdecl]<uint, int, int>)&SetMotion;
         if (Nav3DCalls)
         {
             api.Nav3DClearFn       = (IntPtr)(delegate* unmanaged[Cdecl]<void>)&Nav3DClear;
@@ -531,6 +548,14 @@ internal static unsafe class FakeHost
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetObjectInstanceIdProperty(uint id, uint key, uint* v)
+    {
+        if (!InstanceIds.TryGetValue((id, key), out uint x)) return 0;
+        *v = x;
+        return 1;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int GetObjectDataIdProperty(uint id, uint key, uint* v)
     {
         if (!DataIds.TryGetValue((id, key), out uint x)) return 0;
@@ -613,7 +638,10 @@ internal static unsafe class FakeHost
     private static uint GetSelectedItemId() => SelectedItem;
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static int SetAutoRun(int on) { AutoRun = on != 0; AutoRunCalls.Add(AutoRun); return 1; }
+    private static int SetAutoRun(int on) { AutoRun = on != 0; AutoRunCalls.Add(AutoRun); Sent.Add(AutoRun ? "autorun on" : "autorun off"); return 1; }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int SetMotion(uint motion, int on) { MotionCalls.Add((motion, on != 0)); Sent.Add($"motion 0x{motion:X8} {(on != 0 ? "on" : "off")}"); return 1; }
 
     // The fake character turns instantly.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -626,9 +654,9 @@ internal static unsafe class FakeHost
     private static int TapJump() { TapJumps++; return 1; }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static int CastSpell(uint target, int spellId) { Casts.Add((target, spellId)); return 1; }
+    private static int CastSpell(uint target, int spellId) { Casts.Add((target, spellId)); Sent.Add($"cast {spellId}"); return 1; }
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static int StopCompletely() { Stops++; return 1; }
+    private static int StopCompletely() { Stops++; Sent.Add("stop"); return 1; }
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void ForceResetBusyCount() { ForceResets++; BusyStateValue = 0; }
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]

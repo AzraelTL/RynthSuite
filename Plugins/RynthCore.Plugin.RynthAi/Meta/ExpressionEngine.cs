@@ -16,15 +16,22 @@ namespace RynthCore.Plugin.RynthAi.Meta;
 /// <summary>
 /// Evaluates RynthAi expressions.
 ///
+/// Follows the UtilityBelt expression reference (utilitybelt.gitlab.io/docs/expressions).
+///
 /// Syntax:
-///   Infix operators: == > < >= <= + - * / % # &amp;&amp; || ~ &lt;&lt; >> &amp; ^ |
+///   Infix operators: == != > < >= <= + - * / % # &amp;&amp; || ~ &lt;&lt; >> &amp; ^ |
+///                    (&amp;&amp; and || skip the side that can't change the answer)
 ///   Function calls:  funcname[arg1, arg2, ...]   (args can be nested expressions)
-///   Variables:       $name  is shorthand for getvar[name]
-///   Literals:        plain numbers (decimal or 0x hex) or identifiers
+///   Sequences:       expr; expr; ...             (value of the last)
+///   Variables:       $name / @name / &amp;name = getvar / getpvar / getgvar[name];
+///                    $name = value assigns; x{i}, x{key}, x{a:b}, $x[a:b], text[a:b]
+///   Literals:        numbers (decimal or 0x hex), true/false (1/0), `backtick text`,
+///                    bare text of words and spaces, \x escapes one character
 ///
 /// Boolean convention: "0" and "" are false, everything else is true.
 /// All values are strings internally; numeric coercion happens per-operator.
-/// Lists are stored by reference; variables hold a list handle (e.g. "L:0").
+/// Lists are text ("[a,b]"); the list functions that change a list write it back to the
+/// variable it came from. Dictionaries and stopwatches are handles ("D:0", "SW:0").
 /// </summary>
 internal sealed class ExpressionEngine
 {
@@ -36,9 +43,42 @@ internal sealed class ExpressionEngine
     // Lists are value-typed: serialized as "[item1,item2,...]" strings — no backing store.
 
     // Dict store: handle → (key → value).  Handles look like "D:0", "D:1", …
-    // Dicts are ephemeral: cleared at the start of each top-level Evaluate call.
+    // A dict lives as long as something holds its handle: "setvar[myDict,dictcreate[]]" and
+    // later "dictadditem[$myDict,foo,1]" is the reference's own pattern. (Dicts used to be
+    // cleared after every top-level evaluation and the ids restarted at D:0, so a stored handle
+    // was dead or, worse, named a newer, unrelated dict.) Unreferenced ones are swept once the
+    // store grows past _dictSweepAt; handles are never reused.
     private readonly Dictionary<string, Dictionary<string, string>> _dicts = new(StringComparer.Ordinal);
     private int _nextDictId;
+    private const int DictSweepMin = 256;
+    private int _dictSweepAt = DictSweepMin;
+    private static readonly Regex DictHandleRx = new(@"D:\d+", RegexOptions.CultureInvariant);
+
+    /// <summary>Drops dicts no variable (memory, persistent, global), option, pending delayexec
+    /// or live dict refers to. Runs only between top-level evaluations, so no temporary of an
+    /// evaluation in progress is lost.</summary>
+    private void SweepDicts()
+    {
+        var live = new HashSet<string>(StringComparer.Ordinal);
+        var todo = new Queue<string>();
+        void Scan(string? s)
+        {
+            if (string.IsNullOrEmpty(s) || s.IndexOf("D:", StringComparison.Ordinal) < 0) return;
+            foreach (Match m in DictHandleRx.Matches(s))
+                if (_dicts.ContainsKey(m.Value) && live.Add(m.Value)) todo.Enqueue(m.Value);
+        }
+        foreach (string v in _variables.Values) Scan(v);
+        if (_pvars != null) foreach (string v in _pvars.Values) Scan(v);
+        if (_gvars != null) foreach (string v in _gvars.Values) Scan(v);
+        foreach (string v in _options.Values) Scan(v);
+        foreach (var (_, expr) in _delayedExecs) Scan(expr);
+        while (todo.Count > 0)
+            foreach (var (k, v) in _dicts[todo.Dequeue()]) { Scan(k); Scan(v); }
+
+        foreach (string h in _dicts.Keys.ToList())
+            if (!live.Contains(h)) _dicts.Remove(h);
+        _dictSweepAt = Math.Max(DictSweepMin, live.Count * 2);
+    }
     private int _evalDepth;
 
     // Hard recursion caps. A .NET StackOverflowException is uncatchable and
@@ -177,10 +217,10 @@ internal sealed class ExpressionEngine
     /// </summary>
     public string Evaluate(string expression)
     {
-        string expr = expression?.Trim() ?? "";
+        string expr = TrimArg(expression ?? "");
         if (expr.Length == 0) return "";
         if (_evalDepth >= MaxEvalDepth) return "ERR:Depth:max recursion exceeded";
-        if (_evalDepth == 0) { _dicts.Clear(); _nextDictId = 0; _parenDepth = 0; }
+        if (_evalDepth == 0) { _parenDepth = 0; if (_dicts.Count > _dictSweepAt) SweepDicts(); }
         _evalDepth++;
         try   { return new Parser(this, expr).Run(); }
         catch (Exception ex) { return $"ERR:{ex.GetType().Name}:{ex.Message}"; }
@@ -208,9 +248,12 @@ internal sealed class ExpressionEngine
         // ── Lazy (only the taken branch is evaluated) ─────────────────────────
         if (funcName == "iif")
         {
+            // "If the first parameter is false or not a number, returns the third argument":
+            // text is not true here (iif[abc,yes,no] is no). The reference also evaluates both
+            // branches; we still evaluate only the chosen one (no meta relies on both running).
             var raw = SplitArgs(argsStr);
             if (raw.Count < 2) return "";
-            return ToBool(Evaluate(raw[0]))
+            return IsNumber(Evaluate(raw[0]), out double c) && c != 0
                 ? Evaluate(raw[1])
                 : (raw.Count >= 3 ? Evaluate(raw[2]) : "");
         }
@@ -237,6 +280,9 @@ internal sealed class ExpressionEngine
 
         // Raw expression template for higher-order list functions (not pre-evaluated).
         string Tmpl(int i) => i < rawArgs.Count ? StripBackticks(rawArgs[i]) : "";
+
+        // A name, pattern, state, setting or format argument (see TextArg).
+        string Text(int i) => i < rawArgs.Count ? TextArg(rawArgs[i]) : "";
 
         return funcName switch
         {
@@ -302,19 +348,21 @@ internal sealed class ExpressionEngine
 
             // ── List functions ────────────────────────────────────────────────
             "listcreate"      => EvalListCreate(rawArgs),
-            "listadd"         => EvalListAdd(A(0), A(1)),
-            "listinsert"      => EvalListInsert(A(0), A(1), A(2)),
-            "listremove"      => EvalListRemove(A(0), A(1)),
-            "listremoveat"    => EvalListRemoveAt(A(0), A(1)),
+            // These change the list (the reference: "Returns the list object"). A list is text
+            // here, so the changed list is written back to the variable it came from.
+            "listadd"         => ListOp(rawArgs, A(0), l => EvalListAdd(l, A(1))),
+            "listinsert"      => ListOp(rawArgs, A(0), l => EvalListInsert(l, A(1), A(2))),
+            "listremove"      => ListOp(rawArgs, A(0), l => EvalListRemove(l, A(1))),
+            "listremoveat"    => ListOp(rawArgs, A(0), l => EvalListRemoveAt(l, A(1))),
             "listgetitem"     => EvalListGetItem(A(0), A(1)),
             "listcontains"    => EvalListContains(A(0), A(1)),
             "listindexof"     => EvalListIndexOf(A(0), A(1)),
             "listlastindexof" => EvalListLastIndexOf(A(0), A(1)),
             "listcopy"        => EvalListCopy(A(0)),
             "listreverse"     => EvalListReverse(A(0)),
-            "listpop"         => EvalListPop(A(0), rawArgs.Count >= 2 ? A(1) : "-1"),
+            "listpop"         => EvalListPop(rawArgs, A(0), rawArgs.Count >= 2 ? A(1) : "-1"),
             "listcount"       => EvalListCount(A(0)),
-            "listclear"       => EvalListClear(A(0)),
+            "listclear"       => ListOp(rawArgs, A(0), EvalListClear),
             "listfromrange"   => EvalListFromRange(A(0), A(1)),
 
             // Higher-order: expression arg is a raw template evaluated per iteration
@@ -341,17 +389,17 @@ internal sealed class ExpressionEngine
             "wobjectfindall"                          => EvalWobjectFindAll(),
             "wobjectfindallbyobjectclass"             => EvalWobjectFindAllByObjectClass(A(0)),
             "wobjectfindallbytemplatetype"            => EvalWobjectFindAllByTemplateType(A(0)),
-            "wobjectfindallbynamerx"                  => EvalWobjectFindAllByNameRx(Tmpl(0)),
+            "wobjectfindallbynamerx"                  => EvalWobjectFindAllByNameRx(Text(0)),
             "wobjectfindallinventory"                 => EvalWobjectFindAllInventory(),
             "wobjectfindalllandscape"                 => EvalWobjectFindAllLandscape(),
             "wobjectfindallinventorybytemplatetype"   => EvalWobjectFindAllInventoryByTemplateType(A(0)),
             "wobjectfindallinventorybyobjectclass"    => EvalWobjectFindAllInventoryByObjectClass(A(0)),
-            "wobjectfindallinventorybynamerx"         => EvalWobjectFindAllInventoryByNameRx(Tmpl(0)),
-            "wobjectfindininventorybyname"             => EvalWobjectFindInInventoryByName(Tmpl(0)),
-            "wobjectfindininventorybynamerx"          => EvalWobjectFindInInventoryByNameRx(Tmpl(0)),
+            "wobjectfindallinventorybynamerx"         => EvalWobjectFindAllInventoryByNameRx(Text(0)),
+            "wobjectfindininventorybyname"             => EvalWobjectFindInInventoryByName(Text(0)),
+            "wobjectfindininventorybynamerx"          => EvalWobjectFindInInventoryByNameRx(Text(0)),
             "wobjectfindalllandscapebyobjectclass"    => EvalWobjectFindAllLandscapeByObjectClass(A(0)),
             "wobjectfindalllandscapebytemplatetype"   =>EvalWobjectFindAllLandscapeByTemplateType(A(0)),
-            "wobjectfindalllandscapebynamerx"         => EvalWobjectFindAllLandscapeByNameRx(Tmpl(0)),
+            "wobjectfindalllandscapebynamerx"         => EvalWobjectFindAllLandscapeByNameRx(Text(0)),
             "wobjectfindallbycontainer"               => EvalWobjectFindAllByContainer(A(0)),
             "wobjectgetselection"          => EvalWobjectGetSelection(),
             "wobjectgetplayer"             => EvalWobjectGetPlayer(),
@@ -366,7 +414,7 @@ internal sealed class ExpressionEngine
             "wobjectfindnearestmonster" => EvalWobjectFindNearestMonster(),
             "wobjectfindbyid"                 => EvalWobjectFindById(A(0)),
             "wobjectfindnearestbyobjectclass" => EvalWobjectFindNearestByObjectClass(A(0)),
-            "wobjectfindnearestbynameandobjectclass" => EvalWobjectFindNearestByNameAndObjectClass(A(0), Tmpl(1)),
+            "wobjectfindnearestbynameandobjectclass" => EvalWobjectFindNearestByNameAndObjectClass(A(0), Text(1)),
             "wobjectgetisdooropen"   => EvalWobjectGetIsDoorOpen(A(0)),
             "wobjectgetphysicsstate" => EvalWobjectGetPhysicsState(A(0)),
             "wobjectgetintprop"      => EvalWobjectGetIntProp(A(0), A(1)),
@@ -386,8 +434,8 @@ internal sealed class ExpressionEngine
             "wobjectgetspellids"       => EvalWobjectGetSpellIds(A(0)),
             "wobjectgetactivespellids"     => EvalWobjectGetActiveSpellIds(A(0)),
             "wobjectgetactivespelldurations" => EvalWobjectGetActiveSpellDurations(A(0)),
-            "getitemcountininventorybyname"   => EvalItemCountByName(Tmpl(0)),
-            "getitemcountininventorybynamerx" => EvalItemCountByNameRx(Tmpl(0)),
+            "getitemcountininventorybyname"   => EvalItemCountByName(Text(0)),
+            "getitemcountininventorybynamerx" => EvalItemCountByNameRx(Text(0)),
             "getinventorycountbytemplatetype" => EvalGetInventoryCountByTemplateType(A(0)),
             "actiontryselect"        => EvalActionTrySelect(A(0)),
             "actiontryuseitem"       => EvalActionTryUseItem(A(0)),
@@ -417,18 +465,20 @@ internal sealed class ExpressionEngine
             "spellname"      => SpellDatabase.GetSpellName((int)ToDouble(A(0))),
             "componentname"  => ComponentDatabase.GetComponentName((uint)ToDouble(A(0))),
             "componentdata"  => EvalComponentData(A(0)),
+            "getknownspells" => EvalGetKnownSpells(),
 
             "getheadingto"           => EvalGetHeadingTo(A(0)),
             "getheading"             => EvalGetHeading(A(0)),
 
             // ── Math ──────────────────────────────────────────────────────────
             "getobjectinternaltype" => EvalGetObjectInternalType(A(0)),
-            "isfalse"  => ToDouble(A(0)) == 0 ? "1" : "0",
-            "istrue"   => ToDouble(A(0)) != 0 ? "1" : "0",
-            "iif"      => EvalIif(A(0), A(1), A(2)),
+            // "Checks if a value is equal to false (0)" / "equal to true (1)": text is neither
+            // (isfalse[abc] was 1), and 2 is not 1.
+            "isfalse"  => IsNumber(A(0), out double fv) && fv == 0 ? "1" : "0",
+            "istrue"   => IsNumber(A(0), out double tv) && tv == 1 ? "1" : "0",
             "randint"  => Random.Shared.Next((int)ToDouble(A(0)), (int)ToDouble(A(1))).ToString(CultureInfo.InvariantCulture),
             "cstr"     => A(0),
-            "cstrf"    => EvalCstrf(A(0), Tmpl(1)),
+            "cstrf"    => EvalCstrf(A(0), Text(1)),
             "cnumber"  => ToDouble(A(0)).ToString("G", CultureInfo.InvariantCulture),
             "strlen"   => A(0).Length.ToString(CultureInfo.InvariantCulture),
             "floor"    => Fmt(Math.Floor(ToDouble(A(0)))),
@@ -469,7 +519,8 @@ internal sealed class ExpressionEngine
             // ── Game time (Dereth) ────────────────────────────────────────────
             "getgameyear"          => GetGameYear().ToString(CultureInfo.InvariantCulture),
             "getgamemonth"         => GetGameMonth().ToString(CultureInfo.InvariantCulture),
-            "getgamemonthname"     => GetGameMonthName(A(0)),
+            // The reference's own example calls it getmonthname[1].
+            "getgamemonthname" or "getmonthname" => GetGameMonthName(A(0)),
             "getgameday"           => GetGameDay().ToString(CultureInfo.InvariantCulture),
             "getgamehour"          => GetGameHour().ToString(CultureInfo.InvariantCulture),
             "getgamehourname"      => GetGameHourName(A(0)),
@@ -499,13 +550,13 @@ internal sealed class ExpressionEngine
             "raoptset" or "uboptset" => EvalOptSet(A(0), A(1)),
 
             // ── RynthAi settings / meta state (VTank-compatible names) ────────
-            "rasetmetastate" or "vtsetmetastate" or "setmetastate" => EvalVtSetMetaState(Tmpl(0)),
+            "rasetmetastate" or "vtsetmetastate" or "setmetastate" => EvalVtSetMetaState(Text(0)),
             "ragetmetastate" or "vtgetmetastate" or "getmetastate" => _settings?.CurrentState ?? "",
             // UB vtgetmeta[]: the loaded meta's name (file name without extension).
             "vtgetmeta" or "ragetmeta" => string.IsNullOrEmpty(_settings?.CurrentMetaPath)
                 ? "" : Path.GetFileNameWithoutExtension(_settings!.CurrentMetaPath),
-            "rasetsetting" or "vtsetsetting"     => EvalVtSetSetting(Tmpl(0), A(1)),
-            "ragetsetting" or "vtgetsetting" or "vtankgetsetting" => EvalVtGetSetting(Tmpl(0)),
+            "rasetsetting" or "vtsetsetting"     => EvalVtSetSetting(Text(0), A(1)),
+            "ragetsetting" or "vtgetsetting" or "vtankgetsetting" => EvalVtGetSetting(Text(0)),
 
             // ── Dynamic evaluation ────────────────────────────────────────────
             "exec"      => Evaluate(A(0)),
@@ -527,6 +578,9 @@ internal sealed class ExpressionEngine
             "dictclear"     => EvalDictClear(A(0)),
             "dictcopy"      => EvalDictCopy(A(0)),
 
+            // "Strings support slices like arrays. ie test[1:]": a word that isn't a function,
+            // followed by [start:stop].
+            _ when TopLevelColon(argsStr) >= 0 => SliceBy(expr.Substring(0, lb).Trim(), argsStr),
             _ => EvalUnknownFunction(funcName)
         };
     }
@@ -535,9 +589,12 @@ internal sealed class ExpressionEngine
     /// missing verb ONCE per distinct name, so a typo'd or unsupported meta function is visible
     /// instead of silently evaluating to empty. Rate-limited by the seen-set to avoid log spam.</summary>
     private readonly HashSet<string> _loggedUnknownFns = new();
+    private bool _sawUnknownFn;   // set by any unknown call (TextArg asks)
+    private int _quietUnknownFn;  // > 0: don't log (TextArg is only trying an argument)
     private string EvalUnknownFunction(string funcName)
     {
-        if (!string.IsNullOrEmpty(funcName) && _loggedUnknownFns.Add(funcName))
+        _sawUnknownFn = true;
+        if (_quietUnknownFn == 0 && !string.IsNullOrEmpty(funcName) && _loggedUnknownFns.Add(funcName))
             _host.Log($"[Meta] unknown expression function '{funcName}[...]' — evaluates to empty; " +
                       "check spelling / supported verbs. (logged once per name)");
         return "";
@@ -754,18 +811,22 @@ internal sealed class ExpressionEngine
         catch { return d.ToString("G", CultureInfo.InvariantCulture); }
     }
 
-    // Both trueVal and falseVal are pre-evaluated by the caller (C# arg eval order) — matches UB behaviour.
-    private static string EvalIif(string cond, string trueVal, string falseVal)
-        => ToDouble(cond) != 0 ? trueVal : falseVal;
+    private static bool IsNumber(string s, out double d)
+        => double.TryParse(s, NumberStyles.Float | NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out d);
 
-    // 0=none, 1=number, 3=string, 7=object — matches UB internal type constants.
+    // 0=none, 1=number, 3=string, 7=object — matches UB internal type constants. Lists and
+    // coordinates are objects in UB (they read as 3, text, because they are text here).
     private static string EvalGetObjectInternalType(string val)
     {
         if (string.IsNullOrEmpty(val)) return "0";
-        if (TryParseWobjectHandle(val, out _, out _)) return "7";
+        // A world object handle. Not a bare number: an id is still a number (any nonzero
+        // integer used to read as an object, getobjectinternaltype[5] was 7).
+        if (val.StartsWith("[WorldObject] ", StringComparison.Ordinal) && TryParseWobjectHandle(val, out _, out _)) return "7";
         if (val.Length > 3 && val[0] == 'S' && val[1] == 'W' && val[2] == ':') return "7";
         if (val.Length > 2 && val[0] == 'D' && val[1] == ':') return "7";
         if (double.TryParse(val, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out _)) return "1";
+        if (GetList(val) != null) return "7";
+        if (val.Split('|').Length == 3 && TryParseCoordObject(val, out _, out _, out _)) return "7";
         return "3";
     }
 
@@ -1148,6 +1209,38 @@ internal sealed class ExpressionEngine
         return items;
     }
 
+    /// <summary>
+    /// A name, pattern, state, setting or format argument. The reference makes these ordinary
+    /// string arguments, so an expression is evaluated: "$itemname", "getvar[x]",
+    /// "`^`+$name+`$`", "\(Knight\|Wisp\)\.\+Essence". They used to be taken as typed, so all
+    /// of those searched for their own source text. Anything else is still taken as typed, so
+    /// plain text with punctuation keeps working: "The Baron's Key", "High-Stakes Gambling
+    /// Token", "(Contract)", "Recharge-Norm-Hitp". A lone word[...] that isn't a function
+    /// (a regex such as "Pack[0-9]") stays as typed too.
+    /// </summary>
+    private string TextArg(string raw)
+    {
+        string a = raw.Trim();
+        if (a.Length == 0) return "";
+        bool expr = a[0] is '`' or '$' or '@'
+            || (a[0] == '&' && a.Length > 1 && (char.IsLetterOrDigit(a[1]) || a[1] == '_'))
+            || a.IndexOf('\\') >= 0;
+        if (expr) return Evaluate(a);
+
+        int lb = a.IndexOf('[');
+        if (lb <= 0 || FindClose(a, lb, '[', ']') != a.Length) return a;
+        for (int i = 0; i < lb; i++)
+            if (!char.IsLetterOrDigit(a[i]) && a[i] != '_') return a;
+        _sawUnknownFn = false;
+        _quietUnknownFn++;
+        try
+        {
+            string v = Evaluate(a);
+            return _sawUnknownFn ? a : v;
+        }
+        finally { _quietUnknownFn--; }
+    }
+
     private static string StripBackticks(string s)
     {
         s = s.Trim();
@@ -1244,14 +1337,49 @@ internal sealed class ExpressionEngine
         return NewList(copy);
     }
 
-    private static string EvalListPop(string handle, string indexArg)
+    /// <summary>Removes the item and returns it (it used to stay in the list: listpop on a
+    /// variable never shrank it).</summary>
+    private string EvalListPop(List<string> rawArgs, string handle, string indexArg)
     {
         var list = GetList(handle);
         if (list == null || list.Count == 0) return "";
         int idx = (int)ToLong(indexArg);
         if (idx < 0) idx = list.Count - 1; // -1 = last item
         if (idx < 0 || idx >= list.Count) return "";
-        return list[idx];
+        string item = list[idx];
+        list.RemoveAt(idx);
+        WriteBackList(rawArgs, NewList(list));
+        return item;
+    }
+
+    /// <summary>Runs a list-changing function and, when its list came from a variable
+    /// ($x, @x, &amp;x, getvar[x], getpvar[x], getgvar[x]), stores the changed list there, so
+    /// "listadd[getvar[CharList], Drakkon]" adds to CharList. A list given any other way
+    /// (listcreate[...], an item of another list) just gives the changed copy.</summary>
+    private string ListOp(List<string> rawArgs, string handle, Func<string, string> op)
+    {
+        string result = op(handle);
+        if (GetList(handle) != null && GetList(result) != null) WriteBackList(rawArgs, result);
+        return result;
+    }
+
+    private static readonly Regex ListSourceCall = new(@"^(getvar|getpvar|getgvar)\[(.*)\]$",
+        RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant);
+
+    private void WriteBackList(List<string> rawArgs, string list)
+    {
+        if (rawArgs.Count == 0) return;
+        string a = rawArgs[0].Trim();
+        if (a.Length > 1 && a[0] is '$' or '@' or '&' && a.Skip(1).All(c => char.IsLetterOrDigit(c) || c == '_'))
+        {
+            WriteVar(a[0], a.Substring(1), list);
+            return;
+        }
+        var m = ListSourceCall.Match(a);
+        if (!m.Success || FindClose(a, m.Groups[1].Length, '[', ']') != a.Length) return;
+        char sigil = char.ToLowerInvariant(m.Groups[1].Value[3]) switch { 'p' => '@', 'g' => '&', _ => '$' };
+        string name = Evaluate(m.Groups[2].Value);
+        if (name.Length > 0) WriteVar(sigil, name, list);
     }
 
     private static string EvalListCount(string handle)
@@ -2526,6 +2654,7 @@ internal sealed class ExpressionEngine
         if (!int.TryParse(spellArg.Trim(), out int spellId) || spellId == 0) return "2";
         if (!_host.HasCastSpell) return "2";
         if (!TryParseWobjectHandle(targetArg, out uint targetId, out _) || targetId == 0) return "2";
+        if (SpellKnownToBeUnknown(spellId)) return "2";
 
         if (!EnsureMagicModeForCast()) return "0";
 
@@ -2799,6 +2928,7 @@ internal sealed class ExpressionEngine
     {
         if (!int.TryParse(arg.Trim(), out int spellId) || spellId == 0) return "2";
         if (!_host.HasCastSpell) return "2";
+        if (SpellKnownToBeUnknown(spellId)) return "2";
 
         if (!EnsureMagicModeForCast()) return "0";
 
@@ -2808,6 +2938,26 @@ internal sealed class ExpressionEngine
 
         _host.CastSpellFor(targetId, spellId, "Meta", $"spell {spellId} (meta)", asked: true);
         return "1";
+    }
+
+    /// <summary>The character doesn't know the spell (as far as the client can tell): the
+    /// reference's "2 if the attempt is impossible". It used to wield a wand, cast anyway and
+    /// report 1 (started). Unreadable counts as known, so nothing is refused by mistake.</summary>
+    private bool SpellKnownToBeUnknown(int spellId)
+        => _playerId != 0 && _host.HasIsSpellKnown
+           && _host.IsSpellKnown(_playerId, (uint)spellId, out bool known) && !known;
+
+    /// <summary>getknownspells[]: the ids of the spells in the character's spellbook.</summary>
+    private string EvalGetKnownSpells()
+    {
+        if (!_host.HasReadKnownSpells) return "[]";
+        var buf = new uint[8192];
+        int count = _host.ReadKnownSpells(buf, buf.Length);
+        if (count <= 0) return "[]";
+        var ids = new List<string>(Math.Min(count, buf.Length));
+        for (int i = 0; i < count && i < buf.Length; i++)
+            ids.Add(buf[i].ToString(CultureInfo.InvariantCulture));
+        return NewList(ids);
     }
 
     private string EvalActionTryEquipAnyWand()
@@ -3081,11 +3231,15 @@ internal sealed class ExpressionEngine
     {
         if (!TryParseWobjectHandle(objArg, out uint uid, out _)) return "0";
         if (!_host.HasGetPlayerPose) return "0";
-        if (!_host.TryGetPlayerPose(out _, out float px, out float py, out _, out _, out _, out _, out _)) return "0";
+        if (!_host.TryGetPlayerPose(out uint pc, out float px, out float py, out _, out _, out _, out _, out _)) return "0";
         if (!_host.HasGetObjectPosition) return "0";
-        if (!_host.TryGetObjectPosition(uid, out _, out float tx, out float ty, out _)) return "0";
+        if (!_host.TryGetObjectPosition(uid, out uint tc, out float tx, out float ty, out _)) return "0";
 
-        double deg = Math.Atan2(tx - px, ty - py) * (180.0 / Math.PI);
+        // x/y are metres within each one's own landblock (192 m square); add the landblocks'
+        // offsets, or a target across a landblock edge points the wrong way.
+        double dx = ((int)(tc >> 24) - (int)(pc >> 24)) * 192.0 + (tx - px);
+        double dy = ((int)((tc >> 16) & 0xFF) - (int)((pc >> 16) & 0xFF)) * 192.0 + (ty - py);
+        double deg = Math.Atan2(dx, dy) * (180.0 / Math.PI);
         if (deg < 0) deg += 360.0;
         return deg.ToString("G", CultureInfo.InvariantCulture);
     }
@@ -3158,7 +3312,7 @@ internal sealed class ExpressionEngine
     private static readonly string[] MonthNames =
     {
         "Morningthaw","Solclaim","Seedsow","Leafdawning","Verdantine","Thistledown",
-        "HarvestGain","Leafcull","Frostfell","Snowreap","Coldeve","Wintersebb"
+        "Harvestgain","Leafcull","Frostfell","Snowreap","Coldeve","Wintersebb"
     };
 
     private static readonly string[] HourNames =
@@ -3203,7 +3357,8 @@ internal sealed class ExpressionEngine
 
     private int GetGameYear()   => (int)(GetGameTicks() / TicksInYear);
     private int GetGameMonth()  => (int)(GetGameTicks() % TicksInYear  / TicksInMonth);
-    private int GetGameDay()    => (int)(GetGameTicks() % TicksInMonth / TicksInDay);
+    // "the current ingame day of the month. 1-30" (it was 0-29).
+    private int GetGameDay()    => (int)(GetGameTicks() % TicksInMonth / TicksInDay) + 1;
     private int GetGameHour()   => (int)(GetGameTicks() % TicksInDay   / TicksInHour);
     private bool GetIsDay()     { int h = GetGameHour(); return h >= 4 && h < 12; }
 
@@ -3258,16 +3413,13 @@ internal sealed class ExpressionEngine
     }
 
     // VTank getfellowshipstatus[] — the migration keystone (~149 metas use it).
-    // Contract reverse-engineered from real meta usage across the VTank library
-    // (512 calls: only ==0 / ==1 / !=0; AutoFellow gates `/ub fellow recruit`
-    // — a leader-only action — on ==1):
-    //   0 = not in a fellowship
-    //   1 = in a fellowship and you are the leader
-    //   2 = in a fellowship and you are NOT the leader
+    // Documented: "Returns 1 if you are in a fellowship, 0 otherwise". It used to return 2 for a
+    // member who isn't the leader (a guess from meta usage), so metas testing ==1 saw a member
+    // as not in a fellowship (2026-10-11). Leader checks: getfellowshipisleader[].
     private string EvalGetFellowshipStatus()
     {
         if (_fellowshipTracker == null || !_fellowshipTracker.IsInFellowship) return "0";
-        return _fellowshipTracker.IsLeader ? "1" : "2";
+        return "1";
     }
 
     private string EvalGetFellowId(string arg)
@@ -3633,6 +3785,81 @@ internal sealed class ExpressionEngine
         return dict != null ? NewDict(dict) : NewDict();
     }
 
+    // ── Variable shorthand, indexes and slices ────────────────────────────────
+
+    /// <summary>Reads a variable by sigil: $ memory, @ persistent, &amp; global. Unset reads "0".</summary>
+    internal string ReadVar(char sigil, string name)
+    {
+        var store = sigil switch { '@' => GetPvars(), '&' => GetGvars(), _ => _variables };
+        return store.TryGetValue(name, out string? v) ? v ?? "" : "0";
+    }
+
+    /// <summary>Writes a variable by sigil, as setvar / setpvar / setgvar do.</summary>
+    internal string WriteVar(char sigil, string name, string value) => sigil switch
+    {
+        '@' => EvalSetPvar(name, value),
+        '&' => EvalSetGvar(name, value),
+        _   => EvalSetVar(name, value),
+    };
+
+    /// <summary>x{i}: a list item, a dictionary value by key, or a character of text. A negative
+    /// index counts from the end. Missing → "" (the reference throws).</summary>
+    internal string IndexValue(string value, string key)
+    {
+        var dict = GetDict(value.Trim());
+        if (dict != null) return dict.TryGetValue(key, out string? dv) ? dv : "";
+        var list = GetList(value);
+        int count = list?.Count ?? value.Length;
+        long i = ToLong(key);
+        if (i < 0) i += count;
+        if (i < 0 || i >= count) return "";
+        return list != null ? list[(int)i] : value[(int)i].ToString();
+    }
+
+    /// <summary>x{start:stop} / x[start:stop]: a sub-list or substring, as Python slices
+    /// (stop excluded, negatives count from the end, empty means the start / the end).</summary>
+    internal string SliceValue(string value, string start, string stop)
+    {
+        var list = GetList(value);
+        int n = list?.Count ?? value.Length;
+        int Norm(string s, int dflt)
+        {
+            if (s.Trim().Length == 0) return dflt;
+            long i = ToLong(s);
+            if (i < 0) i += n;
+            return (int)Math.Clamp(i, 0, n);
+        }
+        int a = Norm(start, 0), b = Norm(stop, n);
+        if (b < a) b = a;
+        return list != null ? NewList(list.GetRange(a, b - a)) : value.Substring(a, b - a);
+    }
+
+    /// <summary>Index of a ':' outside brackets and backticks, or -1 (marks a slice).</summary>
+    internal static int TopLevelColon(string s)
+    {
+        int depth = 0;
+        bool inBacktick = false;
+        for (int i = 0; i < s.Length; i++)
+        {
+            if (IsEscape(s, i, inBacktick)) { i++; continue; }
+            char c = s[i];
+            if (c == '`') inBacktick = !inBacktick;
+            else if (inBacktick) continue;
+            else if (c is '[' or '{' or '(') depth++;
+            else if (c is ']' or '}' or ')') depth--;
+            else if (c == ':' && depth == 0) return i;
+        }
+        return -1;
+    }
+
+    /// <summary>Evaluates "start:stop" (either side may be empty) and slices.</summary>
+    internal string SliceBy(string value, string spec)
+    {
+        int colon = TopLevelColon(spec);
+        string a = spec.Substring(0, colon), b = spec.Substring(colon + 1);
+        return SliceValue(value, a.Trim().Length > 0 ? Evaluate(a) : "", b.Trim().Length > 0 ? Evaluate(b) : "");
+    }
+
     // ── Coercions ─────────────────────────────────────────────────────────────
 
     /// <summary>"0" and "" are false; everything else is true.</summary>
@@ -3669,7 +3896,8 @@ internal sealed class ExpressionEngine
 
     // ── Argument splitter ─────────────────────────────────────────────────────
 
-    /// <summary>Splits a comma-separated argument list, respecting nested bracket depth and backtick strings.</summary>
+    /// <summary>Splits a comma-separated argument list, respecting nested bracket depth, backtick
+    /// strings and backslash escapes ("echo[Not here\, sorry,15]" is two arguments).</summary>
     private static List<string> SplitArgs(string s)
     {
         var list = new List<string>();
@@ -3678,6 +3906,7 @@ internal sealed class ExpressionEngine
         for (int i = 0; i < s.Length; i++)
         {
             char c = s[i];
+            if (IsEscape(s, i, inBacktick)) { i++; continue; }
             if (c == '`') { inBacktick = !inBacktick; }
             else if (!inBacktick)
             {
@@ -3685,13 +3914,51 @@ internal sealed class ExpressionEngine
                 else if (c == ']') depth--;
                 else if (c == ',' && depth == 0)
                 {
-                    list.Add(s.Substring(start, i - start).Trim());
+                    list.Add(TrimArg(s.Substring(start, i - start)));
                     start = i + 1;
                 }
             }
         }
-        list.Add(s.Substring(start).Trim());
+        list.Add(TrimArg(s.Substring(start)));
         return list;
+    }
+
+    /// <summary>A backslash escape at <paramref name="i"/>: outside backticks '\' escapes any
+    /// character; inside them only "\`" and "\\" are escapes (other backslashes are text, so
+    /// a regex like `\d+` keeps its backslash).</summary>
+    private static bool IsEscape(string s, int i, bool inBacktick)
+        => s[i] == '\\' && i + 1 < s.Length && (!inBacktick || s[i + 1] is '`' or '\\');
+
+    /// <summary>Trim, but keep an escaped trailing space ("abc\ ").</summary>
+    private static string TrimArg(string s)
+    {
+        string t = s.Trim();
+        if (t.Length < s.Length && t.Length > 0 && t[^1] == '\\')
+        {
+            int slashes = 0;
+            for (int i = t.Length - 1; i >= 0 && t[i] == '\\'; i--) slashes++;
+            int at = s.IndexOf(t, StringComparison.Ordinal) + t.Length;
+            if (slashes % 2 == 1 && at < s.Length) t += s[at];
+        }
+        return t;
+    }
+
+    /// <summary>Index just past the bracket that closes the one at <paramref name="open"/>
+    /// (or the end of the text), skipping backtick strings and escapes.</summary>
+    private static int FindClose(string s, int open, char openCh, char closeCh)
+    {
+        int depth = 0;
+        bool inBacktick = false;
+        for (int i = open; i < s.Length; i++)
+        {
+            if (IsEscape(s, i, inBacktick)) { i++; continue; }
+            char c = s[i];
+            if (c == '`') inBacktick = !inBacktick;
+            else if (inBacktick) continue;
+            else if (c == openCh) depth++;
+            else if (c == closeCh && --depth == 0) return i + 1;
+        }
+        return s.Length;
     }
 
     // ── Infix expression parser ───────────────────────────────────────────────
@@ -3708,9 +3975,40 @@ internal sealed class ExpressionEngine
         private readonly string _s;
         private int _p;
 
+        // > 0 while parsing the side of && / || that must not run: function calls and
+        // assignments are skipped (read for their length only), so "0 && echo[x]" echoes nothing.
+        private int _skip;
+
         internal Parser(ExpressionEngine eng, string s) { _eng = eng; _s = s; }
 
-        internal string Run() => ParseOr();
+        /// <summary>
+        /// Expressions separated by ';' run in order; the value is the last one's
+        /// ("setvar[t, stopwatchcreate[]]; stopwatchstart[$t]"). Everything after the first
+        /// ';' used to be dropped.
+        /// </summary>
+        internal string Run()
+        {
+            string last = ParseOr();
+            while (true)
+            {
+                Ws();
+                if (_p >= _s.Length || _s[_p] != ';') break;
+                _p++;
+                Ws();
+                if (_p >= _s.Length) break;
+                if (_s[_p] == ';') continue;
+                last = ParseOr();
+            }
+            return last;
+        }
+
+        /// <summary>Parses (and so consumes) one operand without running anything in it.</summary>
+        private void Skip(Func<string> parse)
+        {
+            _skip++;
+            try { parse(); }
+            finally { _skip--; }
+        }
 
         // ── Whitespace ────────────────────────────────────────────────────────
 
@@ -3753,21 +4051,32 @@ internal sealed class ExpressionEngine
 
         // ── Precedence levels ─────────────────────────────────────────────────
 
-        // Priority 1 (lowest): ||
+        // Priority 1 (lowest): ||  (short-circuit: a true left side skips the right side)
         private string ParseOr()
         {
             var l = ParseAnd();
             Ws();
-            while (Try("||")) { var r = ParseAnd(); l = ToBool(l) || ToBool(r) ? "1" : "0"; Ws(); }
+            while (Try("||"))
+            {
+                if (ToBool(l)) { Skip(ParseAnd); l = "1"; }
+                else l = ToBool(ParseAnd()) ? "1" : "0";
+                Ws();
+            }
             return l;
         }
 
-        // Priority 2: &&
+        // Priority 2: &&  (short-circuit: a false left side skips the right side, so
+        // "$debug && echo[...]" only echoes when debugging; it used to always run)
         private string ParseAnd()
         {
             var l = ParseBitOr();
             Ws();
-            while (Try("&&")) { var r = ParseBitOr(); l = ToBool(l) && ToBool(r) ? "1" : "0"; Ws(); }
+            while (Try("&&"))
+            {
+                if (!ToBool(l)) { Skip(ParseBitOr); l = "0"; }
+                else l = ToBool(ParseBitOr()) ? "1" : "0";
+                Ws();
+            }
             return l;
         }
 
@@ -3921,7 +4230,7 @@ internal sealed class ExpressionEngine
             Ws();
             if (_p >= _s.Length) return "";
             char c = _s[_p];
-            if (c is '`' or '$' or '(' or '~' or '-') return ParseUnary();
+            if (c is '`' or '$' or '@' or '(' or '~' or '-') return ParseUnary();
 
             int wordEnd = _p;
             while (wordEnd < _s.Length && (char.IsLetterOrDigit(_s[wordEnd]) || _s[wordEnd] == '_' || _s[wordEnd] == '.'))
@@ -3938,7 +4247,7 @@ internal sealed class ExpressionEngine
                 else if (ch is ']' or ')') { if (depth == 0) break; depth--; }
                 else if (depth == 0)
                 {
-                    if (ch == ',') break;
+                    if (ch is ',' or ';') break;
                     if (q + 1 < _s.Length)
                     {
                         char n = _s[q + 1];
@@ -3982,9 +4291,9 @@ internal sealed class ExpressionEngine
                 Ws();
                 if (_p < _s.Length && _s[_p] == ')') _p++;
                 _eng._parenDepth--;
-                return inner;
+                return ParseIndexes(inner);
             }
-            return ParseAtom();
+            return ParseIndexes(ParseAtom());
         }
 
         /// <summary>
@@ -3997,16 +4306,19 @@ internal sealed class ExpressionEngine
             if (_p >= _s.Length) return "";
 
             // Backtick string literal: `content` → content (verbatim, no evaluation)
-            // \` inside the string is an escaped backtick (needed for nested expressions).
+            // \` inside the string is an escaped backtick (needed for nested expressions), and
+            // \\ is one backslash: real metas nest "`chatbox[\\/vt forcebuff]`" (the inner text
+            // is then "\/vt forcebuff") and write the regex `\\d+`. Any other \x stays as is,
+            // as in the reference's `\d+`.
             if (_s[_p] == '`')
             {
                 _p++; // consume opening backtick
                 var sb = new System.Text.StringBuilder();
                 while (_p < _s.Length && _s[_p] != '`')
                 {
-                    if (_s[_p] == '\\' && _p + 1 < _s.Length && _s[_p + 1] == '`')
+                    if (_s[_p] == '\\' && _p + 1 < _s.Length && _s[_p + 1] is '`' or '\\')
                     {
-                        sb.Append('`');
+                        sb.Append(_s[_p + 1]);
                         _p += 2;
                     }
                     else
@@ -4018,18 +4330,10 @@ internal sealed class ExpressionEngine
                 return sb.ToString();
             }
 
-            // $name — shorthand for getvar[name]
-            if (_s[_p] == '$')
-            {
-                _p++;
-                int vs = _p;
-                while (_p < _s.Length && (char.IsLetterOrDigit(_s[_p]) || _s[_p] == '_'))
-                    _p++;
-                string varName = _s.Substring(vs, _p - vs);
-                // Same as getvar[name]: an unset variable reads "0" (it read "", so
-                // '$kills == 0' was false until kills was first set).
-                return _eng._variables.TryGetValue(varName, out string? vv) ? vv ?? "" : "0";
-            }
+            // $name / @name / &name: getvar / getpvar / getgvar shorthand
+            if (_s[_p] == '$' || _s[_p] == '@'
+                || (_s[_p] == '&' && _p + 1 < _s.Length && (char.IsLetterOrDigit(_s[_p + 1]) || _s[_p + 1] == '_')))
+                return ParseVariable();
 
             // Hex literal: 0x / 0X (positive or negative)
             bool negHex = _s[_p] == '-' && _p + 2 < _s.Length && _s[_p + 1] == '0' && (_s[_p + 2] == 'x' || _s[_p + 2] == 'X');
@@ -4058,31 +4362,147 @@ internal sealed class ExpressionEngine
 
             int start = _p;
 
-            // Identifier (letters, digits, underscores, dots for decimal numbers)
-            while (_p < _s.Length && (char.IsLetterOrDigit(_s[_p]) || _s[_p] == '_' || _s[_p] == '.'))
-                _p++;
+            // A word: letters, digits, underscores, dots (decimal numbers), and backslash
+            // escapes, each of which stands for the character after it ("p\@cMan\$" = p@cMan$).
+            var word = new System.Text.StringBuilder();
+            bool escaped = false;
+            ReadWord(word, ref escaped);
 
-            if (_p < _s.Length && _s[_p] == '[')
+            if (!escaped && _p > start && _p < _s.Length && _s[_p] == '[')
             {
-                // Function call: consume '[' and scan to its matching ']'
-                _p++;
-                int depth = 1;
-                while (_p < _s.Length && depth > 0)
-                {
-                    if      (_s[_p] == '[') depth++;
-                    else if (_s[_p] == ']') depth--;
-                    _p++;
-                }
+                // Function call: scan to the matching ']' (backticks and escapes skipped)
+                _p = FindClose(_s, _p, '[', ']');
                 // Pass the entire "funcname[args]" string to EvaluatePrimary
+                // (not on the skipped side of && / ||: nothing in it may run)
+                if (_skip > 0) return "0";
                 return _eng.EvaluatePrimary(_s.Substring(start, _p - start));
             }
 
-            if (_p > start)
-                return _eng.EvaluatePrimary(_s.Substring(start, _p - start));
+            if (_p == start)
+            {
+                // Skip unrecognised characters (guards against infinite loops). A ';' is left
+                // for Run(), which starts the next expression there.
+                if (_s[_p] != ';') _p++;
+                return "";
+            }
 
-            // Skip unrecognised characters (guards against infinite loops)
-            _p++;
-            return "";
+            // Text of letters and spaces needs no escaping, so the words that follow (with
+            // the spaces between them) are part of it: "echo[Uses dispel gems,15]". Only the
+            // first word used to be kept. A number stays one word ("\1\2\3 test" is how the
+            // reference writes text that starts with digits).
+            bool number = !escaped && char.IsDigit(_s[start]);
+            bool words = !number && ReadMoreWords(word, ref escaped);
+            string text = word.ToString();
+
+            // "Although there are keywords for true/false, internally they represent number 1/0."
+            if (!escaped && !words)
+            {
+                if (text.Equals("true", StringComparison.OrdinalIgnoreCase)) return "1";
+                if (text.Equals("false", StringComparison.OrdinalIgnoreCase)) return "0";
+            }
+            return text;
+        }
+
+        /// <summary>
+        /// $name, @name, &amp;name: a memory, persistent or global variable (the reference's
+        /// shorthand for getvar / getpvar / getgvar; only $ was supported). The name may be a
+        /// function call whose value is the name ("$wobjectgetname[wobjectgetplayer[]]"), and
+        /// "$name[1:3]" is a slice. "$name = value" assigns (not in the reference, but UB has
+        /// it and real metas use it ~500 times): the value is everything up to &amp;&amp;, ||, ';' or
+        /// the end, so "$x=listfilter[...] &amp;&amp; listcount[$x]>0" sets x to the list.
+        /// </summary>
+        private string ParseVariable()
+        {
+            char sigil = _s[_p++];
+            int ns = _p;
+            while (_p < _s.Length && (char.IsLetterOrDigit(_s[_p]) || _s[_p] == '_')) _p++;
+            if (_p == ns) return "";                                  // a stray sigil: as before
+            string name = _s.Substring(ns, _p - ns);
+            string? slice = null;
+            if (_p < _s.Length && _s[_p] == '[')
+            {
+                int close = FindClose(_s, _p, '[', ']');
+                string inner = _s.Substring(_p + 1, Math.Max(0, close - _p - 2));
+                if (TopLevelColon(inner) >= 0) slice = inner;
+                else name = _skip > 0 ? "" : _eng.EvaluatePrimary(_s.Substring(ns, close - ns));
+                _p = close;
+            }
+
+            if (slice == null)
+            {
+                int save = _p;
+                Ws();
+                if (_p < _s.Length && _s[_p] == '=' && (_p + 1 >= _s.Length || _s[_p + 1] != '='))
+                {
+                    _p++;
+                    string value = ParseBitOr();
+                    return _skip > 0 ? value : _eng.WriteVar(sigil, name, value);
+                }
+                _p = save;
+            }
+
+            string v = _eng.ReadVar(sigil, name);
+            return slice == null || _skip > 0 ? v : _eng.SliceBy(v, slice);
+        }
+
+        /// <summary>x{key} after a value: list item, dictionary value or character; x{a:b} slices.
+        /// Repeats: "$commands{$name}{params}".</summary>
+        private string ParseIndexes(string value)
+        {
+            while (_p < _s.Length && _s[_p] == '{')
+            {
+                int close = FindClose(_s, _p, '{', '}');
+                string inner = _s.Substring(_p + 1, Math.Max(0, close - _p - 2));
+                _p = close;
+                if (_skip > 0) continue;
+                value = TopLevelColon(inner) >= 0
+                    ? _eng.SliceBy(value, inner)
+                    : _eng.IndexValue(value, _eng.Evaluate(inner));
+            }
+            return value;
+        }
+
+        private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_' || c == '.';
+
+        private void ReadWord(System.Text.StringBuilder sb, ref bool escaped)
+        {
+            while (_p < _s.Length)
+            {
+                char c = _s[_p];
+                if (IsWordChar(c)) { sb.Append(c); _p++; }
+                else if (c == '\\' && _p + 1 < _s.Length) { sb.Append(_s[_p + 1]); _p += 2; escaped = true; }
+                else break;
+            }
+        }
+
+        /// <summary>
+        /// Appends the words that follow the one just read, with the spaces between them.
+        /// Spaces before a '+' are kept too ("\/vt nav load +getpvar[HuntNav]" is the text
+        /// "/vt nav load " joined to the nav name); other leading and trailing spaces are not.
+        /// A word that is a function name ("text func[...]") is not taken.
+        /// </summary>
+        private bool ReadMoreWords(System.Text.StringBuilder sb, ref bool escaped)
+        {
+            bool any = false;
+            while (true)
+            {
+                int q = _p;
+                while (q < _s.Length && (_s[q] == ' ' || _s[q] == '\t')) q++;
+                if (q == _p || q >= _s.Length) break;
+                char n = _s[q];
+                if (n == '+') { sb.Append(_s, _p, q - _p); _p = q; break; }
+                if (!IsWordChar(n) && n != '\\') break;
+
+                int save = _p, saveLen = sb.Length;
+                sb.Append(_s, _p, q - _p);
+                _p = q;
+                bool e2 = false;
+                ReadWord(sb, ref e2);
+                if (!e2 && _p < _s.Length && _s[_p] == '[') { _p = save; sb.Length = saveLen; break; }
+                escaped |= e2;
+                any = true;
+            }
+            return any;
         }
     }
 }
