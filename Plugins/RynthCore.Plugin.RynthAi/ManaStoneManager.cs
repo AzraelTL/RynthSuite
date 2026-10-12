@@ -88,6 +88,22 @@ internal sealed class ManaStoneManager
     private const long RefillHoldMs = 2 * 60 * 1000;
     private long _lastNoStoneDiagAt;
 
+    // Worn gear's mana is read from its last appraisal, and ACE never sends a change to it while the
+    // gear burns mana (Player.ManaConsumersTick), so a mace identified at 90% read 90% all night while
+    // it ran dry, and nothing was refilled (Mana Charges in the pack, 2026-10-11). Two fixes:
+    //   * "Your X is low on Mana." / "Your X is out of Mana." (the server's own word) means the gear
+    //     needs mana whatever the reads say, until the server says it's full again.
+    //   * worn items are identified again every 10 minutes (one every 5 seconds at most), and right
+    //     after a stone gave its mana, so the reads follow the gear.
+    private long _serverSaidGearLowAt;
+    private readonly Dictionary<int, long> _gearReadRefreshedAt = new();
+    private long _lastGearRefreshAt;
+    private const long GearRefreshMs = 10 * 60 * 1000;
+    private const long GearRefreshSpacingMs = 5000;
+
+    private const uint StackSizeKey = 12;   // STACK_SIZE (the client's live copy)
+    private long _stoneMarksPrunedAt;
+
     // Worn equipment is only treated as "needs refill" when current mana drops
     // below this fraction of its MaxMana. Prevents the bot from continually
     // dumping stones on the player just because an item dipped slightly.
@@ -138,6 +154,7 @@ internal sealed class ManaStoneManager
         // Before the early returns: items sold, given away or dropped while tapping is
         // off or the macro is stopped must leave the set too.
         PruneLootedForTap(NowMs);
+        PruneStoneMarks(NowMs);
 
         // Refilling worn gear from a charged stone (or a free Eternal charge) works with tapping
         // off too; only draining loot into empty stones needs tapping on. It used to need tapping
@@ -229,6 +246,27 @@ internal sealed class ManaStoneManager
     {
         if (string.IsNullOrEmpty(text)) return;
 
+        // In any state. ACE: "Your {item} is low on Mana." (about two minutes left) and "Your {item} is
+        // out of Mana." - worn gear needs mana now, whatever its (appraisal) read says.
+        if (text.StartsWith("Your ", StringComparison.Ordinal)
+            && (text.Contains(" is low on Mana", StringComparison.OrdinalIgnoreCase)
+                || text.Contains(" is out of Mana", StringComparison.OrdinalIgnoreCase)))
+        {
+            if (_serverSaidGearLowAt == 0)
+                _host.Log($"[RynthAi] ManaStone: the server says worn gear is low ('{text.Trim()}') - refilling whatever the gear's mana reads say.");
+            _serverSaidGearLowAt = NowMs;
+            _refillHoldUntil = 0;   // the server's word is newer than "fully charged"
+            return;
+        }
+        // The stone-on-player reply's second line; it may arrive as a line of its own.
+        if (text.Contains("Your items are fully charged"))
+        {
+            _serverSaidGearLowAt = 0;
+            HoldRefills("the server says the worn items are fully charged");
+        }
+        if (text.Contains("no items equipped that need mana"))
+            _serverSaidGearLowAt = 0;
+
         if (_state == TapState.TappingItem)
         {
             // "The Mana Stone drains X points of mana from the ..." — single drain,
@@ -282,7 +320,9 @@ internal sealed class ManaStoneManager
                 // its read still shows the old charge.
                 WorldObject? stone = _activeStoneId != 0 ? _objectCache[_activeStoneId] : null;
                 if (stone == null || !IsEternal(stone)) MarkStoneEmpty(_activeStoneId);
-                if (text.Contains("fully charged")) HoldRefills("the server says the worn items are fully charged");
+                // ("Your items are fully charged" was handled above.) The gear's reads are from before
+                // the refill: identify the worn items again.
+                _gearReadRefreshedAt.Clear();
                 Reset();
                 return;
             }
@@ -321,8 +361,38 @@ internal sealed class ManaStoneManager
     private void MarkStoneEmpty(int id)
     {
         if (id == 0) return;
+        // A stack of stones or charges gave one item's mana; the rest of the stack is still charged
+        // and keeps its id (retail Mana Charges don't stack and are destroyed by every use, but a
+        // stacked one must not be written off after its first refill).
+        if (_host.TryGetObjectIntProperty(unchecked((uint)id), StackSizeKey, out int stack) && stack > 1)
+        {
+            _host.Log($"[RynthAi] ManaStone: stone 0x{(uint)id:X8} gave its mana, but it is a stack of {stack} - still a source.");
+            return;
+        }
         _stoneKnownCharged.Remove(id);
         _stoneKnownEmpty[id] = ReadStoneMana(id);
+    }
+
+    /// <summary>
+    /// Forgets what the server said about stones that left the pack (used up, destroyed, sold). AC
+    /// reuses object ids, so a stale "gave its mana" mark could otherwise write off a new charge.
+    /// </summary>
+    private void PruneStoneMarks(long now)
+    {
+        if (now - _stoneMarksPrunedAt < 5000) return;
+        _stoneMarksPrunedAt = now;
+        if (_stoneKnownEmpty.Count == 0 && _stoneKnownCharged.Count == 0) return;
+        List<int>? gone = null;
+        foreach (int id in _stoneKnownEmpty.Keys)
+            if (id != _activeStoneId && _objectCache[id] == null) (gone ??= new List<int>()).Add(id);
+        foreach (int id in _stoneKnownCharged)
+            if (id != _activeStoneId && _objectCache[id] == null) (gone ??= new List<int>()).Add(id);
+        if (gone == null) return;
+        foreach (int id in gone)
+        {
+            _stoneKnownEmpty.Remove(id);
+            _stoneKnownCharged.Remove(id);
+        }
     }
 
     private void MarkStoneCharged(int id)
@@ -478,7 +548,7 @@ internal sealed class ManaStoneManager
 
         foreach (var item in _objectCache.AllKnownObjects())
         {
-            if (!IsManaStone(item)) continue;
+            if (!IsManaStone(item) || IsManaCharge(item)) continue;   // keep in sync with FindEmptyStone
             if (!IsOwnedByPlayer(item, playerId)) continue;
             if (_stoneKnownCharged.Contains(item.Id)) continue;
 
@@ -610,12 +680,23 @@ internal sealed class ManaStoneManager
         !string.IsNullOrEmpty(item.Name) && item.Name.StartsWith("Eternal Mana", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
+    /// A bought Mana Charge (Tiny ... Massive, Titan, Superb; Eternal too): always charged, only ever
+    /// a refill source. ACE gives every one a stored charge and destroys it on use (the Eternal one
+    /// excepted), so it is never drained into.
+    /// </summary>
+    internal static bool IsManaCharge(WorldObject item) =>
+        !string.IsNullOrEmpty(item.Name) && item.Name.Contains("Mana Charge", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// A stone that may refill worn gear when charged: what <see cref="IsManaStone"/> takes, but
     /// with tapping off as well (no rules: the ordinary stones and mana charges; with ManaStone
     /// rules: the named ones).
     /// </summary>
     internal bool IsRefillStone(WorldObject item)
     {
+        // Mana Charges are bought to refill gear: ManaStone rules (which pick the stones to loot and
+        // drain into) don't turn them off.
+        if (IsManaCharge(item)) return true;
         if (IsManaStone(item)) return true;
         if (_settings.EnableManaTapping || string.IsNullOrEmpty(item.Name)) return false;
         foreach (var rule in _settings.ConsumableRules)
@@ -696,7 +777,10 @@ internal sealed class ManaStoneManager
 
         foreach (var item in _objectCache.AllKnownObjects())
         {
-            if (!IsManaStone(item) || IsEternal(item)) continue;
+            // A Mana Charge is never an empty stone: it is sold charged and every use destroys it
+            // (ACE ManaStoneDestroyChance 1.0). One whose charge wasn't read yet was taken for the
+            // empty stone, and "draining" loot with it poured the whole charge into the loot item.
+            if (!IsManaStone(item) || IsManaCharge(item)) continue;
             if (!IsOwnedByPlayer(item, playerId)) continue;
 
             // Stones AC has explicitly told us are charged ("already full of
@@ -914,6 +998,22 @@ internal sealed class ManaStoneManager
                 continue;
             readable++;
             _manaIdRequestedAt.Remove(item.Id);
+
+            // The read is from the item's last appraisal and the server sends no change while the gear
+            // burns mana: identify it again every 10 minutes (and soon after a refill), one item every
+            // 5 seconds at most, so the read follows the gear.
+            {
+                long nowMs = NowMs;
+                if (!requestedThisPass && _host.HasRequestId
+                    && nowMs - _lastGearRefreshAt >= GearRefreshSpacingMs
+                    && (!_gearReadRefreshedAt.TryGetValue(item.Id, out long readAt) || nowMs - readAt >= GearRefreshMs))
+                {
+                    _gearReadRefreshedAt[item.Id] = nowMs;
+                    _lastGearRefreshAt = nowMs;
+                    _host.RequestId(unchecked((uint)item.Id));
+                    requestedThisPass = true;
+                }
+            }
             int p = (int)(curMana * 100L / maxMana);
             if (p < lowestPct) { lowestPct = p; lowestName = item.Name ?? ""; }
 
@@ -927,6 +1027,10 @@ internal sealed class ManaStoneManager
                 needs = true;
         }
 
+        // The server said an item is low or out of mana: that beats every read.
+        bool serverLow = _serverSaidGearLowAt != 0;
+        if (serverLow) needs = true;
+
         // Once a minute: what it can see, so "the charge is never used" can be told apart
         // from "the gear's mana can't be read".
         long now = NowMs;
@@ -935,6 +1039,7 @@ internal sealed class ManaStoneManager
             _lastGearDiagAt = now;
             _host.Log($"[RynthAi] ManaStone: gear check - worn={worn} manaReadable={readable} lowest={(readable > 0 ? $"{lowestPct}% ({lowestName})" : "n/a")} " +
                       $"refillBelow={(int)(pct * 100)}% eternal={eternal} needs={needs} tapping={_settings.EnableManaTapping}" +
+                      (serverLow ? $" serverSaidLow={(now - _serverSaidGearLowAt) / 1000}s ago" : "") +
                       (now < _refillHoldUntil ? $" hold={(_refillHoldUntil - now) / 1000}s" : ""));
         }
 

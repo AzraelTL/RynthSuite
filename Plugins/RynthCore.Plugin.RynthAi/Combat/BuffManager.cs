@@ -468,6 +468,40 @@ public class BuffManager : IDisposable
         return null;
     }
 
+    private DateTime _buffManaWaitLoggedAt = DateTime.MinValue;
+
+    /// <summary>
+    /// Before a buff: true when it waits for mana. Casting it would leave mana under the reserve
+    /// (ManaReserve, from Stamina to Mana's cost) and Stamina to Mana (or a mana potion) is cast
+    /// now instead; or mana can't pay for the buff or for Stamina to Mana, and buffing waits.
+    /// </summary>
+    internal bool BuffWaitsForMana(int spellId, string buffName)
+    {
+        if (_vitals.MaxMana == 0) return false;
+        int reserve = ManaReserve();
+        int cost = SpellManaCost(spellId);
+        uint cur = _vitals.CurrentMana;
+        bool cantPay = cost > 0 && cur < cost;
+        bool underReserveAfter = reserve > 0 && (long)cur - Math.Max(cost, 0) < reserve;
+        if (!cantPay && !underReserveAfter) return false;
+
+        _vitalWhy = "";
+        if ((StaminaAllowsStaminaToMana() && AttemptVitalCast("Stamina to Mana Self")) || AttemptPotion("ManaPotion"))
+        {
+            _isRechargingMana = true;
+            LastBuffSkipReason = $"mana {cur}/{_vitals.MaxMana} before {buffName}: Stamina to Mana first";
+            return true;
+        }
+        if (!cantPay) return false;   // under the reserve after it, but nothing refills: cast the buff anyway
+        LastBuffSkipReason = $"mana {cur}/{_vitals.MaxMana} is under {buffName}'s cost ({cost}); waiting for regen";
+        if ((DateTime.Now - _buffManaWaitLoggedAt).TotalSeconds >= 30)
+        {
+            _buffManaWaitLoggedAt = DateTime.Now;
+            _host.Log($"[RynthAi] Vitals: buffing waits: {LastBuffSkipReason} (Stamina to Mana: {Why(_vitalWhy)})");
+        }
+        return true;
+    }
+
     private readonly Dictionary<int, DateTime> _castIssuedAtByFamily = new();
     private readonly Dictionary<int, DateTime> _expiryAtCastByFamily = new();
     private const double AuditSettleMs = 15_000.0;
@@ -2470,6 +2504,13 @@ public class BuffManager : IDisposable
                 LastBuffSkipReason = "magic-mode swap in progress (yielding tick)";
                 return true; // normal in-progress swap — yield the tick (NeedsAnyBuff still holds Buffing)
             }
+
+            // The mana reserve holds buffs too, melee or caster (2026-10-12, Drakkon: a full rebuff
+            // spent mana spell by spell down to 6%, under Stamina to Mana's cost, and he stood there
+            // until regen reached it). A buff that would leave mana under the reserve waits for
+            // Stamina to Mana first; when even that can't be paid for, buffing waits for regen.
+            if (BuffWaitsForMana(spellId, buffBaseName))
+                return true;
 
             _pendingSpellId = spellId;
             if (buffFamily != 0)

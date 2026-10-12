@@ -32,6 +32,7 @@ internal static class ManaReserveTests
         r.Add("mana reserve: combat holds an attack it can't pay for, and casts once mana is back", CombatHoldsCast);
         r.Add("mana reserve: a melee fighter's attacks aren't held; Get Mana At off means no reserve", MeleeAndOff);
         r.Add("mana reserve: the dat's BaseMana is read (when this PC has a portal.dat)", DatBaseMana);
+        r.Add("mana reserve: a buff that would leave mana under the reserve waits for Stamina to Mana (melee too)", BuffWaitsForReserve);
     }
 
     private static int Family(string name) => SpellTableStub.GetById(SpellTable.Named(name).First().Id)!.Family;
@@ -82,6 +83,28 @@ internal static class ManaReserveTests
         var inputs = new ArbiterInputs(true, b.PendingSpellId != 0 || b.WantsVitalRecharge, wantCombat: true,
                                        wantLooting: false, wantSalvaging: false, wantNav: true, combatEngaged: true);
         return ActivityArbiter.Decide(in inputs);
+    }
+
+    // 2026-10-12, Drakkon (melee): a full rebuff spent mana down to 6%, under Stamina to Mana's cost.
+    private static void BuffWaitsForReserve()
+    {
+        var r = new Rig(mana: 300);   // in Magic stance: the buff path readies magic before this check
+        int bane = Id("Blade Bane VI");                 // level VI: cost 60 here
+        int reserve = r.B.ManaReserve();
+        Check.True(reserve > 0, $"a reserve for a melee character too ({reserve})");
+
+        Check.False(r.B.BuffWaitsForMana(bane, "Blade Bane"), "300/383: the buff goes");
+        Check.Eq(FakeHost.Casts.Count, 0, "nothing cast by the check");
+
+        r.V.CurrentMana = (uint)(reserve + 30);       // the buff (60) would leave it under the reserve
+        Check.True(r.B.BuffWaitsForMana(bane, "Blade Bane"), "the buff waits");
+        Check.Eq(FakeHost.Casts.Count, 1, "Stamina to Mana is cast instead");
+        Check.Eq(FamilyOfCast(0), Family("Stamina to Mana Self I"), $"it is Stamina to Mana ({NameOf(FakeHost.Casts[0].SpellId)})");
+
+        // Under even the lowest Stamina to Mana's cost (10) and the buff's: buffing waits, no cast.
+        var low = new Rig(mana: 5);
+        Check.True(low.B.BuffWaitsForMana(bane, "Blade Bane"), "5/383: buffing waits for regen");
+        Check.Eq(FakeHost.Casts.Count, 0, "nothing the server would refuse is sent");
     }
 
     private static void ReserveChoosesStaminaToMana()
