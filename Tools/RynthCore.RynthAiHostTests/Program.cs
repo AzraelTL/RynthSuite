@@ -51,6 +51,7 @@ internal static class Program
         var runner = new Runner();
         NativeLootTests.Register(runner);
         VTankLootTests.Register(runner);
+        PropertyDumpTests.Register(runner);
         T11LootTests.Register(runner);
         MagItemDescriberTests.Register(runner);
         ExpressionTests.Register(runner);
@@ -125,6 +126,8 @@ internal static class Program
         CorpseCloseTests.Register(runner);
         VTankHotkeyTests.Register(runner);
         SaveFailureTests.Register(runner);
+        DoorTests.Register(runner);
+        BlankLoadTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }

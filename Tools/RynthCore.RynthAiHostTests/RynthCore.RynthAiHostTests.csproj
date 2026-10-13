@@ -55,6 +55,10 @@
     <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\UI\Data\MetaLocation.cs" Link="Engine\MetaLocation.cs" />
     <!-- The Inventory panel's attribute filter rules and matching (pure; engine 2026-10-11). -->
     <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\Compatibility\InventoryAttributeFilter.cs" Link="Engine\InventoryAttributeFilter.cs" />
+    <!-- The engine's v84 GetObjectProperties record writer (pure), so the propertydump tests feed
+         RynthAi exactly what the engine sends (engine 2026-10-13). -->
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\Compatibility\PropertyWire.cs" Link="Engine\PropertyWire.cs" />
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\Compatibility\ObjectPropertyRecord.cs" Link="Engine\ObjectPropertyRecord.cs" />
   </ItemGroup>
 
   <ItemGroup>
