@@ -1,0 +1,146 @@
+// MiniRemoteContext.cs — Shared services for the Mini Remote's universal tabs (Quests, Pets) and
+// the VTank .usd importer. The universal half of the ILT Hub's IltHubContext (SilentKelpie's ILT
+// Hub; its Infinite Leaftide half went to the RynthILT plugin 2026-10-13, whose feature bits and
+// sections come through Ilt).
+//
+// Threading contract (as before):
+//   * Tick / OnChat run on the plugin pump thread and may call the host freely.
+//   * Render runs on the ImGui render thread and must NOT call AC actions directly. It calls
+//     Post(...) to run work on the next pump tick, or Confirm(...) to ask the player first (the
+//     confirmed action is then posted).
+using System;
+using System.Collections.Concurrent;
+using RynthCore.Plugin.RynthAi.LegacyUi;
+using RynthCore.PluginSdk;
+
+namespace RynthCore.Plugin.RynthAi.MiniRemote;
+
+/// <summary>A yes/no question waiting for the player (a modal over the Mini Remote).</summary>
+internal sealed class MiniRemoteConfirm
+{
+    public string Title = "Confirm";
+    public string Message = string.Empty;
+    public string YesLabel = "Yes";
+    /// <summary>Runs on the pump thread after the player clicks Yes.</summary>
+    public Action? OnYes;
+}
+
+internal sealed class MiniRemoteContext
+{
+    private readonly ConcurrentQueue<Action> _posted = new();
+    private readonly ConcurrentQueue<MiniRemoteConfirm> _confirms = new();
+    private readonly Func<LegacyUiSettings?> _settings;
+
+    public MiniRemoteContext(RynthCoreHost host, MiniRemoteState state, MiniRemoteStore store, MiniRemoteInventory inventory,
+                             IltClient ilt, Func<LegacyUiSettings?> settings)
+    {
+        Host = host;
+        State = state;
+        Store = store;
+        Inventory = inventory;
+        Ilt = ilt;
+        _settings = settings;
+    }
+
+    public RynthCoreHost Host { get; }
+    public MiniRemoteState State { get; }
+    public MiniRemoteStore Store { get; }
+    public MiniRemoteInventory Inventory { get; }
+
+    /// <summary>RynthILT's view (ILT world, feature bits, ILT sections); "not ILT" without RynthILT.</summary>
+    public IltClient Ilt { get; }
+
+    /// <summary>The live combat settings (rule lists the Pets tab / USD importer edit). Null before login.</summary>
+    public LegacyUiSettings? Settings => _settings();
+
+    /// <summary>Set by the controller when combat settings were edited and must be saved.</summary>
+    public Action? SaveCombatSettings;
+
+    /// <summary>Logged-in character name (resolved at login).</summary>
+    public string CharName = string.Empty;
+
+    /// <summary>
+    /// Shows the Mini Remote on one of its tabs (tab id; set by the controller). Any thread: it
+    /// only records the tab and the show request, which the next frame applies.
+    /// </summary>
+    public Action<string>? ShowTab;
+
+    /// <summary>Writes a local chat line (never sent to the server).</summary>
+    public void Chat(string text)
+    {
+        if (Host.HasWriteToChat) Host.WriteToChat(text, 1);
+    }
+
+    /// <summary>Queues work for the next pump tick (safe from the render thread).</summary>
+    public void Post(Action action) => _posted.Enqueue(action);
+
+    /// <summary>Asks the player to confirm before <paramref name="onYes"/> runs on the pump thread.</summary>
+    public void Confirm(string title, string message, Action onYes, string yesLabel = "Yes")
+        => _confirms.Enqueue(new MiniRemoteConfirm { Title = title, Message = message, OnYes = onYes, YesLabel = yesLabel });
+
+    /// <summary>Render thread: takes the next pending confirmation, if any.</summary>
+    public bool TryTakeConfirm(out MiniRemoteConfirm request) => _confirms.TryDequeue(out request!);
+
+    /// <summary>Pump thread: runs everything posted since the last tick.</summary>
+    public void DrainPosted()
+    {
+        int guard = 0;
+        while (guard++ < 64 && _posted.TryDequeue(out var a))
+        {
+            try { a(); }
+            catch (Exception ex) { RynthLog.Exception(LogCat.UI, ex, "[MiniRemote] posted action"); }
+        }
+    }
+
+    /// <summary>Elapsed-ms clock used for every timer.</summary>
+    public static long NowMs => Environment.TickCount64;
+}
+
+/// <summary>Text helpers the universal tabs share (the ILT Hub's IltParse.Duration).</summary>
+internal static class MiniRemoteText
+{
+    /// <summary>"ready", "45s", "3m 12s", "2h 5m 0s", "1d 4h 30m".</summary>
+    public static string Duration(TimeSpan span)
+    {
+        if (span <= TimeSpan.Zero) return "ready";
+        if (span.TotalDays >= 1) return $"{(int)span.TotalDays}d {span.Hours}h {span.Minutes}m";
+        if (span.TotalHours >= 1) return $"{span.Hours}h {span.Minutes}m {span.Seconds}s";
+        if (span.TotalMinutes >= 1) return $"{span.Minutes}m {span.Seconds}s";
+        return $"{span.Seconds}s";
+    }
+}
+
+/// <summary>The Mini Remote's own tab ids (RynthILT supplies the Infinite Leaftide ones).</summary>
+internal static class MiniRemoteTabs
+{
+    /// <summary>The Remote tab (the remote itself).</summary>
+    public const string Remote = "";
+    public const string Quests = "quests";
+    public const string Pets = "pets";
+
+    /// <summary>The universal tabs in tab-bar order (after Remote, before RynthILT's tabs).</summary>
+    public static readonly string[] Universal = { Quests, Pets };
+
+    public static string Label(string id) => id switch
+    {
+        Quests => "Quests",
+        Pets => "Pets",
+        _ => "Remote",
+    };
+
+    /// <summary>"quests" / "quest" / "pets" / "pet" → the tab id; null for anything else.</summary>
+    public static string? Parse(string? text) => (text ?? string.Empty).Trim().ToLowerInvariant() switch
+    {
+        "quests" or "quest" => Quests,
+        "pets" or "pet" => Pets,
+        _ => null,
+    };
+
+    /// <summary>Size of a universal tab's body (the old section window's default size).</summary>
+    public static System.Numerics.Vector2 Size(string id) => id switch
+    {
+        Quests => new System.Numerics.Vector2(700, 500),
+        Pets => new System.Numerics.Vector2(560, 580),
+        _ => new System.Numerics.Vector2(520, 440),
+    };
+}

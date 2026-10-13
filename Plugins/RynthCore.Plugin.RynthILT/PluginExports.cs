@@ -9,13 +9,38 @@ namespace RynthCore.Plugin.RynthILT;
 
 public static unsafe class PluginExports
 {
-    private static readonly RynthPluginRuntime<RynthILTPlugin> Runtime = new();
+    internal static readonly RynthPluginRuntime<RynthILTPlugin> Runtime = new();
+
+    // Typed interface for RynthAi (host GetPluginInterface, API v68): "RynthILT.Hub" v1, the ILT
+    // tabs and sections its Mini Remote hosts (Plugins/Shared/RynthIltHubApi.cs, HubInterface.cs).
+    // Fixed signature: void* (const char* iface, uint version).
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginQueryInterface", CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static IntPtr QueryInterface(IntPtr ifaceAnsi, uint version)
+    {
+        try
+        {
+            string iface = ifaceAnsi == IntPtr.Zero ? "" : Marshal.PtrToStringAnsi(ifaceAnsi) ?? "";
+            return HubInterface.Query(iface, version);
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginInit", CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int Init(RynthCoreApiNative* api) => Runtime.Init(api);
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginShutdown", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static void Shutdown() => Runtime.Shutdown();
+    public static void Shutdown()
+    {
+        // An exception escaping an UnmanagedCallersOnly export fail-fasts the client under NativeAOT.
+        try { Runtime.Shutdown(); } catch { }
+        try { HubInterface.Release(); } catch { }
+        foreach (IntPtr p in new[] { Interlocked.Exchange(ref _bountiesPtr, IntPtr.Zero), Interlocked.Exchange(ref _progressionPtr, IntPtr.Zero),
+                     Interlocked.Exchange(ref _statusPtr, IntPtr.Zero) })
+            if (p != IntPtr.Zero) Marshal.FreeCoTaskMem(p);
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginName", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static IntPtr GetName() => RynthILTPlugin.NamePointer;
@@ -36,6 +61,45 @@ public static unsafe class PluginExports
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnChatWindowText", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnChatWindowText(IntPtr textUtf16, int chatType, IntPtr eatFlag)
         => Runtime.OnChatWindowText(textUtf16, chatType, eatFlag);
+
+    // The ILT Hub's floating windows (Games HUD, confirmations) in the engine's ImGui frame.
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginRender", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void Render() => Runtime.OnRender();
+
+    /// <summary>The engine calls this instead of RynthPluginRender while its ImGui shell is off.</summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginRenderOverlay", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void RenderOverlay()
+    {
+        try { Runtime.Plugin?.OnRenderOverlay(); }
+        catch { /* an exception crossing UnmanagedCallersOnly would fail-fast the client */ }
+    }
+
+    /// <summary>
+    /// Engine panels drawn by RynthILT (render thread): "guardian" is the engine's Guardian ILT
+    /// panel (RynthCore's GuardianFace); ":popout" is added when it is popped out into a window of
+    /// its own, and RynthILT draws in the engine's current context either way. The panel is
+    /// user-sized: want echoes the size given. 1 = drawn, 0 = not ready / unknown surface.
+    /// </summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginRenderEmbed", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int RenderEmbed(byte* surface, float width, float height, float* wantWidth, float* wantHeight)
+    {
+        try
+        {
+            if (surface == null) return 0;
+            ReadOnlySpan<byte> name = MemoryMarshal.CreateReadOnlySpanFromNullTerminated(surface);
+            if (name.EndsWith(":popout"u8)) name = name[..^":popout"u8.Length];
+            if (!name.SequenceEqual("guardian"u8)) return 0;
+            var plugin = Runtime.Plugin;
+            if (plugin == null || !plugin.RenderEmbeddedGuardian()) return 0;
+            if (wantWidth != null) *wantWidth = width;
+            if (wantHeight != null) *wantHeight = height;
+            return 1;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
 
     // "/ilt ..." commands, and noticing a /bounty the player typed (its reply is never eaten).
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnChatBarEnter", CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -77,6 +141,86 @@ public static unsafe class PluginExports
             Runtime.Plugin?.Bounties?.Command(text);
         }
         catch { }
+    }
+
+    // ── The ILT Hub for the engine (the Skills panel's Progression tab, IltInfo) ─────────
+
+    private static IntPtr _progressionPtr = IntPtr.Zero;
+
+    /// <summary>
+    /// The Skills panel's Progression tab (ILT augmentations / enlightenment / the attribute raiser),
+    /// as RynthAi's RynthPluginGetProgressionJson was: {"available":false} until the Hub exists and
+    /// off ILT. UTF-8; the previous reply stays valid until the next call. Engine pump thread only.
+    /// </summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthILTGetProgressionJson", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static IntPtr GetProgressionJson()
+    {
+        try
+        {
+            string json = Runtime.Plugin?.Hub?.BuildProgressionJson() ?? "{\"available\":false}";
+            return Utf8Swap(ref _progressionPtr, json);
+        }
+        catch { return IntPtr.Zero; }
+    }
+
+    /// <summary>
+    /// One command from the engine (UTF-8): "prog ..." (the Progression tab's edits) or an ILT
+    /// "/ra" verb without "/ra" ("hub refresh", "guardian handin"). Engine pump thread.
+    /// </summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthILTCommand", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void Command(IntPtr utf8Text)
+    {
+        try
+        {
+            if (utf8Text == IntPtr.Zero) return;
+            string? text = Marshal.PtrToStringUTF8(utf8Text);
+            if (string.IsNullOrWhiteSpace(text) || text.Length > 512) return;
+            Runtime.Plugin?.RunEngineCommand(text);
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// (action, value) from the engine's plugin-command broker (Host.SendPluginCommand): "prog" with
+    /// the Progression tab's arguments (RynthAi forwards an older engine's "prog" here), or an ILT
+    /// verb. Copied and run on RynthILT's next tick.
+    /// </summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginApplyRemoteCommand", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void ApplyRemoteCommand(IntPtr actionAnsi, IntPtr valueAnsi)
+    {
+        try
+        {
+            string action = actionAnsi != IntPtr.Zero ? (Marshal.PtrToStringAnsi(actionAnsi) ?? string.Empty) : string.Empty;
+            string value = valueAnsi != IntPtr.Zero ? (Marshal.PtrToStringAnsi(valueAnsi) ?? string.Empty) : string.Empty;
+            if (action.Length == 0 || action.Length + value.Length > 512) return;
+            Runtime.Plugin?.EnqueueRemoteCommand(action, value);
+        }
+        catch { }
+    }
+
+    private static IntPtr _statusPtr = IntPtr.Zero;
+
+    /// <summary>
+    /// What RynthILT knows about the world (UTF-8 JSON, previous reply valid until the next call):
+    /// {"loaded":true,"ilt":bool,"forced":bool,"available":bool,"world":"..."}. "ilt" is RynthILT's
+    /// own verdict (its server list or this character's "Treat this world as ILT"); the engine's
+    /// IltInfo adds it to its own detection. Engine pump thread.
+    /// </summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthILTGetStatusJson", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static IntPtr GetStatusJson()
+    {
+        try
+        {
+            var hub = Runtime.Plugin?.Hub;
+            string json = hub == null
+                ? "{\"loaded\":true,\"ilt\":false,\"forced\":false,\"available\":false,\"world\":\"\"}"
+                : "{\"loaded\":true,\"ilt\":" + (hub.Options.IsIltLikeWorld ? "true" : "false")
+                  + ",\"forced\":" + (hub.ForceIltWorld ? "true" : "false")
+                  + ",\"available\":" + (hub.Available ? "true" : "false")
+                  + ",\"world\":\"" + RynthCore.Plugin.RynthILT.Hub.IltStyle.JsonEscape(hub.Options.WorldName) + "\"}";
+            return Utf8Swap(ref _statusPtr, json);
+        }
+        catch { return IntPtr.Zero; }
     }
 
     private static IntPtr Utf8Swap(ref IntPtr slot, string json)

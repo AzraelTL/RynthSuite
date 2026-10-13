@@ -1239,7 +1239,7 @@ internal sealed class LegacyMetaUi
             }
 
             lock (_settings.MetaRulesLock)
-                RynthCore.Plugin.RynthAi.Diagnostics.DataWriteGuard.TrySave("the meta", path,
+                RynthCore.Plugin.Shared.DataWriteGuard.TrySave("the meta", path,
                     () => AfFileWriter.Save(path, _settings.MetaRules, _settings.EmbeddedNavs));
         }
         catch { }
@@ -1260,7 +1260,7 @@ internal sealed class LegacyMetaUi
             bool saved;
             string why;
             lock (_settings.MetaRulesLock)
-                saved = RynthCore.Plugin.RynthAi.Diagnostics.DataWriteGuard.TrySave("the meta", filePath,
+                saved = RynthCore.Plugin.Shared.DataWriteGuard.TrySave("the meta", filePath,
                     () => AfFileWriter.Save(filePath, _settings.MetaRules, _settings.EmbeddedNavs), out why);
             if (!saved)
             {

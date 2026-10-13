@@ -92,20 +92,20 @@ internal sealed class PetManager
     private static long NowMs => Clock();
 
     /// <summary>
-    /// Optional ILT Hub hook: when it returns true an EMPTY essence is used anyway, because
-    /// the server's Summon Essence Refill Charm refills it from banked pyreals on use.
+    /// Optional Mini Remote Pets-tab hook: when it returns true an EMPTY essence is used anyway, because
+    /// the server's Summon Essence Refill Charm (ACECustom) refills it from banked pyreals on use.
     /// Null (default) keeps the retail behaviour (spirit refill or park).
     /// </summary>
     public Func<bool>? AllowSummonOnEmpty { get; set; }
 
     /// <summary>
-    /// Optional ILT Hub hook: while it returns true no combat summon is started (e.g. the
+    /// Optional Pets-tab hook: while it returns true no combat summon is started (e.g. the
     /// healing-pet helper has its heal pet out). Null (default) never holds.
     /// </summary>
     public Func<bool>? HoldSummons { get; set; }
 
     /// <summary>
-    /// Optional ILT Hub hook, called when a pet already holds the slot and monsters are near.
+    /// Optional Pets-tab hook, called when a pet already holds the slot and monsters are near.
     /// Returns true after dismissing a non-combat (cosmetic) pet so a combat pet can follow.
     /// Null (default) leaves whatever pet is out alone.
     /// </summary>

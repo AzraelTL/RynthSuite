@@ -29,7 +29,7 @@ internal static class AfFileWriter
         IReadOnlyDictionary<string, List<string>> embeddedNavs)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(filePath) ?? ".");
-        RynthCore.Plugin.RynthAi.Diagnostics.DataWriteGuard.PrepareOverwrite(filePath);   // a read-only .af can't be overwritten
+        RynthCore.Plugin.Shared.DataWriteGuard.PrepareOverwrite(filePath);   // a read-only .af can't be overwritten
         using var writer = new StreamWriter(filePath, false);
         WriteContent(writer, rules, embeddedNavs);
     }

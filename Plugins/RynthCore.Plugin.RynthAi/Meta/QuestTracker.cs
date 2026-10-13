@@ -66,14 +66,18 @@ internal sealed class QuestTracker
     /// <summary>UTC time the last refresh finished with data (MinValue = never).</summary>
     public DateTime LastRefreshUtc { get; private set; } = DateTime.MinValue;
 
-    /// <summary>Last refresh outcome text for the ILT Hub ("12 flags", "rate limited", ...).</summary>
+    /// <summary>Last refresh outcome text for the Mini Remote's Quests tab ("12 flags", "rate limited", ...).</summary>
     public string LastStatus { get; private set; } = "not refreshed";
 
     /// <summary>Number of cached flags.</summary>
     public int Count => _flags.Count;
 
-    /// <summary>Raised on the pump thread when a refresh ends. The ILT Hub reads Disabled and Count.</summary>
-    public event Action? RefreshCompleted;
+    /// <summary>
+    /// Bumped on the pump thread each time a refresh ends (0 = none yet). RynthILT polls it through
+    /// RynthAi.Hub QuestStatus to read Disabled and Count (a counter, not an event: nothing to
+    /// unsubscribe across plugin reloads).
+    /// </summary>
+    public int RefreshGeneration { get; private set; }
 
     public QuestTracker(RynthCoreHost host) => _host = host;
 
@@ -85,7 +89,7 @@ internal sealed class QuestTracker
 
     /// <summary>
     /// Issues /myquests. <paramref name="quiet"/> asks <see cref="OnChatLine"/> to report
-    /// those lines as eatable so the ILT Hub can hide its own poll.
+    /// those lines as eatable so the Quests tab can hide its own poll.
     /// </summary>
     public void Refresh(bool quiet)
     {
@@ -205,11 +209,10 @@ internal sealed class QuestTracker
             Disabled = false;
             LastRefreshUtc = DateTime.UtcNow;
         }
-        try { RefreshCompleted?.Invoke(); }
-        catch (Exception ex) { _host.Log($"[RynthAi] QuestTracker RefreshCompleted threw: {ex.Message}"); }
+        RefreshGeneration++;
     }
 
-    /// <summary>Copy of every cached record for the ILT Hub quest list.</summary>
+    /// <summary>Copy of every cached record for the Quests tab.</summary>
     public QuestRecord[] Snapshot() => _flags.Values.ToArray();
 
     /// <summary>Returns true if the key exists in the cached quest flag list.</summary>

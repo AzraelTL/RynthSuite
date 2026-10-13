@@ -2,12 +2,12 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using RynthCore.Install;
-using RynthCore.Plugin.RynthAi.Diagnostics;
+using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthAi;
 
 // Players reported metas and navs "not saving" and the plugin folders being "read only"
-// (2026-10-13). Every save now reports a failure (Diagnostics/DataWriteGuard.cs); this is the
+// (2026-10-13). Every save now reports a failure (Plugins/Shared/DataWriteGuard.cs); this is the
 // startup self-check that finds a folder the client can't write before anything is lost, and
 // the tick that posts those lines once the character is in game.
 public sealed partial class RynthAiPlugin

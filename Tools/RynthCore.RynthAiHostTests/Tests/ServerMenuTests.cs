@@ -13,21 +13,19 @@ internal static class ServerMenuTests
         r.Add("server menu: sections and items parse in order", ParsesSections);
         r.Add("server menu: malformed lines are skipped, never thrown", SkipsMalformed);
         r.Add("server menu: tab features name the Mini Remote tab", TabFeature);
-        r.Add("mini remote tabs: Quests and Pets are universal and first; Guardian is ILT's panel", UniversalTabs);
+        r.Add("mini remote tabs: Quests and Pets are RynthAi's and first; the ILT tabs come from RynthILT", UniversalTabs);
     }
 
     private static void UniversalTabs()
     {
-        var tabs = RynthCore.Plugin.RynthAi.IltHub.IltSections.Tabs;
-        Check.Eq(tabs[0], RynthCore.Plugin.RynthAi.IltHub.IltSection.Quests, "Quests leads the tab bar");
-        Check.Eq(tabs[1], RynthCore.Plugin.RynthAi.IltHub.IltSection.Pet, "Pets second");
-        int universal = 0;
-        foreach (var t in tabs)
-            if (RynthCore.Plugin.RynthAi.IltHub.IltSections.IsUniversal(t)) universal++;
-        Check.Eq(universal, 2, "only Quests and Pets are universal");
-        Check.True(!RynthCore.Plugin.RynthAi.IltHub.IltSections.IsUniversal(RynthCore.Plugin.RynthAi.IltHub.IltSection.Guardian), "Guardian is ILT only");
-        Check.True(!RynthCore.Plugin.RynthAi.IltHub.IltSections.IsTab(RynthCore.Plugin.RynthAi.IltHub.IltSection.Guardian), "Guardian is a panel, not a tab");
-        Check.True(!RynthCore.Plugin.RynthAi.IltHub.IltSections.IsUniversal(RynthCore.Plugin.RynthAi.IltHub.IltSection.Character), "the Character tab is ILT's");
+        var tabs = RynthCore.Plugin.RynthAi.MiniRemote.MiniRemoteTabs.Universal;
+        Check.Eq(tabs.Length, 2, "RynthAi's own tabs: Quests and Pets (the ILT tabs are RynthILT's)");
+        Check.Eq(tabs[0], "quests", "Quests leads the tab bar");
+        Check.Eq(tabs[1], "pets", "Pets second");
+        Check.Eq(RynthCore.Plugin.RynthAi.MiniRemote.MiniRemoteTabs.Parse("Pet"), "pets", "aliases parse");
+        Check.Null(RynthCore.Plugin.RynthAi.MiniRemote.MiniRemoteTabs.Parse("banking"), "an ILT tab isn't RynthAi's");
+        Check.Null(RynthCore.Plugin.RynthAi.MiniRemote.MiniRemoteTabs.Parse("guardian"), "nor the Guardian panel");
+        Check.Eq(RynthCore.Plugin.RynthAi.MiniRemote.MiniRemoteTabs.Remote, "", "the Remote tab's id is empty");
     }
 
     private static void ParsesSections()

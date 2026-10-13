@@ -26,6 +26,8 @@
     <RynthPluginDependency Include="RynthNav" Optional="true" />
     <RynthPluginDependency Include="RynthLua" Optional="true" />
     <RynthPluginDependency Include="RynthNet" Optional="true" />
+    <!-- The Infinite Leaftide features (the Mini Remote's ILT tabs) since 2026-10-13. -->
+    <RynthPluginDependency Include="RynthILT" Optional="true" />
   </ItemGroup>
 
   <ItemGroup>
@@ -56,6 +58,13 @@
     <Compile Include="..\Shared\TrackerSessionStore.cs" Link="Shared\TrackerSessionStore.cs" />
     <Compile Include="..\Shared\SessionStats.cs" Link="Shared\SessionStats.cs" />
     <Compile Include="..\Shared\SessionStatsTracker.cs" Link="Shared\SessionStatsTracker.cs" />
+    <!-- ImGui.NET bound to the engine's cimgui (RynthILT links the same file). -->
+    <Compile Include="..\Shared\ImGuiNativeBinding.cs" Link="Shared\ImGuiNativeBinding.cs" />
+    <!-- Infinite Leaftide: RynthILT.Hub (its tabs in the Mini Remote) and RynthAi.Hub (what RynthILT borrows). -->
+    <Compile Include="..\Shared\RynthIltHubApi.cs" Link="Shared\RynthIltHubApi.cs" />
+    <Compile Include="..\Shared\RynthAiHubApi.cs" Link="Shared\RynthAiHubApi.cs" />
+    <!-- Save failures said in chat with the reason and the fix (2026-10-13; RynthILT links it too). -->
+    <Compile Include="..\Shared\DataWriteGuard.cs" Link="Shared\DataWriteGuard.cs" />
   </ItemGroup>
 
   <ItemGroup>

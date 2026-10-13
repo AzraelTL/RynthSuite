@@ -16,7 +16,9 @@ public static unsafe class PluginExports
     // Typed interfaces for other plugins (host GetPluginInterface, API v68): "RynthAi.Script" v1
     // for RynthLua, "RynthAi.Status" v1 for RynthNet (the bot state it shares with the other clients),
     // "RynthAi.Activity" v1 for RynthSort (what the bot is doing, so pack moves stay out of its way),
-    // "RynthAi.Combat" v1 for RynthLua (a script choosing attack and heal spells, Shared/RynthAiCombatApi.cs).
+    // "RynthAi.Combat" v1 for RynthLua (a script choosing attack and heal spells, Shared/RynthAiCombatApi.cs),
+    // "RynthAi.Hub" v1 for RynthILT (the Mini Remote hosting its ILT tabs, /myquests, spell names, loot
+    // matching, the .usd importer, session stats; Shared/RynthAiHubApi.cs, HubInterface.cs).
     // Fixed signature: void* (const char* iface, uint version).
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginQueryInterface", CallConvs = new[] { typeof(CallConvCdecl) })]
     private static IntPtr QueryInterface(IntPtr ifaceAnsi, uint version)
@@ -27,6 +29,7 @@ public static unsafe class PluginExports
             IntPtr table = ScriptInterface.Query(iface, version);
             if (table == IntPtr.Zero) table = StatusInterface.Query(iface, version);
             if (table == IntPtr.Zero) table = ActivityInterface.Query(iface, version);
+            if (table == IntPtr.Zero) table = HubInterface.Query(iface, version);
             return table != IntPtr.Zero ? table : CombatHookInterface.Query(iface, version);
         }
         catch
@@ -50,6 +53,8 @@ public static unsafe class PluginExports
         catch (Exception ex) { LogShutdownError(plugin, "StatusInterface.Release", ex); }
         try { ActivityInterface.Release(); }
         catch (Exception ex) { LogShutdownError(plugin, "ActivityInterface.Release", ex); }
+        try { HubInterface.Release(); }   // Version 0; the table stays (RynthILT's render thread may hold it)
+        catch (Exception ex) { LogShutdownError(plugin, "HubInterface.Release", ex); }
         try { CombatHookInterface.Shutdown(); }   // the hook goes native at once (RynthLua re-claims after a reload)
         catch (Exception ex) { LogShutdownError(plugin, "CombatHookInterface.Shutdown", ex); }
         try
@@ -97,7 +102,7 @@ public static unsafe class PluginExports
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginTick", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void Tick() => Runtime.OnTick();
 
-    // Local ImGui windows (ILT Hub, HUDs, translator, item info, nav overlay). The engine
+    // Local ImGui windows (Mini Remote, HUDs, translator, item info, nav overlay). The engine
     // calls this when the export exists; the main panels stay on the engine side.
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginRender", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void Render() => Runtime.OnRender();
@@ -113,9 +118,9 @@ public static unsafe class PluginExports
     /// <summary>
     /// Engine dashboard drawers (RynthCore 2026.10.5.21+): draws the named UTF-8 surface into the
     /// engine's current ImGui window on the render thread and reports the size it wants.
-    /// Surfaces: "miniremote" (the RynthAi dashboard's Mini Remote drawer), "miniremote-window"
-    /// (the engine's Mini Remote window, which hosts the remote with its Toggles and ILT tabs)
-    /// and "guardian" (RynthCore 2026.10.5.29+: the engine's Guardian ILT panel).
+    /// Surfaces: "miniremote" (the RynthAi dashboard's Mini Remote drawer) and "miniremote-window"
+    /// (the engine's Mini Remote window, which hosts the remote with its Toggles, its tabs and
+    /// RynthILT's ILT tabs). The Guardian ILT panel ("guardian") is RynthILT's since 2026-10-13.
     /// RynthCore 2026.10.5.30+ adds ":popout" to the name when the panel is popped out into its
     /// own window, whose ImGui context is not the one in Host.ImGuiContext; the surfaces draw
     /// in the engine's current context either way (RenderEmbedded*).
@@ -131,17 +136,9 @@ public static unsafe class PluginExports
             if (name.EndsWith(":popout"u8)) name = name[..^":popout"u8.Length];
             var plugin = Runtime.Plugin;
             if (plugin == null) return 0;
-            System.Numerics.Vector2 want;
-            if (name.SequenceEqual("guardian"u8))
-            {
-                if (!plugin.RenderEmbeddedGuardian(new System.Numerics.Vector2(width, height), out want)) return 0;
-            }
-            else
-            {
-                bool window = name.SequenceEqual("miniremote-window"u8);
-                if (!window && !name.SequenceEqual("miniremote"u8)) return 0;
-                if (!plugin.RenderEmbeddedMiniRemote(window, out want)) return 0;
-            }
+            bool window = name.SequenceEqual("miniremote-window"u8);
+            if (!window && !name.SequenceEqual("miniremote"u8)) return 0;
+            if (!plugin.RenderEmbeddedMiniRemote(window, out System.Numerics.Vector2 want)) return 0;
             if (wantWidth != null) *wantWidth = want.X;
             if (wantHeight != null) *wantHeight = want.Y;
             return 1;
@@ -720,44 +717,21 @@ public static unsafe class PluginExports
     private static IntPtr _progressionPtr = IntPtr.Zero;
 
     /// <summary>
-    /// Skills panel Progression tab (ILT augmentations / enlightenment). Same contract as
-    /// RynthPluginGetPatrolInfoJson: one static buffer, valid until the next call; the engine
-    /// polls it from its pump thread only.
+    /// The Skills panel's Progression tab for an engine that still asks RynthAi: the planners went
+    /// to RynthILT (2026-10-13), so this passes on RynthILT's RynthILTGetProgressionJson
+    /// ({"available":false} without RynthILT). Same contract as before: one static buffer, valid
+    /// until the next call; the engine polls it from its pump thread only. (The Charms Tracking
+    /// export, RynthPluginGetCharmsJson, for engines up to 2026.10.5.35 is gone with the charms.)
     /// </summary>
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetProgressionJson", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static IntPtr GetProgressionJson()
     {
         try
         {
-            string json = Runtime.Plugin?.BuildProgressionJson() ?? "{\"available\":false}";
-            IntPtr newPtr = Marshal.StringToHGlobalAnsi(json);
+            var host = Runtime.Plugin?.HostForIlt;
+            string? json = host is { HasGetPluginExportJson: true } h ? h.GetPluginExportJson("RynthILT", "RynthILTGetProgressionJson") : null;
+            IntPtr newPtr = Marshal.StringToHGlobalAnsi(string.IsNullOrEmpty(json) ? "{\"available\":false}" : json);
             IntPtr oldPtr = Interlocked.Exchange(ref _progressionPtr, newPtr);
-            if (oldPtr != IntPtr.Zero)
-                Marshal.FreeHGlobal(oldPtr);
-            return newPtr;
-        }
-        catch
-        {
-            return IntPtr.Zero;
-        }
-    }
-
-    private static IntPtr _charmsPtr = IntPtr.Zero;
-
-    /// <summary>
-    /// ACECustom registry charms (acquired / active / server state) for engines up to 2026.10.5.35,
-    /// whose Settings panel has a Charms Tracking tab; newer engines leave charms to the Mini
-    /// Remote's Charms tab. Same contract as RynthPluginGetProgressionJson: one static buffer,
-    /// valid until the next call; the engine polls it from its pump thread only.
-    /// </summary>
-    [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetCharmsJson", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetCharmsJson()
-    {
-        try
-        {
-            string json = Runtime.Plugin?.BuildCharmsJson() ?? "{\"available\":false}";
-            IntPtr newPtr = Marshal.StringToHGlobalAnsi(json);
-            IntPtr oldPtr = Interlocked.Exchange(ref _charmsPtr, newPtr);
             if (oldPtr != IntPtr.Zero)
                 Marshal.FreeHGlobal(oldPtr);
             return newPtr;

@@ -1,10 +1,11 @@
 // MiniRemoteHud.cs — The Mini Remote (UtilityBelt-style) for RynthAi. Render thread only.
 //
 // One window with tabs: Remote (the sections below), the universal tabs Quests and Pets (every
-// world), and on ILT worlds the ILT tabs Character, Banking, Gear and Games (IltHubUi draws
-// their bodies; an ILT tab shows once the server reports its feature on). The tab bar's
+// world, MiniRemote/), and on Infinite Leaftide the RynthILT plugin's ILT tabs (Character,
+// Banking, Gear, Charms, Games: RynthILT.Hub GetTabs / RenderTab through IltClient; an ILT tab
+// shows once the server reports its feature on, and never without RynthILT). The tab bar's
 // selection is saved (HudState.MiniRemoteTab) and "/ra hub open <section>" or RynthCore's
-// dashboard switch it (RequestTab). The Guardian (ILT only) and Bounties are RynthCore ILT
+// dashboard switch it (RequestTab). The Guardian and Bounties are RynthILT's RynthCore ILT
 // panels (the bar's ILT button).
 // Right-click on the remote: "Character" (Spells, Quests, Pets, Skills, Inventory, Item Count,
 // Inventory HUDs: windows every server has), then "Server: <name>", i.e. the installed server
@@ -13,7 +14,7 @@
 // The V/H button stacks the sections (vertical) or lays them out in three columns (horizontal).
 //
 // Remote sections (each can be hidden from the Options menu):
-//   Stats    session time and per-hour XP / luminance / kills / coins / pyreals (ILT rates)
+//   Stats    session time and per-hour XP / luminance / kills, plus coins / pyreals (RynthILT's rates on ILT)
 //   Target   the creature combat is attacking: name, health bar, distance
 //   Pet      the summon that is out (health bar, time left), else the next combat essence and
 //            whether it is ready
@@ -22,10 +23,10 @@
 //            inventory or the RynthCore Inventory window drop straight into a slot. Ctrl+wheel
 //            over the grid (or Options > Slot size) grows / shrinks the boxes.
 //   Toggles  macro and subsystem switches (same as the dashboard buttons; not in the drawer)
-//   Bank     ILT bank balances (pyreals, luminance, keys, coins)
+//   Bank     ILT bank balances (pyreals, luminance, keys, coins; drawn by RynthILT)
 //   Rebuff   force rebuff / cancel rebuff
 //   Translate chat translator on/off and the receive <-> send language swap
-//   Guardian the last Temple guardian answer with a Give button (only while it is recent)
+//   Guardian the last Temple guardian answer with a Give button (only while it is recent; RynthILT)
 // All game actions are posted to the pump thread.
 //
 // RenderEmbedded draws the same sections and Options menu inside the engine's RynthAi dashboard
@@ -41,8 +42,9 @@ using System.Linq;
 using System.Numerics;
 using System.Threading;
 using ImGuiNET;
-using RynthCore.Plugin.RynthAi.IltHub;
 using RynthCore.Plugin.RynthAi.LegacyUi;
+using RynthCore.Plugin.RynthAi.MiniRemote;
+using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthAi.Huds;
 
@@ -77,8 +79,11 @@ internal sealed class MiniRemoteHud
     private bool _onRemoteTab = true;
     // The Options button was clicked this frame (the popup opens at window level).
     private bool _openOptions;
-    // The ILT tabs offered this frame (reused, so a frame doesn't allocate).
-    private readonly List<IltSection> _tabs = new();
+    /// <summary>One tab after Remote: a universal one (drawn here) or RynthILT's.</summary>
+    private readonly record struct TabEntry(string Id, string Label, Vector2 Size, bool Ilt);
+
+    // The tabs offered this frame (reused, so a frame doesn't allocate).
+    private readonly List<TabEntry> _tabs = new();
 
     public MiniRemoteHud(HudController hud) => _hud = hud;
 
@@ -86,7 +91,7 @@ internal sealed class MiniRemoteHud
     public void OnHidden() => _rescueChecked = false;
 
     /// <summary>
-    /// Switches to tab <paramref name="tab"/> ("" = the remote, else an ILT tab id) on the next
+    /// Switches to tab <paramref name="tab"/> ("" = the remote, else a tab id) on the next
     /// frame the tab bar draws. Any thread.
     /// </summary>
     public void RequestTab(string tab)
@@ -113,7 +118,7 @@ internal sealed class MiniRemoteHud
         if (!visible) { ImGui.End(); return; }
         UiPlacement.RescueOncePerShow(ref _rescueChecked);
 
-        RenderBody(s, _hud.Hub(), allowTabs: true);
+        RenderBody(s, _hud.Remote(), allowTabs: true);
 
         // Right-click on the remote opens the Character / server menu, unless a slot's own menu is
         // open (the ILT tabs have their own right-click menus).
@@ -141,7 +146,7 @@ internal sealed class MiniRemoteHud
         ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(4, 3));
         try
         {
-            float width = RenderBody(s, _hud.Hub(), allowTabs: !InDrawer);
+            float width = RenderBody(s, _hud.Remote(), allowTabs: !InDrawer);
 
             if (_onRemoteTab && _slotMenuIndex < 0 && ImGui.IsWindowHovered(ImGuiHoveredFlags.ChildWindows) && ImGui.IsMouseReleased(ImGuiMouseButton.Right))
                 ImGui.OpenPopup(MenuPopup);
@@ -163,22 +168,24 @@ internal sealed class MiniRemoteHud
     // ── Tabs ────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// The tab bar (when <paramref name="allowTabs"/>: the universal tabs on every world, the ILT
-    /// tabs on ILT worlds) and the selected tab: the remote, or a tab's body in a child of its
+    /// The tab bar (when <paramref name="allowTabs"/>: the universal tabs on every world, RynthILT's
+    /// tabs on Infinite Leaftide) and the selected tab: the remote, or a tab's body in a child of its
     /// fixed size. Returns the width the content wants (never narrower than the tab bar's labels).
     /// </summary>
-    private float RenderBody(HudState s, IltHubController? hub, bool allowTabs)
+    private float RenderBody(HudState s, MiniRemoteController? remote, bool allowTabs)
     {
         _onRemoteTab = true;
         _tabs.Clear();
-        if (allowTabs && hub != null)
+        if (allowTabs && remote != null)
         {
-            foreach (IltSection section in IltSections.Tabs)
-                if (hub.TabShown(section)) _tabs.Add(section);
+            foreach (string id in MiniRemoteTabs.Universal)
+                _tabs.Add(new TabEntry(id, MiniRemoteTabs.Label(id), MiniRemoteTabs.Size(id), Ilt: false));
+            foreach (IltTabInfo t in remote.Ilt.Tabs())
+                if (t.Shown) _tabs.Add(new TabEntry(t.Id, t.Label, new Vector2(t.Width, t.Height), Ilt: true));
         }
         if (_tabs.Count == 0)
         {
-            RenderRemote(s, hub);
+            RenderRemote(s, remote);
             return EmbeddedWidth(s);
         }
 
@@ -192,25 +199,24 @@ internal sealed class MiniRemoteHud
         _onRemoteTab = false;
         if (ImGui.BeginTabBar("##mrtabs", ImGuiTabBarFlags.FittingPolicyScroll | ImGuiTabBarFlags.NoTooltip))
         {
-            if (BeginTab(RemoteTabLabel, TabFlags(IltSections.RemoteTab, pending)))
+            if (BeginTab(RemoteTabLabel, TabFlags(MiniRemoteTabs.Remote, pending)))
             {
                 _onRemoteTab = true;
-                s.MiniRemoteTab = IltSections.RemoteTab;
-                RenderRemote(s, hub);
+                s.MiniRemoteTab = MiniRemoteTabs.Remote;
+                RenderRemote(s, remote);
                 width = Math.Max(width, EmbeddedWidth(s));
                 ImGui.EndTabItem();
             }
-            foreach (IltSection section in _tabs)
+            foreach (TabEntry tab in _tabs)
             {
-                string id = IltSections.TabId(section);
-                if (!BeginTab(TabLabels[(int)section], TabFlags(id, pending))) continue;
-                s.MiniRemoteTab = id;
-                Vector2 size = IltHubUi.TabSize(section);
+                if (!BeginTab(TabLabel(tab), TabFlags(tab.Id, pending))) continue;
+                s.MiniRemoteTab = tab.Id;
                 // The tab draws into a child of its own size; tables in it scroll inside it.
-                ImGui.BeginChild(TabBodyIds[(int)section], size, ImGuiChildFlags.None, ImGuiWindowFlags.None);
-                hub!.RenderTab(section);
+                ImGui.BeginChild(TabBodyId(tab.Id), tab.Size, ImGuiChildFlags.None, ImGuiWindowFlags.None);
+                bool drawn = tab.Ilt ? remote!.Ilt.RenderTab(tab.Id) : remote!.RenderTab(tab.Id);
+                if (!drawn) ImGui.TextDisabled(tab.Ilt ? "RynthILT isn't drawing this tab (not loaded, or not ready yet)." : "Not ready.");
                 ImGui.EndChild();
-                width = Math.Max(width, size.X);
+                width = Math.Max(width, tab.Size.X);
                 ImGui.EndTabItem();
             }
             ImGui.EndTabBar();
@@ -218,17 +224,23 @@ internal sealed class MiniRemoteHud
         return width;
     }
 
-    // Tab labels as NUL-terminated UTF-8 and the tab body child ids, indexed by (int)IltSection,
-    // built once so the tab bar doesn't allocate per frame.
+    // Tab labels as NUL-terminated UTF-8 and the tab body child ids, built once per tab so the tab
+    // bar doesn't allocate per frame (RynthILT's tabs arrive by id at run time).
     private static readonly byte[] RemoteTabLabel = Utf8Z("Remote##mrtab");
-    private static readonly byte[][] TabLabels = BuildPerSection(s => Utf8Z(IltSections.Label(s) + "##mrtab"));
-    private static readonly string[] TabBodyIds = BuildPerSection(s => "##mrtabbody_" + IltSections.TabId(s));
+    private readonly Dictionary<string, byte[]> _tabLabels = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _tabBodyIds = new(StringComparer.Ordinal);
 
-    private static T[] BuildPerSection<T>(Func<IltSection, T> make)
+    private byte[] TabLabel(TabEntry tab)
     {
-        var result = new T[(int)IltSection.Guardian + 1];
-        foreach (IltSection section in IltSections.Tabs) result[(int)section] = make(section);
-        return result;
+        string key = tab.Label + "##mrtab";
+        if (!_tabLabels.TryGetValue(key, out byte[]? label)) _tabLabels[key] = label = Utf8Z(key);
+        return label;
+    }
+
+    private string TabBodyId(string id)
+    {
+        if (!_tabBodyIds.TryGetValue(id, out string? body)) _tabBodyIds[id] = body = "##mrtabbody_" + id;
+        return body;
     }
 
     private static byte[] Utf8Z(string text)
@@ -258,17 +270,17 @@ internal sealed class MiniRemoteHud
     {
         var style = ImGui.GetStyle();
         float w = ImGui.CalcTextSize("Remote").X + style.FramePadding.X * 2f;
-        foreach (IltSection section in _tabs)
-            w += style.ItemInnerSpacing.X + ImGui.CalcTextSize(IltSections.Label(section)).X + style.FramePadding.X * 2f;
+        foreach (TabEntry tab in _tabs)
+            w += style.ItemInnerSpacing.X + ImGui.CalcTextSize(tab.Label).X + style.FramePadding.X * 2f;
         return w;
     }
 
     /// <summary>The Remote tab: the [V/H] [Options] row, then the sections in the chosen layout.</summary>
-    private void RenderRemote(HudState s, IltHubController? hub)
+    private void RenderRemote(HudState s, MiniRemoteController? remote)
     {
         RenderHeaderRow(s);
-        if (s.MiniRemoteHorizontal) RenderHorizontal(s, hub);
-        else RenderVertical(s, hub);
+        if (s.MiniRemoteHorizontal) RenderHorizontal(s, remote);
+        else RenderVertical(s, remote);
     }
 
     /// <summary>In the dashboard drawer (not the floating window or the engine's Mini Remote window).</summary>
@@ -308,11 +320,11 @@ internal sealed class MiniRemoteHud
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Mini Remote settings: sections, layout, slot size.\nRight-click the remote for the Character and server windows.");
     }
 
-    private void RenderVertical(HudState s, IltHubController? hub)
+    private void RenderVertical(HudState s, MiniRemoteController? remote)
     {
-        RenderStatusSections(s, hub);
+        RenderStatusSections(s, remote);
         RenderActionSections(s);
-        RenderEconomySections(s, hub);
+        RenderEconomySections(s, remote);
     }
 
     /// <summary>
@@ -321,14 +333,14 @@ internal sealed class MiniRemoteHud
     /// height; widgets sized from the available width would otherwise make the auto-resizing
     /// window grow every frame.
     /// </summary>
-    private void RenderHorizontal(HudState s, IltHubController? hub)
+    private void RenderHorizontal(HudState s, MiniRemoteController? remote)
     {
         float colW = ColumnWidth(s);
         _columnOpen = false;
         if (s.MiniShowStats || s.MiniShowTarget || s.MiniShowPet)
         {
             BeginColumn("##mrcolstatus", colW);
-            RenderStatusSections(s, hub);
+            RenderStatusSections(s, remote);
             ImGui.EndChild();
         }
         if (s.MiniShowGems || ShowToggles(s))
@@ -340,7 +352,7 @@ internal sealed class MiniRemoteHud
         if (s.MiniShowBank || s.MiniShowRebuff || s.MiniShowTranslate || s.MiniShowGuardian)
         {
             BeginColumn("##mrcoleconomy", colW);
-            RenderEconomySections(s, hub);
+            RenderEconomySections(s, remote);
             ImGui.EndChild();
         }
     }
@@ -375,13 +387,13 @@ internal sealed class MiniRemoteHud
     private static void ResizeSlots(HudState s, float delta) =>
         s.MiniRemoteSlotSize = Math.Clamp(SlotSize(s) + delta, HudState.MinMiniRemoteSlotSize, HudState.MaxMiniRemoteSlotSize);
 
-    private void RenderStatusSections(HudState s, IltHubController? hub)
+    private void RenderStatusSections(HudState s, MiniRemoteController? remote)
     {
         var combat = _hud.Combat;
-        if (s.MiniShowStats) RenderStats(hub);
+        if (s.MiniShowStats) RenderStats(remote);
         if (s.MiniShowTarget) RenderTarget(combat);
-        if (s.MiniShowPet) RenderPet(hub, combat);
-        if (s.MiniShowStats) RenderStatButtons(hub);
+        if (s.MiniShowPet) RenderPet(remote, combat);
+        if (s.MiniShowStats) RenderStatButtons(remote);
     }
 
     private void RenderActionSections(HudState s)
@@ -390,17 +402,19 @@ internal sealed class MiniRemoteHud
         if (ShowToggles(s)) RenderToggles(_hud.Dashboard.Settings);
     }
 
-    private void RenderEconomySections(HudState s, IltHubController? hub)
+    private void RenderEconomySections(HudState s, MiniRemoteController? remote)
     {
-        if (s.MiniShowBank) RenderBank(hub);
+        // Bank and Guardian are RynthILT's (nothing is drawn off ILT or without it).
+        if (s.MiniShowBank) remote?.Ilt.RenderSection(RynthIltHub.SectionRemoteBank);
         if (s.MiniShowRebuff) RenderRebuff();
         if (s.MiniShowTranslate && _hud.Translate is { } translate) translate.RenderHubSection();
-        if (s.MiniShowGuardian && IltActive(hub)) hub!.Guardian.RenderRemoteLine();
+        if (s.MiniShowGuardian) remote?.Ilt.RenderSection(RynthIltHub.SectionRemoteGuardian);
     }
 
     // ── Sections ────────────────────────────────────────────────────────────
 
-    private static bool IltActive(IltHubController? hub) => hub != null && hub.Options.IsIltLikeWorld;
+    /// <summary>An Infinite Leaftide world, as RynthILT sees it (false without RynthILT).</summary>
+    private static bool IltActive(MiniRemoteController? remote) => remote != null && remote.Ilt.IsIltWorld;
 
     private static void Stat(string label, string value)
     {
@@ -411,12 +425,12 @@ internal sealed class MiniRemoteHud
 
     /// <summary>
     /// Session stats on every world: the shared SessionStats (RynthTracker's code, so these match the
-    /// Tracker panel), plus ILT coins and pyreals.
+    /// Tracker panel), plus ILT coins and pyreals (RynthILT's rates).
     /// </summary>
-    private void RenderStats(IltHubController? hub)
+    private void RenderStats(MiniRemoteController? remote)
     {
         var v = _hud.SessionStats?.View ?? RynthCore.Plugin.Shared.SessionStatsView.Empty;
-        Stat("Time:", IltParse.Duration(TimeSpan.FromSeconds(SessionClock(v))));
+        Stat("Time:", MiniRemoteText.Duration(TimeSpan.FromSeconds(SessionClock(v))));
         Stat("XP:", HudDraw.Compact(v.XpPerHour) + "/h");
         Stat("Lum:", HudDraw.Compact(v.LumPerHour) + "/h");
         Stat("Lum 5m:", HudDraw.Compact(v.LumLast5Min));
@@ -424,14 +438,18 @@ internal sealed class MiniRemoteHud
         if (v.PassUpTracked)
         {
             Stat("Pass-up:", HudDraw.Compact(v.PassUpPerHour) + "/h");
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip($"{v.LumPassUp:N0} this session.\n{IltSessionRates.PassUpTooltip}");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip($"{v.LumPassUp:N0} this session.\n{PassUpTooltip}");
         }
         Stat("Kills:", HudDraw.Compact(v.KillsPerHour) + "/h");
-        if (!IltActive(hub)) return;
-        var r = hub!.Rates.Summary;
-        Stat("Coins:", HudDraw.Compact(r.CoinsPerHour) + "/h");
-        Stat("Pyr:", HudDraw.Compact(r.PyrealsPerHour) + "/h");
+        if (remote == null || !remote.Ilt.TryGetRates(out double coins, out double pyreals)) return;
+        Stat("Coins:", HudDraw.Compact(coins) + "/h");
+        Stat("Pyr:", HudDraw.Compact(pyreals) + "/h");
     }
+
+    /// <summary>What the pass-up figure is (RynthILT's Character tab says the same).</summary>
+    private const string PassUpTooltip =
+        "Luminance that reached your bank without a \"You've banked\" line: your vassals' pass-up.\n"
+        + "Fellowship and Zone Share splits arrive the same silent way and are included.";
 
     /// <summary>Seconds since the session started; 0 before it has (no login yet).</summary>
     private static double SessionClock(RynthCore.Plugin.Shared.SessionStatsView v)
@@ -452,29 +470,29 @@ internal sealed class MiniRemoteHud
         HealthBar("##mrtargethp", c.TargetHealth);
     }
 
-    /// <summary>The live summon when one is out, else the ILT Hub's next-essence line.</summary>
-    private static void RenderPet(IltHubController? hub, CombatHudSnapshot c)
+    /// <summary>The live summon when one is out, else the Pets tab's next-essence line (ILT worlds).</summary>
+    private static void RenderPet(MiniRemoteController? remote, CombatHudSnapshot c)
     {
         if (c.PetId != 0)
         {
-            RenderSummon(hub, c);
+            RenderSummon(remote, c);
             return;
         }
-        if (!IltActive(hub)) { ImGui.TextDisabled("Summon: none"); return; }
-        string name = hub!.Pets.HudPetName;
-        string status = hub.Pets.HudPetStatus;
+        if (!IltActive(remote)) { ImGui.TextDisabled("Summon: none"); return; }
+        string name = remote!.Pets.HudPetName;
+        string status = remote.Pets.HudPetStatus;
         if (name.Length == 0) { ImGui.TextDisabled("No combat pet set"); return; }
         ImGui.TextUnformatted(name);
         var col = status switch { "Ready" => ColReady, "Out" => ColOut, "Healing" => ColBusy, _ => ColEmpty };
         ImGui.TextColored(col, status);
     }
 
-    private static void RenderSummon(IltHubController? hub, CombatHudSnapshot c)
+    private static void RenderSummon(MiniRemoteController? remote, CombatHudSnapshot c)
     {
         ImGui.TextColored(ColLabel, "Summon:");
         ImGui.SameLine();
         ImGui.TextUnformatted(c.PetName);
-        if (IltActive(hub) && hub!.Pets.HudPetStatus == "Healing")
+        if (IltActive(remote) && remote!.Pets.HudPetStatus == "Healing")
         {
             ImGui.SameLine();
             ImGui.TextColored(ColBusy, "Healing");
@@ -528,7 +546,7 @@ internal sealed class MiniRemoteHud
         ImGui.PopStyleColor();
     }
 
-    private void RenderStatButtons(IltHubController? hub)
+    private void RenderStatButtons(MiniRemoteController? remote)
     {
         float w = (ImGui.GetContentRegionAvail().X - ImGui.GetStyle().ItemSpacing.X) * 0.5f;
         w = Math.Max(w, 70f);
@@ -536,7 +554,7 @@ internal sealed class MiniRemoteHud
             _hud.Post(() =>
             {
                 _hud.SessionStats?.RequestReset();
-                _hud.Hub()?.Rates.Reset();
+                _hud.Remote()?.Ilt.Command("rates reset");   // RynthILT's coin / pyreal session too
             });
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Start the session stats over (the Tracker panel keeps its own session).");
         ImGui.SameLine();
@@ -548,17 +566,13 @@ internal sealed class MiniRemoteHud
     private void ReportToChat()
     {
         var v = _hud.SessionStats?.View ?? RynthCore.Plugin.Shared.SessionStatsView.Empty;
-        string time = IltParse.Duration(TimeSpan.FromSeconds(SessionClock(v)));
+        string time = MiniRemoteText.Duration(TimeSpan.FromSeconds(SessionClock(v)));
         string line = $"[RynthAi] Session {time}: XP {HudDraw.Compact(v.XpPerHour)}/h, Lum {HudDraw.Compact(v.LumPerHour)}/h "
                       + $"({HudDraw.Compact(v.LumLast5Min)} last 5m)";
         if (v.PassUpTracked) line += $", Pass-up {HudDraw.Compact(v.PassUpPerHour)}/h";
         line += $", Kills {HudDraw.Compact(v.KillsPerHour)}/h ({v.Kills:N0})";
-        var hub = _hud.Hub();
-        if (IltActive(hub))
-        {
-            var r = hub!.Rates.Summary;
-            line += $", Coins {HudDraw.Compact(r.CoinsPerHour)}/h, Pyr {HudDraw.Compact(r.PyrealsPerHour)}/h";
-        }
+        if (_hud.Remote()?.Ilt.TryGetRates(out double coins, out double pyreals) == true)
+            line += $", Coins {HudDraw.Compact(coins)}/h, Pyr {HudDraw.Compact(pyreals)}/h";
         _hud.Chat(line);
     }
 
@@ -694,23 +708,6 @@ internal sealed class MiniRemoteHud
         if (ImGui.Checkbox(label + "##mrt", ref v)) _hud.Post(() => apply(v));
     }
 
-    private static void RenderBank(IltHubController? hub)
-    {
-        if (!IltActive(hub) || hub!.Options.IsOff(IltFeature.Bank)) return;
-        var b = hub.State.Bank;
-        if (b.LastUpdated == DateTime.MinValue) { ImGui.TextDisabled("Bank: not loaded (Options > Banking)"); return; }
-        Stat("P:", HudDraw.Compact(b.Pyreals));
-        Stat("Lum:", HudDraw.Compact(b.Luminance));
-        if (!ImGui.BeginTable("##mrbank", 2, ImGuiTableFlags.SizingStretchSame)) return;
-        ImGui.TableNextColumn(); Stat("LK:", HudDraw.Compact(b.LegendaryKeys));
-        ImGui.TableNextColumn(); Stat("MK:", HudDraw.Compact(b.MythicalKeys));
-        ImGui.TableNextColumn(); Stat("EC:", HudDraw.Compact(b.EnlightenedCoins));
-        ImGui.TableNextColumn(); Stat("WE:", HudDraw.Compact(b.WeaklyEnlightenedCoins));
-        // Prestige Coins (ACECustom 2026-10-04): only once the server has reported some.
-        if (b.PrestigeCoins > 0) { ImGui.TableNextColumn(); Stat("PC:", HudDraw.Compact(b.PrestigeCoins)); }
-        ImGui.EndTable();
-    }
-
     private void RenderRebuff()
     {
         var dash = _hud.Dashboard;
@@ -787,7 +784,7 @@ internal sealed class MiniRemoteHud
 
     // ── Right-click menu: Character, then this server's plugin windows ─────────
 
-    /// <summary>RynthCore's server id for Infinite Leaftide (UI/ServerMenus.cs), the one RynthAi has features for.</summary>
+    /// <summary>RynthCore's server id for Infinite Leaftide (UI/ServerMenus.cs), the one RynthILT has tabs for.</summary>
     private const string IltServerId = "ilt";
 
     /// <summary>
@@ -802,7 +799,7 @@ internal sealed class MiniRemoteHud
         try
         {
             RenderCharacterMenu(s);
-            RenderServerMenu(_hud.Hub());
+            RenderServerMenu(_hud.Remote());
         }
         finally { ImGui.EndPopup(); }
     }
@@ -818,11 +815,9 @@ internal sealed class MiniRemoteHud
         if (ImGui.MenuItem("Spells##mrspells", "/ra spells", settings.ShowSpellsWindow))
             settings.ShowSpellsWindow = !settings.ShowSpellsWindow;
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("The spell catalog and buff profiles.");
-        foreach (IltSection section in IltSections.Tabs)
+        foreach (string id in MiniRemoteTabs.Universal)
         {
-            if (!IltSections.IsUniversal(section)) continue;
-            string id = IltSections.TabId(section);
-            if (ImGui.MenuItem(IltSections.Label(section) + "##mrchar_" + id, "/ra hub open " + id))
+            if (ImGui.MenuItem(MiniRemoteTabs.Label(id) + "##mrchar_" + id, "/ra hub open " + id))
                 _hud.HandleTabCommand(id, "show");
         }
         if (_hud.Host.HasInvokeChatParser)
@@ -836,15 +831,15 @@ internal sealed class MiniRemoteHud
 
     /// <summary>
     /// The server section. Each section RynthCore marks active is listed, and so is Infinite
-    /// Leaftide while this character's "Treat this world as ILT" is on (RynthAi's own override).
-    /// Without RynthCore's list it falls back to RynthAi's ILT entries.
+    /// Leaftide while this character's "Treat this world as ILT" is on (RynthILT's override).
+    /// Without RynthCore's list it falls back to RynthILT's own ILT entries.
     /// </summary>
-    private void RenderServerMenu(IltHubController? hub)
+    private void RenderServerMenu(MiniRemoteController? remote)
     {
         ServerMenuGroup[]? groups = ServerMenuModel.Groups;
         if (groups == null)
         {
-            RenderLocalIltMenu(hub);
+            remote?.Ilt.RenderSection(RynthIltHub.SectionServerMenu);
             return;
         }
         if (groups.Length == 0) return;   // no server plugin installed
@@ -853,7 +848,7 @@ internal sealed class MiniRemoteHud
         foreach (ServerMenuGroup g in groups)
         {
             bool ilt = g.Id.Equals(IltServerId, StringComparison.OrdinalIgnoreCase);
-            bool forcedHere = ilt && hub?.ForceIltWorld == true;
+            bool forcedHere = ilt && remote?.Ilt.ForceIlt == true;
             if (!g.Active && !forcedHere) continue;
             any = true;
             ImGui.Separator();
@@ -862,14 +857,14 @@ internal sealed class MiniRemoteHud
             {
                 string? tab = ServerMenuModel.TabOf(item.Feature);
                 // Universal tabs are under Character; RynthCore 2026.10.5.30 and older list them here too.
-                if (tab != null && IltSections.TryParse(tab, out IltSection listed) && IltSections.IsUniversal(listed)) continue;
-                bool enabled = tab == null || TabAvailable(hub, tab);
+                if (tab != null && MiniRemoteTabs.Parse(tab) != null) continue;
+                bool enabled = tab == null || TabAvailable(remote, tab);
                 if (ImGui.MenuItem(item.Label + "##mrsrv_" + g.Id, item.Command, false, enabled))
                     RunServerItem(item, tab);
                 if (item.Tooltip.Length > 0 && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                     ImGui.SetTooltip(enabled ? item.Tooltip : item.Tooltip + "\nShows once the server reports this feature on.");
             }
-            if (ilt) RenderIltStatus(hub);
+            if (ilt) remote?.Ilt.RenderSection(RynthIltHub.SectionIltStatus);
         }
         if (any) return;
 
@@ -879,7 +874,7 @@ internal sealed class MiniRemoteHud
         {
             if (g.ForceCommand.Length == 0) continue;
             if (ImGui.MenuItem("Treat this world as " + g.Name + "##mrforce_" + g.Id, g.ForceCommand))
-                ForceServer(g, hub);
+                ForceServer(g, remote);
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("Shows this server's windows here anyway. It only says which world this is:\nthe server still decides which features exist.");
         }
@@ -894,55 +889,21 @@ internal sealed class MiniRemoteHud
 
     /// <summary>
     /// Forces a server: RynthCore's session override, plus for Infinite Leaftide this character's
-    /// "Treat this world as ILT" (so RynthAi's tabs come too).
+    /// "Treat this world as ILT" (so RynthILT's tabs come too).
     /// </summary>
-    private void ForceServer(ServerMenuGroup g, IltHubController? hub)
+    private void ForceServer(ServerMenuGroup g, MiniRemoteController? remote)
     {
-        if (g.Id.Equals(IltServerId, StringComparison.OrdinalIgnoreCase) && hub != null) hub.ForceIltWorld = true;
+        if (g.Id.Equals(IltServerId, StringComparison.OrdinalIgnoreCase) && remote != null) remote.Ilt.ForceIlt = true;
         _hud.RunEngineCommand(g.ForceCommand);
     }
 
-    private static bool TabAvailable(IltHubController? hub, string tab) =>
-        hub != null && IltSections.TryParse(tab, out IltSection section) && IltSections.IsTab(section) && hub.SectionAvailable(section);
-
-    /// <summary>
-    /// RynthAi's own Infinite Leaftide entries, for when RynthCore sends no server list (older
-    /// RynthCore, or its ImGui layer off): the tabs, and the Guardian / Bounties panels.
-    /// </summary>
-    private void RenderLocalIltMenu(IltHubController? hub)
+    /// <summary>RynthILT reports that ILT tab's feature on (false without RynthILT).</summary>
+    private static bool TabAvailable(MiniRemoteController? remote, string tab)
     {
-        if (hub == null || !hub.OffersTabs) return;
-        ImGui.Separator();
-        ImGui.TextDisabled("Server: Infinite Leaftide");
-        foreach (IltSection section in IltSections.Tabs)
-        {
-            if (IltSections.IsUniversal(section)) continue;   // under Character
-            if (ImGui.MenuItem(IltSections.Label(section) + "##mrlocal", string.Empty, false, hub.SectionAvailable(section)))
-                _hud.HandleTabCommand(IltSections.TabId(section), "show");
-        }
-        if (ImGui.MenuItem("Guardian##mrlocal", "/rc guardian", false, hub.SectionAvailable(IltSection.Guardian)))
-            _hud.Post(() => hub.OpenEnginePanel("guardian", "Guardian", "show"));
-        if (ImGui.MenuItem("Bounties##mrlocal", "/rc bounties"))
-            _hud.Post(() => hub.OpenEnginePanel("bounties", "Bounties", "show"));
-        RenderIltStatus(hub);
-    }
-
-    /// <summary>
-    /// Under the Infinite Leaftide section while no ILT feature is on: why, this character's
-    /// "Treat this world as ILT" override and a server-features refresh.
-    /// </summary>
-    private static void RenderIltStatus(IltHubController? hub)
-    {
-        if (hub == null || hub.Available) return;
-        var o = hub.Options;
-        ImGui.TextDisabled(!o.IsIltLikeWorld ? "Not an ILT world."
-            : o.IsRefreshing || o.LastRefreshUtc == DateTime.MinValue ? "Checking server features..."
-            : "No ILT features reported.");
-        bool force = hub.ForceIltWorld;
-        if (ImGui.Checkbox("Treat this world as ILT##mrforce", ref force)) hub.ForceIltWorld = force;
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("World-identity override only: RynthAi asks the server which features exist.\nIt never turns a feature on by itself.");
-        if (ImGui.MenuItem("Refresh server features##mrrefresh")) hub.RequestOptionsRefresh();
+        if (remote == null) return false;
+        foreach (IltTabInfo t in remote.Ilt.Tabs())
+            if (string.Equals(t.Id, tab, StringComparison.OrdinalIgnoreCase)) return t.Available;
+        return false;
     }
 
     private static void Flag(string label, ref bool value)

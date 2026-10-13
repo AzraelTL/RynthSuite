@@ -253,9 +253,11 @@ internal static unsafe class FakeHost
         VTankFlags = -1; VTankSeq = 0; LogCostMicros = 0;
         ServerGates = false; UseDoneSeq = 0; CastBusy = 0; LastUseDoneError = 0; LastUseDoneCalls = false;
         WeenieErrorCalls = false; WeenieErrSeq = 0; WeenieErrCode = WeenieErrEvent = WeenieErrObject = 0;
+#if !RYNTHILT_TESTS
         // Spell mana costs "unknown" (no reserve beyond Get Mana At, no cost gate), so a portal.dat on
         // the PC doesn't change results; the mana reserve tests set their own costs.
         RynthCore.Plugin.RynthAi.BuffManager.ManaCostOverride = _ => 0;
+#endif
         WieldCalls = false; Wields.Clear();
         SalvageCalls = false; ExternalMoves.Clear(); SalvageAdds.Clear(); SalvageExecutes.Clear();
         RefuseSalvageAdd.Clear(); OnSalvageExecute = null; Wielded.Clear(); _panelItems.Clear();
@@ -426,6 +428,7 @@ internal static unsafe class FakeHost
         return new RynthCoreHost(api);
     }
 
+#if !RYNTHILT_TESTS
     /// <summary>
     /// A WorldObjectCache that knows the given objects: each id must have a name in
     /// <see cref="Names"/>. Ids with a <see cref="Positions"/> entry land on the landscape
@@ -445,6 +448,7 @@ internal static unsafe class FakeHost
         }
         return cache;
     }
+#endif
 
     private static IntPtr Ansi(string s)
     {

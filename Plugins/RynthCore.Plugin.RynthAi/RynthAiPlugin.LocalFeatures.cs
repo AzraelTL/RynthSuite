@@ -1,5 +1,7 @@
-// RynthAiPlugin.LocalFeatures.cs — ILT Hub, floating HUDs, chat translation, item info, the nav
-// overlay and the UB damage seed.
+// RynthAiPlugin.LocalFeatures.cs — the Mini Remote's universal tabs, floating HUDs, chat
+// translation, item info, the nav overlay and the UB damage seed. (The ILT Hub moved to the RynthILT
+// plugin 2026-10-13: its tabs come through RynthILT.Hub, MiniRemote/IltClient.cs, and RynthILT
+// borrows from RynthAi through RynthAi.Hub, HubInterface.cs.)
 //
 // The engine draws the main panels. These features draw their own ImGui windows from
 // RynthPluginRender / RynthPluginRenderOverlay. Lifecycle methods on RynthAiPlugin call into
@@ -16,7 +18,9 @@ public sealed partial class RynthAiPlugin
 {
     private NavBreadcrumbTracker? _navBreadcrumbs;
     private NavOverlayRenderer? _navOverlay;
-    private IltHub.IltHubController? _iltHub;
+    private MiniRemote.MiniRemoteController? _miniRemote;
+    // RynthILT's side of the Mini Remote (its ILT tabs, sections, feature bits); lives for the plugin.
+    private MiniRemote.IltClient? _ilt;
     private Huds.HudController? _huds;
     private Huds.HudIconCache? _hudIcons;
     private Translate.ChatTranslator? _translator;
@@ -106,38 +110,54 @@ public sealed partial class RynthAiPlugin
     }
 
     /// <summary>
-    /// ILT Hub and floating HUDs for the loaded character. No-op until the per-character
-    /// folder exists, so login and the deferred settings load in OnTick both call this.
+    /// The Mini Remote's universal tabs and the floating HUDs for the loaded character. No-op until
+    /// the per-character folder exists, so login and the deferred settings load in OnTick both call this.
     /// </summary>
-    private void CreateIltHub()
+    private void CreateMiniRemote()
     {
-        if (_dashboard == null || string.IsNullOrEmpty(_dashboard.CharFolder) || _iltHub != null)
+        if (_dashboard == null || string.IsNullOrEmpty(_dashboard.CharFolder) || _miniRemote != null)
             return;
 
         var dash = _dashboard;
-        // Settings > Misc "Server Features" status line names the current world.
-        IltHub.ServerFeatureGate.WorldNameProvider ??=
-            () => Host.HasGetWorldName && Host.TryGetWorldName(out string w) ? w ?? string.Empty : string.Empty;
-        _iltHub = new IltHub.IltHubController(Host, dash.CharFolder,
+        _ilt ??= new MiniRemote.IltClient(Host);
+        _miniRemote = new MiniRemote.MiniRemoteController(Host, dash.CharFolder,
             () => _objectCache, () => dash.Settings, () => _questTracker,
-            () => dash.SaveSettings(), _sessionStats);
+            () => dash.SaveSettings(), _ilt);
         _hudIcons ??= new Huds.HudIconCache(Host, () => _raycast?.GeometryLoader?.PortalDat);
-        _huds = new Huds.HudController(Host, dash.CharFolder, () => _objectCache, dash, () => _iltHub, _hudIcons,
+        _huds = new Huds.HudController(Host, dash.CharFolder, () => _objectCache, dash, () => _miniRemote, _hudIcons,
             () => _combatManager?.activeTargetId ?? 0)
         {
             SessionStats = _sessionStats,
         };
         if (_translateUi != null) _huds.Translate = _translateUi;
 
-        // The ILT sections are Mini Remote tabs: "/ra hub [show|hide|toggle]" drives the remote,
-        // "/ra hub open <section>" its tabs, and while it is up the Hub keeps its bank / gear data fresh.
+        // "/ra hub [show|hide|toggle]" drives the remote, "/ra hub open <tab>" its tabs.
         var huds = _huds;
-        _iltHub.MiniRemoteCommand = mode => "[Mini Remote] " + huds.HandleCommand("remote", mode);
-        _iltHub.MiniRemoteTabCommand = (tab, mode) => huds.HandleTabCommand(tab, mode);
-        _iltHub.MiniRemoteVisible = () => huds.MiniRemoteActive;
+        _miniRemote.MiniRemoteCommand = mode => "[Mini Remote] " + huds.HandleCommand("remote", mode);
+        _miniRemote.MiniRemoteTabCommand = (tab, mode) => huds.HandleTabCommand(tab, mode);
         EnsureItemInfoUi();
         EnsureSpellsUi();
     }
+
+    // ── RynthAi.Hub (HubInterface.cs): what RynthILT borrows ────────────────
+
+    /// <summary>The Mini Remote on a tab for RynthILT (any thread): show / hide / toggle the remote for tab "", else the tab. Null before login.</summary>
+    internal string? MiniRemoteTabForIlt(string tab, string mode)
+    {
+        var huds = _huds;
+        if (huds == null) return null;
+        if (tab.Length == 0 && mode is "show" or "hide" or "toggle") return huds.HandleCommand("remote", mode);
+        return huds.HandleTabCommand(tab, mode);
+    }
+
+    /// <summary>The Mini Remote is on screen (any thread).</summary>
+    internal bool MiniRemoteVisibleForIlt => _huds?.MiniRemoteActive == true;
+
+    internal RynthCoreHost HostForIlt => Host;
+    internal Meta.QuestTracker? QuestTrackerForIlt => _questTracker;
+    internal MiniRemote.MiniRemoteController? MiniRemoteForIlt => _miniRemote;
+    internal WorldObjectCache? ObjectCacheForIlt => _objectCache;
+    internal RynthCore.Plugin.Shared.SessionStatsTracker? SessionStatsForIlt => _sessionStats;
 
     /// <summary>Item Info window, created once settings exist.</summary>
     private void EnsureItemInfoUi()
@@ -153,9 +173,11 @@ public sealed partial class RynthAiPlugin
         try { RynthLog.Pump(); }
         catch (Exception ex) { Host.Log($"[RynthAi] diagnostics pump: {ex.Message}"); }
         try { _sessionStats?.Tick(); }
-        catch (Exception ex) { RynthLog.Exception(LogCat.IltRates, ex, "session stats tick"); }
-        try { _iltHub?.Tick(); }
-        catch (Exception ex) { RynthLog.Exception(LogCat.IltHub, ex, "Tick"); }
+        catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats tick"); }
+        try { _ilt?.Tick(); }
+        catch (Exception ex) { RynthLog.Exception(LogCat.UI, ex, "RynthILT lookup"); }
+        try { _miniRemote?.Tick(); }
+        catch (Exception ex) { RynthLog.Exception(LogCat.UI, ex, "Mini Remote Tick"); }
         try { _huds?.Tick(); }
         catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "Tick"); }
         try { _translator?.Tick(); }
@@ -177,10 +199,10 @@ public sealed partial class RynthAiPlugin
         _navBreadcrumbs = null;
         if (_dashboard != null) _dashboard.NavBreadcrumbs = null;
         _navOverlay = null;
-        try { _iltHub?.OnLogout(); }
-        catch (Exception ex) { RynthLog.Exception(LogCat.IltHub, ex, "logout"); }
-        _iltHub = null;
-        IltHub.ServerFeatureGate.HubForceProvider = null;
+        try { _miniRemote?.OnLogout(); }
+        catch (Exception ex) { RynthLog.Exception(LogCat.UI, ex, "Mini Remote logout"); }
+        _miniRemote = null;
+        _ilt?.Reset();
         try { _huds?.OnLogout(); }
         catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "logout"); }
         _huds = null;
@@ -195,14 +217,11 @@ public sealed partial class RynthAiPlugin
         _translateUi = null;
     }
 
-    /// <summary>ILT Hub may eat a server reply; the translator records the line either way.</summary>
+    /// <summary>The Pets tab watches for its heal pet's heal; the translator records the line either way.</summary>
     private void OnChatLocalFeatures(string text, int chatType, ref int eat)
     {
-        try
-        {
-            if (_iltHub?.OnChat(text) == true) eat = 1;
-        }
-        catch (Exception ex) { RynthLog.Exception(LogCat.IltHub, ex, "OnChat"); }
+        try { _miniRemote?.OnChat(text); }
+        catch (Exception ex) { RynthLog.Exception(LogCat.Pets, ex, "Mini Remote OnChat"); }
         try { _translator?.OnChatWindowText(text, chatType); }
         catch (Exception ex) { RynthLog.Exception(LogCat.Chat, ex, "translator inbound"); }
     }
@@ -235,7 +254,7 @@ public sealed partial class RynthAiPlugin
             _navOverlay?.Render();
             _itemInfoUi?.Render();
             _spellsUi?.Render();
-            _iltHub?.Render();
+            _miniRemote?.Render();
             _huds?.Render();
             RenderTranslateWindow();
         }
@@ -269,7 +288,7 @@ public sealed partial class RynthAiPlugin
         if (!_overlayEnteredLogged)
         {
             _overlayEnteredLogged = true;
-            RynthLog.Write(LogCat.UI, $"[Overlay] OnRenderOverlay drawing (iltHub={(_iltHub != null ? "ready" : "null")}).");
+            RynthLog.Write(LogCat.UI, $"[Overlay] OnRenderOverlay drawing (miniRemote={(_miniRemote != null ? "ready" : "null")}).");
         }
 
         IntPtr previousContext = ImGui.GetCurrentContext();
@@ -278,7 +297,7 @@ public sealed partial class RynthAiPlugin
         {
             DetectItemInfoClick();
             int pushedColors = LegacyDashboardRenderer.PushDashboardStyle();
-            try { _iltHub?.Render(); }
+            try { _miniRemote?.Render(); }
             finally { ImGui.PopStyleColor(pushedColors); }
             _huds?.Render();
             RenderTranslateWindow();
@@ -340,40 +359,6 @@ public sealed partial class RynthAiPlugin
         }
     }
 
-    /// <summary>
-    /// RynthPluginRenderEmbed "guardian": the Temple guardian tools inside RynthCore's Guardian
-    /// panel (the bar's ILT button), drawn into the engine's current ImGui window at the size it
-    /// gives (<paramref name="want"/> echoes that size: the panel is user-sized), docked or popped
-    /// out (<see cref="EmbedContext"/>). False (nothing drawn) until login and the ILT features
-    /// exist. Render thread.
-    /// </summary>
-    public bool RenderEmbeddedGuardian(System.Numerics.Vector2 size, out System.Numerics.Vector2 want)
-    {
-        want = size;
-        var hub = _iltHub;
-        if (!_initialized || !_loginComplete || Host.ImGuiContext == IntPtr.Zero || hub == null)
-            return false;
-
-        IntPtr previousContext = ImGui.GetCurrentContext();
-        ImGui.SetCurrentContext(EmbedContext());
-        int pushedColors = LegacyDashboardRenderer.PushDashboardStyle();
-        try
-        {
-            hub.RenderGuardianPanel();
-            return true;
-        }
-        catch (Exception ex)
-        {
-            RynthLog.Exception(LogCat.UI, ex, "RenderEmbeddedGuardian");
-            return false;
-        }
-        finally
-        {
-            ImGui.PopStyleColor(pushedColors);
-            ImGui.SetCurrentContext(previousContext);
-        }
-    }
-
     /// <summary>Chat Translate window in the dashboard colours (no-op while hidden).</summary>
     private void RenderTranslateWindow()
     {
@@ -391,17 +376,14 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] " + _huds.HandleCommand(which, mode));
     }
 
-    /// <summary>Skills panel Progression tab snapshot (RynthPluginGetProgressionJson). Pump thread.</summary>
-    internal string BuildProgressionJson() => _iltHub?.BuildProgressionJson() ?? "{\"available\":false}";
-
-    /// <summary>Settings panel Charms Tracking tab snapshot (RynthPluginGetCharmsJson). Pump thread.</summary>
-    internal string BuildCharmsJson() => _iltHub?.BuildCharmsJson() ?? "{\"available\":false}";
-
-    /// <summary>"prog ..." remote command from the Skills panel's Progression tab. Pump thread.</summary>
+    /// <summary>
+    /// "prog ..." from an older engine's Skills panel (newer engines send it to RynthILT, which owns
+    /// the progression planners since 2026-10-13): passed on to RynthILT. Pump thread.
+    /// </summary>
     private void HandleProgressionRemote(string value)
     {
-        if (_iltHub == null) { ChatLine("[RynthAi] ILT features not ready (log in first)."); return; }
-        _iltHub.Progression.HandleRemote(value.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        if (!Host.HasSendPluginCommand || !Host.SendPluginCommand("RynthILT", "prog", value))
+            ChatLine("[RynthAi] Progression is an Infinite Leaftide feature: it comes with the RynthILT plugin.");
     }
 
     /// <summary>"/ra itemhud add &lt;name&gt;" and the inventory panel's "Add to item count HUD". Pump thread.</summary>
@@ -460,12 +442,16 @@ public sealed partial class RynthAiPlugin
 
         bool? state = ParseOnOff(action);
         bool isAll = target.Equals("all", StringComparison.OrdinalIgnoreCase);
-        bool isIlt = target.Equals("ilt", StringComparison.OrdinalIgnoreCase);
-        if (isAll || isIlt)
+        if (target.Equals("ilt", StringComparison.OrdinalIgnoreCase))
+        {
+            ChatLine("[RynthAi] The ILT features trace in RynthILT now: /ilt trace all on|off.");
+            return;
+        }
+        if (isAll)
         {
             if (!state.HasValue) { foreach (string l in RynthLog.StatusLines()) ChatLine(l); return; }
-            int n = RynthLog.SetTracingByPrefix(isIlt ? "Ilt" : string.Empty, state.Value);
-            ChatLine($"[RynthAi] Tracing {(state.Value ? "enabled" : "disabled")} for {n} {(isIlt ? "ILT Hub " : "")}categories.");
+            int n = RynthLog.SetTracingByPrefix(string.Empty, state.Value);
+            ChatLine($"[RynthAi] Tracing {(state.Value ? "enabled" : "disabled")} for {n} categories.");
             return;
         }
 

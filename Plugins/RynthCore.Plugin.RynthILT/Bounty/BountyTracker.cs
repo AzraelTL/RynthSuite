@@ -692,17 +692,23 @@ internal sealed class BountyTracker
         _lastSaveMs = NowMs;
         if (!_dirty || _filePath.Length == 0) { _dirty = false; return; }
         _dirty = false;
-        try
-        {
-            string? dir = Path.GetDirectoryName(_filePath);
-            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            string tmp = _filePath + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(_s, RynthILTJsonContext.Default.BountyState));
-            File.Move(tmp, _filePath, overwrite: true);
-        }
+        string json;
+        try { json = JsonSerializer.Serialize(_s, RynthILTJsonContext.Default.BountyState); }
         catch (Exception ex)
         {
             _log($"[RynthILT] Bounties: saving {_filePath} failed: {ex.Message}");
+            return;
         }
+        // A failed write is said in chat once per folder (on ILT) and logged; it stays dirty so the
+        // next debounced save tries again.
+        if (!RynthCore.Plugin.Shared.DataWriteGuard.TrySave("the bounty list", _filePath, () =>
+            {
+                string? dir = Path.GetDirectoryName(_filePath);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                string tmp = _filePath + ".tmp";
+                File.WriteAllText(tmp, json);
+                File.Move(tmp, _filePath, overwrite: true);
+            }))
+            _dirty = true;
     }
 }

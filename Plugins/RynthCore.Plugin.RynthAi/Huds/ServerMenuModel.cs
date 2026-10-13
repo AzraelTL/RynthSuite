@@ -7,7 +7,7 @@
 // command), then its items ("I", label, command, tooltip, feature).
 //
 // Groups stays null until the first push: an older RynthCore, or the ImGui shell off. The menu
-// then falls back to RynthAi's own ILT entries.
+// then falls back to RynthILT's own ILT entries (RynthILT.Hub section "server-menu").
 using System;
 using System.Collections.Generic;
 using System.Threading;

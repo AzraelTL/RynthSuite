@@ -177,7 +177,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         StartDataFolderCheck();   // RynthAiPlugin.DataFolders.cs: can metas/navs/settings be saved?
         InitSessionStats();
         // The overlay windows (OnRenderOverlay) must draw through the engine's cimgui module.
-        ImGuiNativeBinding.Ensure();
+        RynthCore.Plugin.Shared.ImGuiNativeBinding.Ensure(msg => RynthLog.Write(LogCat.UI, msg));
         _dashboard = new LegacyDashboardRenderer(Host);
         _killClock.MacroRunning = () => _dashboard?.Settings.IsMacroRunning == true;
         _dashboard.KillClock = _killClock;
@@ -281,7 +281,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     {
         Log("RynthAi: logout — tearing down session.");
         try { _dashboard?.SaveSettings(); } catch { }
-        try { _sessionStats?.OnLogout(); } catch (Exception ex) { RynthLog.Exception(LogCat.IltRates, ex, "session stats logout"); }
+        try { _sessionStats?.OnLogout(); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats logout"); }
         Loot.T11ItemSupport.Reset();
         // A real logout: the next OnLoginComplete is a fresh login, not a hot reload.
         ClearInGameMarker();
@@ -590,7 +590,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         // Cache player ID so we can filter self out of creature tracking and update vitals
         _playerId = Host.GetPlayerId();
         try { _sessionStats?.OnLoginComplete(); }
-        catch (Exception ex) { RynthLog.Exception(LogCat.IltRates, ex, "session stats login"); }
+        catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats login"); }
         _objectCache?.SetPlayerId(_playerId);
         _navigationEngine?.SetPlayerId(_playerId);
         if (_objectCache != null) _dashboard.SetWorldFilter(_objectCache);
@@ -732,15 +732,15 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             _combatManager.SummonOut = () => _petManager?.CurrentSummon();
         }
 
-        CreateIltHub();
-        if (_iltHub?.SkipLoginQuestRefresh == true)
-            Log("RynthAi: ILT Hub says /myquests is off on this server; login quest refresh already ran.");
+        CreateMiniRemote();
+        if (_miniRemote?.SkipLoginQuestRefresh == true)
+            Log("RynthAi: RynthILT says /myquests is off on this server; login quest refresh already ran.");
         try
         {
             string hubChar = CurrentCharacterName();
-            _iltHub?.OnLoginComplete(hubChar, _petManager);
+            _miniRemote?.OnLoginComplete(hubChar, _petManager);
         }
-        catch (Exception ex) { RynthLog.Exception(LogCat.IltHub, ex, "login"); }
+        catch (Exception ex) { RynthLog.Exception(LogCat.UI, ex, "Mini Remote login"); }
 
         _salvageManager = new SalvageManager(Host, _dashboard.Settings, _objectCache);
         // Hand the salvage manager a live accessor for the loot profile's
@@ -927,9 +927,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "bounties":
             case "bountys":
                 // Dashboard Char launcher and its right-click menu (hub=tab <section> switches the
-                // Mini Remote's tab); value carries the "/ra hub|quests|pets|bounty" arguments.
-                if (_iltHub == null) { ChatLine("[RynthAi] ILT features not ready (log in first)."); break; }
-                _iltHub.HandleCommand(action.ToLowerInvariant(), value.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+                // Mini Remote's tab); value carries the "/ra hub|quests|pets|bounty" arguments. The
+                // Infinite Leaftide verbs go on to RynthILT (MiniRemoteController.HandleCommand).
+                if (_miniRemote == null) { ChatLine("[RynthAi] The Mini Remote isn't ready (log in first)."); break; }
+                _miniRemote.HandleCommand(action.ToLowerInvariant(), value.Split(' ', StringSplitOptions.RemoveEmptyEntries));
                 break;
             case "huds":
             case "itemhud":
@@ -1498,11 +1499,11 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                         _buffManager?.SetTimerPath(_dashboard.CharFolder);
                         _damageStore?.SetCharacter(_dashboard.CharFolder);
                         _patrolOnLoginPending = _dashboard.Settings.PatrolOnLogin;
-                        if (_iltHub == null)
+                        if (_miniRemote == null)
                         {
-                            CreateIltHub();
-                            try { _iltHub?.OnLoginComplete(lateName, _petManager); }
-                            catch (Exception ex) { RynthLog.Exception(LogCat.IltHub, ex, "late login"); }
+                            CreateMiniRemote();
+                            try { _miniRemote?.OnLoginComplete(lateName, _petManager); }
+                            catch (Exception ex) { RynthLog.Exception(LogCat.UI, ex, "Mini Remote late login"); }
                         }
                         Log($"RynthAi: per-character settings established late for '{lateName}' (early OnLoginComplete read had failed).");
                     }
@@ -2243,7 +2244,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     public override void OnChatWindowText(string? text, int chatType, ref int eat)
     {
         if (string.IsNullOrEmpty(text)) return;
-        try { _sessionStats?.OnChatWindowText(text); } catch (Exception ex) { RynthLog.Exception(LogCat.IltRates, ex, "session stats chat"); }
+        try { _sessionStats?.OnChatWindowText(text); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats chat"); }
         // The Meta Manager eats the reply to its own /myquests poll (only that).
         bool mmEat = false;
         try { mmEat = MetaScheduleChat(text); } catch { }
@@ -2262,7 +2263,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _scrollLearner?.OnChat(text);
         _metaManager?.HandleChat(text, chatType);
         _questTracker?.OnChatLine(text);
-        // The "/aug" reply carries the T11 wield counters (ILT Hub requests it at login).
+        // The "/aug" reply carries the T11 wield counters (RynthILT's login probe requests it on ILT).
         try { Loot.T11ItemSupport.OnChat(text); }
         catch (Exception ex) { RynthLog.Exception(LogCat.Looting, ex, "T11 /aug parse"); }
         CheckChatForSafetyStops(text);
@@ -2277,7 +2278,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     {
         // Mini Remote stats count every notice, as RynthTracker does (an empty message is still a kill).
         try { _sessionStats?.OnKillNotification(deathMessage); }
-        catch (Exception ex) { RynthLog.Exception(LogCat.IltRates, ex, "session stats kill"); }
+        catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats kill"); }
         if (string.IsNullOrEmpty(deathMessage)) return;
         _killClock.RecordKill();    // the only kill source: KillerNotification goes to the killer alone
         _combatManager?.OnKillNotification(deathMessage);
@@ -3479,8 +3480,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "bounty":
             case "bounties":
             case "bountys":
-                if (_iltHub == null) { ChatLine("[RynthAi] ILT features not ready (log in first)."); break; }
-                _iltHub.HandleCommand(cmd, parts.Length > 2 ? parts[2..] : Array.Empty<string>());
+                if (_miniRemote == null) { ChatLine("[RynthAi] The Mini Remote isn't ready (log in first)."); break; }
+                _miniRemote.HandleCommand(cmd, parts.Length > 2 ? parts[2..] : Array.Empty<string>());
                 break;
             case "itemhud" when parts.Length > 2 && parts[2].Equals("add", StringComparison.OrdinalIgnoreCase):
                 HandleItemHudAdd(string.Join(" ", parts, 3, parts.Length - 3));

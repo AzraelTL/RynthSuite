@@ -13,8 +13,6 @@ public static class DashWindows
     public static bool ShowWeapons;
     public static bool ShowLua;
     public static bool ShowDungeonMap;
-    /// <summary>ILT Hub window (persisted in ilt-hub.json, not in the combat profile).</summary>
-    public static bool ShowIltHub;
 }
 
 public sealed class LegacyUiSettings
@@ -351,12 +349,13 @@ public sealed class LegacyUiSettings
     public bool YieldToVTank = true;
 
     /// <summary>
-    /// Server Features (Settings > Misc): world names that turn on the ILT Hub, the Skills
-    /// panel's Progression planners and the attribute raiser ('*' wildcard, case-insensitive).
-    /// See IltHub/ServerFeatureGate. A profile saved before this existed loads the defaults.
+    /// Legacy (unused by RynthAi since 2026-10-13): the old Settings > Misc "Server Features" list
+    /// that turned on the ILT Hub. The ILT features moved to the RynthILT plugin, which keeps its
+    /// own list and reads these two fields once, on a character's first login with it
+    /// (IltMigration). Kept so a profile still carries them until then; no UI, no bridge.
     /// </summary>
-    public List<string> FeatureServerNames { get; set; } = new(IltHub.ServerFeatureGate.DefaultServerNames);
-    /// <summary>Manual override: treat the current world as feature-enabled whatever its name.</summary>
+    public List<string>? FeatureServerNames { get; set; }
+    /// <summary>Legacy (see <see cref="FeatureServerNames"/>): the old "Force enable on this server" override.</summary>
     public bool ForceServerFeatures;
 
     public int BlacklistAttempts = 3;
@@ -963,11 +962,6 @@ public sealed class SettingsBridgePayload
     public float? DunPatrolLookInSize { get; set; }
     // Absent from an older engine's payload: must not read as off.
     public bool YieldToVTank { get; set; } = true;
-    // Server Features: the list travels as one comma-separated string (the engine's text row).
-    public string FeatureServerNames { get; set; } = string.Join(", ", IltHub.ServerFeatureGate.DefaultServerNames);
-    public bool ForceServerFeatures { get; set; }
-    // Read-only status line for Settings > Misc (ignored when the engine sends it back).
-    public string ServerFeaturesStatus { get; set; } = string.Empty;
     public bool EnableRaycasting { get; set; }
     public bool UseArcs { get; set; }
     public float BowArcVelocity { get; set; }

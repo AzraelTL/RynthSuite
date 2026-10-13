@@ -156,7 +156,7 @@ internal sealed class LegacyItemInfoUi
             s.Sanitize();
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip(
-                "Pet-style lines (like the ILT Hub pet roster):\n" +
+                "Pet-style lines (like the Mini Remote's Pets roster):\n" +
                 "  1  Name (type mastery), set, AL, tinks, applied, craft\n" +
                 "  2  imbues, slayer, damage, variance, %a / %md / %mc\n" +
                 "  3  [ratings]  wield / activation / diff, value\n" +

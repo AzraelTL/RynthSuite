@@ -36,7 +36,6 @@ internal static class Program
         ExpressionEngine.ItemGiverDir = Path.Combine(TempRoot, "ItemGiver");
         // The dungeon map bake writes floor plans under C:\Games\RynthSuite\RynthAi\Maps.
         RynthCore.Plugin.RynthAi.Maps.DungeonMapBake.CacheDir = Path.Combine(TempRoot, "Maps");
-        RynthCore.Plugin.RynthAi.IltHub.IltAugCosts.FilePath = Path.Combine(TempRoot, "ilt-aug-costs.json");
         // A sighted lava/acid hotspot is persisted under C:\Games\RynthSuite\RynthAi\DungeonHazards.
         LiveHazardFolder = RynthCore.Plugin.RynthAi.DungeonHazardStore.Folder;
         RynthCore.Plugin.RynthAi.DungeonHazardStore.Folder = Path.Combine(TempRoot, "DungeonHazards");
@@ -111,12 +110,10 @@ internal static class Program
         NavMapEditTests.Register(runner);
         LootSpeedTests.Register(runner);
         MeleeStallTests.Register(runner);
-        AttributeRaiserTests.Register(runner);
-        SigilChainTests.Register(runner);
         ServerMenuTests.Register(runner);
+        MiniRemoteMoveTests.Register(runner);
         ItemsCleanTests.Register(runner);
         DeathRecallTests.Register(runner);
-        BankCommandTests.Register(runner);
         InventoryAttributeFilterTests.Register(runner);
         StuckCastTests.Register(runner);
         PacerEdgeTests.Register(runner);

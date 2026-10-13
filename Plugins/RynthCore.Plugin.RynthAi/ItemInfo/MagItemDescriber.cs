@@ -4,7 +4,7 @@
 //   Applied: Steel x2, 152-236, 0.35v, +18%a, +12%md, Legendary Blood Thirst, Wield Lvl 180,
 //   Heavy Weapons 375, Diff 270, Craft 8, [D 3, CD 2]
 //
-// The same fields can also print as the pet-roster layout (IltPetStats: identity line, stats
+// The same fields can also print as the pet-roster layout (MiniRemote/PetStats: identity line, stats
 // line, ratings/requirements line), plus a spells line:
 //
 //   Gold Ornate Long Sword (Slash Sword), Noble Relic Set, Tinks 4, Applied: Steel x2, Craft 8

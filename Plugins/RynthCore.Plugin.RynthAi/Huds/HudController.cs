@@ -22,7 +22,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-using RynthCore.Plugin.RynthAi.IltHub;
+using RynthCore.Plugin.RynthAi.MiniRemote;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.PluginSdk;
 
@@ -83,7 +83,7 @@ internal sealed class HudController
     private volatile string _assignCandidate = string.Empty;
 
     public HudController(RynthCoreHost host, string charFolder, Func<WorldObjectCache?> cache,
-        LegacyDashboardRenderer dashboard, Func<IltHubController?> hub, HudIconCache icons, Func<int> attackTargetId)
+        LegacyDashboardRenderer dashboard, Func<MiniRemoteController?> remote, HudIconCache icons, Func<int> attackTargetId)
     {
         _host = host;
         _cache = cache;
@@ -91,7 +91,7 @@ internal sealed class HudController
         State = _store.Load();
         Icons = icons;
         Dashboard = dashboard;
-        Hub = hub;
+        Remote = remote;
         _itemHud = new ItemCountHud(this);
         _miniRemote = new MiniRemoteHud(this);
         _setup = new HudSetupUi(this);
@@ -101,7 +101,7 @@ internal sealed class HudController
     public HudState State { get; }
     public HudIconCache Icons { get; }
     public LegacyDashboardRenderer Dashboard { get; }
-    public Func<IltHubController?> Hub { get; }
+    public Func<MiniRemoteController?> Remote { get; }
     public RynthCoreHost Host => _host;
 
     /// <summary>The Mini Remote's session stats (the same SessionStats code as RynthTracker); null if it failed to start.</summary>
@@ -510,7 +510,7 @@ internal sealed class HudController
     }
 
     /// <summary>
-    /// Puts the Mini Remote on tab <paramref name="tab"/> ("" = the remote itself, else an ILT tab
+    /// Puts the Mini Remote on tab <paramref name="tab"/> ("" = the remote itself, else a tab id: its own or RynthILT's
     /// id). Modes: "show" selects it and shows the Mini Remote (the floating one, unless RynthCore's
     /// window hosts it); "hide" goes back to the remote tab when this tab is the one selected;
     /// "toggle" does whichever undoes the current state; "select" only switches tabs (RynthCore's

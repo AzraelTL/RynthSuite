@@ -3213,7 +3213,7 @@ public sealed partial class RynthAiPlugin
         return sb.ToString();
     }
 
-    // Minimal JSON string escaper for hand-built export JSON (route names, ILT Hub text).
+    // Minimal JSON string escaper for hand-built export JSON (route names, panel text).
     internal static string JsonEscape(string s)
     {
         var sb = new System.Text.StringBuilder(s.Length + 8);

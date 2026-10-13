@@ -4,7 +4,7 @@ using System.IO;
 using System.Reflection;
 using RynthCore.Loot.Editing;
 using RynthCore.Plugin.RynthAi;
-using RynthCore.Plugin.RynthAi.Diagnostics;
+using RynthCore.Plugin.Shared;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.Plugin.RynthAi.Meta;
 using RynthCore.RynthAiHostTests.Fakes;
@@ -15,7 +15,7 @@ namespace RynthCore.RynthAiHostTests.Tests;
 // 2026-10-13: players reported metas and navs "not saving" and the plugin folders being
 // "read only". Every save of a meta, nav, settings profile (and the loot editor's autosave
 // path) swallowed its exception, so a folder the client can't write looked like a save that did
-// nothing. Diagnostics/DataWriteGuard.cs now:
+// nothing. Plugins/Shared/DataWriteGuard.cs now:
 //  - clears the ReadOnly attribute on our own file before overwriting it;
 //  - reports a failed save in chat once per folder (path, reason, fix) and logs every one
 //    (throttled per folder);

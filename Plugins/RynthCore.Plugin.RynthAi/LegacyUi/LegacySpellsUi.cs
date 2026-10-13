@@ -698,7 +698,7 @@ internal sealed unsafe class LegacySpellsUi
 
     private void SaveTo(string path, bool thenActivate)
     {
-        if (!RynthCore.Plugin.RynthAi.Diagnostics.DataWriteGuard.TrySave("the buff profile", path,
+        if (!RynthCore.Plugin.Shared.DataWriteGuard.TrySave("the buff profile", path,
                 () => BuffProfileStore.Save(_edit, path), out string why))
         {
             SetStatus($"Save failed: {why}", warning: true);

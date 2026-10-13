@@ -278,7 +278,7 @@ internal sealed class LegacyNavigationUi
             else
             {
                 NavRouteParser route = _settings.CurrentRoute;
-                RynthCore.Plugin.RynthAi.Diagnostics.DataWriteGuard.TrySave("the nav", path, () => route.Save(path));
+                RynthCore.Plugin.Shared.DataWriteGuard.TrySave("the nav", path, () => route.Save(path));
             }
         }
         catch (Exception ex) { _host.Log($"[RynthAi] Nav auto-save to {path} failed: {ex.Message}"); }
@@ -319,7 +319,7 @@ internal sealed class LegacyNavigationUi
             }
 
             string target = path;
-            if (!RynthCore.Plugin.RynthAi.Diagnostics.DataWriteGuard.TrySave("the nav", target, () => route.Save(target), out string why, callerShows: true))
+            if (!RynthCore.Plugin.Shared.DataWriteGuard.TrySave("the nav", target, () => route.Save(target), out string why, callerShows: true))
                 return $"[RynthAi] Nav NOT saved to {target}: {why}";
             _settings.CurrentNavPath = path;
             return $"[RynthAi] Saved {route.Points.Count} waypoints to {Path.GetFileName(path)}.";

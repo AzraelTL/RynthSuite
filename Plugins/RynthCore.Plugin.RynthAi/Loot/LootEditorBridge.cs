@@ -270,13 +270,13 @@ internal sealed class LootEditorBridge
     /// <summary>
     /// A save the disk refused (folder not writable, file in use, ...): the editor shows the
     /// session's message; this adds the chat line (once per folder) and the log line with the
-    /// reason and the fix (Diagnostics/DataWriteGuard, 2026-10-13).
+    /// reason and the fix (Plugins/Shared/DataWriteGuard.cs, 2026-10-13).
     /// </summary>
     private static void ReportWriteError(LootEditSession session)
     {
         Exception? error = session.TakeWriteError();
         if (error != null)
-            RynthCore.Plugin.RynthAi.Diagnostics.DataWriteGuard.Report("the loot profile", session.Path, error);
+            RynthCore.Plugin.Shared.DataWriteGuard.Report("the loot profile", session.Path, error);
     }
 
     private static LootEditItemDraft Refuse(LootEditItemDraft d, string error)
