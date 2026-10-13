@@ -54,6 +54,21 @@ internal static class ActionPacingTests
         r.Add("pacing: no answer - each kind's time limit lets the next action go, logged, and nothing is force-cleared", TimeLimits);
         r.Add("pacing: heals (a plain heal waits for a corpse use's answer, 300 ms at Emergency, one behind a cast's result, 300 ms after the stance reads)", HealRules);
         r.Add("pacing (vitals): Drakkon 07:03 - a cast whose result is in waits for its UseDone: one cast, not a too-busy flood", CastWaitsForUseDone);
+        r.Add("refusal: a refused mode change begins no paced action, and the next one is not held by it", RefusedBeginsNothing);
+        r.Add("refusal: the engine refusing for 5 s burns nothing; a streak past 30 s counts as a failure again, with one log line each end", RefusalStreakFailsOpen);
+        r.Add("refusal: 20 s of refusals with no wand never reach _magicModeBlocked; past 30 s the failure counting resumes and the vitals fall to the potion path", NoWandRefusalLoop);
+        r.Add("refusal: wand wielded, 9 s of refused stance changes - no re-equip UseObject, no burnt re-equip; the first accepted request starts the clock", WandWieldedRefusalNoReEquip);
+        r.Add("refusal: a refused peace-before-open is asked again inside the 2.5 s ceiling; exactly one accepted request goes out before the open", PeaceBeforeOpenRefusedRetried);
+        r.Add("refusal: a streak that went quiet for 10 s+ (a death, a logout) is over - 600 s later a refusal starts a fresh streak, and Forget ends one", RefusalStreakExpires);
+        r.Add("refusal: wand wielded, a request accepted then dropped (a teleport), 9 s of refusals - the stuck clock restarts, no re-equip UseObject", StuckClockRestartsOnRefusal);
+        r.Add("refusal: the stall watchdog's refused mode toggle spends no ladder step (Unfire) and is asked again next tick", StallToggleRefusedSpendsNoStep);
+        r.Add("refusal: missile crafting asks for peace until accepted, and combines after the 2.5 s ceiling; already in peace it combines on the first tick with no mode request", CraftingPeaceRefusal);
+        r.Add("pacing (stance): a refused ChangeCombatMode burns no try and no backoff step, and the next tick asks again (pacing on and off)", RefusedStanceBurnsNothing);
+        r.Add("corpse id: a refused RequestId is not recorded as asked - the next evaluation asks again and the accepted one goes out", CorpseIdRefusedRetried);
+        r.Add("corpse id: an accepted request with no data is asked again after 3 s (not before), once per 3 s, with no give-up cap", CorpseIdReaskedWithoutData);
+        r.Add("corpse id: two corpses in range, no data for either - only the targeted one re-asks; the other stays at one accepted request (a refused one is still retried)", CorpseIdOnlyCandidateReasks);
+        r.Add("corpse id: 20 uncached corpses, a refusal window, then accept - at most 2 requests in the first accepted tick, the target among them; refused retries are 250 ms apart", CorpseIdBurstCapped);
+        r.Add("corpse id: the open container is a candidate and re-asks; delete and the >200 prune clear every id map", CorpseIdOpenContainerAndCleanup);
         r.Add("pacing (vitals): a heal waits for an unanswered corpse use's answer, then goes at once; the emergency stance settle is unchanged", HealLatencyKept);
         r.Add("pacing (looting): one open per server answer, never re-sent on top of an unanswered one", LootOneOpenPerAnswer);
         r.Add("pacing (looting): Drakkon's stall is still found and said once with pacing on", LootStallStillDetected);
@@ -468,6 +483,484 @@ internal static class ActionPacingTests
         finally { PaceOff(); }
     }
 
+    private static void RefusedStanceBurnsNothing()
+    {
+        foreach (bool pacing in new[] { true, false })
+        {
+            PaceOff();
+            if (pacing) PaceOn();
+            try
+            {
+                var r = new BuffRig(CombatMode.NonCombat);
+                r.S.EmergencyHealAt = 30; r.S.HealAt = 60; r.S.TopOffHP = 60; r.S.GetManaAt = 0; r.S.TopOffMana = 0;
+                r.V.CurrentHealth = 20; r.V.CurrentMana = 100;
+                var fails = typeof(BuffManager).GetField("_buffStanceConsecutiveFails", Any)!;
+                var last = typeof(BuffManager).GetField("_lastBuffStanceAttempt", Any)!;
+                DateTime lastBefore = (DateTime)last.GetValue(r.B)!;
+                FakeHost.CombatModeRefuse = true;   // the engine turns the stance change away (a teleport, a death)
+
+                for (int i = 0; i < 6; i++) { r.At(i * 0.2); r.B.OnHeartbeat(); }
+                Check.Eq(FakeHost.CombatModeRefusals, 6, $"pacing={pacing}: every tick asks again - a refusal is no try and sets no backoff");
+                Check.Eq((int)fails.GetValue(r.B)!, 0, $"pacing={pacing}: _buffStanceConsecutiveFails unchanged");
+                Check.True((DateTime)last.GetValue(r.B)! == lastBefore, $"pacing={pacing}: _lastBuffStanceAttempt unchanged");
+                Check.Eq(FakeHost.CombatModeRequests.Count, 0, $"pacing={pacing}: nothing reached the server");
+
+                FakeHost.CombatModeRefuse = false;
+                r.At(1.4); r.B.OnHeartbeat();
+                Check.Eq(string.Join(",", FakeHost.CombatModeRequests), "8", $"pacing={pacing}: the engine accepts again and the very next tick sends Magic");
+                Check.Eq((int)fails.GetValue(r.B)!, 1, $"pacing={pacing}: only a sent request counts as a try");
+            }
+            finally { PaceOff(); }
+        }
+    }
+
+    private static void RefusedBeginsNothing() => Paced(() =>
+    {
+        var host = World(combatMode: 2);
+        FakeHost.CombatModeRefuse = true;
+        Check.False(host.ChangeCombatModeFor(CombatMode.Magic, "Buff", "refused"), "the engine refused: false");
+        Check.True(ActionPacer.Current(host) == null, "no paced action was begun");
+        Check.True(ActionPacer.MayStart(host, "Buff", HealNeed.None, out _), "so nothing is held behind it");
+        FakeHost.CombatModeRefuse = false;
+        Check.True(host.ChangeCombatModeFor(CombatMode.Magic, "Buff", "accepted"), "accepted: true");
+        Check.True(ActionPacer.Current(host)?.Kind == PacedKind.CombatMode, "and now the stance change is outstanding");
+    });
+
+    private static void RefusalStreakFailsOpen() => Paced(() =>
+    {
+        var host = World(combatMode: 2);
+        FakeHost.CombatModeRefuse = true;
+        for (int s = 0; s <= 5; s++) { _t = 10_000_000 + s * 1000; Check.False(host.ChangeCombatModeFor(CombatMode.Magic, "Buff", "x"), $"{s} s into a refusal streak: false"); }
+        Check.Eq(FakeHost.Logs.Count(l => l.Contains("the engine refused the change")), 1, "one line when the streak starts");
+        FakeHost.CombatModeRefuse = false;
+        _t = 10_000_000 + 6_000;
+        Check.True(host.ChangeCombatModeFor(CombatMode.Magic, "Buff", "x"), "accepted");
+        Check.Eq(FakeHost.Logs.Count(l => l.Contains("the engine accepts mode changes again")), 1, "one line when it ends");
+        FakeHost.UseDone(0); ActionPacer.Reset(); ActionPacer.Enabled = true; ActionPacer.NowMs = () => _t;
+
+        FakeHost.CombatModeRefuse = true;
+        long start = _t + 1000;
+        bool sawOpen = false;
+        for (int s = 0; s <= 40; s++)
+        {
+            _t = start + s * 1000L;
+            bool r = host.ChangeCombatModeFor(CombatMode.Magic, "Buff", "x");
+            if (s <= 30) Check.False(r, $"{s} s into the streak: still false");
+            else sawOpen |= r;
+        }
+        Check.True(sawOpen, "past 30 s a refusal counts as a failure again (true)");
+        Check.Eq(FakeHost.Logs.Count(l => l.Contains("the engine refused the change")), 2, "the second streak logged once");
+        FakeHost.CombatModeRefuse = false;
+        _t += 1000;
+        Check.True(host.ChangeCombatModeFor(CombatMode.Magic, "Buff", "x"), "any accepted call ends the streak");
+        FakeHost.CombatModeRefuse = true;
+        _t += 5000; ActionPacer.Reset(); ActionPacer.Enabled = true; ActionPacer.NowMs = () => _t;
+        Check.False(host.ChangeCombatModeFor(CombatMode.Magic, "Buff", "x"), "a fresh streak starts at false again");
+    });
+
+    private static readonly BindingFlags Priv = BindingFlags.Instance | BindingFlags.NonPublic;
+
+    private static void SetupBuffRigVitals(BuffRig r)
+    {
+        r.S.EmergencyHealAt = 30; r.S.HealAt = 60; r.S.TopOffHP = 60; r.S.GetManaAt = 0; r.S.TopOffMana = 0;
+        r.V.CurrentHealth = 20; r.V.CurrentMana = 100;
+    }
+
+    private static void NoWandRefusalLoop()
+    {
+        PaceOff();
+        try
+        {
+            var r = new BuffRig(CombatMode.NonCombat);
+            SetupBuffRigVitals(r);
+            var blocked = typeof(BuffManager).GetField("_magicModeBlocked", Priv)!;
+            var fails = typeof(BuffManager).GetField("_buffStanceConsecutiveFails", Priv)!;
+            var swapUntil = typeof(BuffManager).GetField("_vitalSwapBlockedUntil", Priv)!;
+            FakeHost.CombatModeRefuse = true;
+            bool everBlocked = false;
+            int ticks = 0;
+            for (double s = 0; s <= 20; s += 0.5) { r.At(s); r.B.OnHeartbeat(); ticks++; everBlocked |= (bool)blocked.GetValue(r.B)!; }
+            Check.True(FakeHost.CombatModeRefusals >= ticks / 2, $"20 s: the stance is asked again throughout ({FakeHost.CombatModeRefusals} refusals in {ticks} heartbeats; other vitals gates skip some ticks)");
+            Check.False(everBlocked, "_magicModeBlocked never set by refusals");
+            Check.Eq((int)fails.GetValue(r.B)!, 0, "no failure counted");
+            Check.True((DateTime)swapUntil.GetValue(r.B)! < DateTime.Now, "and the vitals did not fall through to the potion path");
+
+            // Past 30 s of refusals the call counts again. The backoff gates run on the real clock, so
+            // stand in for three earlier counted tries: the very next counted try (the first past 30 s)
+            // is the fourth, and the one after it finds the flip blocked and hands over to the potion.
+            fails.SetValue(r.B, 3);
+            for (double s = 20.5; s <= 40; s += 0.5) { r.At(s); r.B.OnHeartbeat(); everBlocked |= (bool)blocked.GetValue(r.B)!; }
+            Check.True(everBlocked, "40 s: the failure counting resumed and _magicModeBlocked was reached");
+            Check.True((DateTime)swapUntil.GetValue(r.B)! > DateTime.Now, "the vitals chain reached the potion/kit fallback (swap blocked, retry later)");
+            Check.Eq(FakeHost.Logs.Count(l => l.Contains("the engine refused the change")), 1, "one streak, one line");
+        }
+        finally { PaceOff(); }
+    }
+
+    private static void WandWieldedRefusalNoReEquip()
+    {
+        PaceOff();
+        try
+        {
+            var r = new BuffRig(CombatMode.NonCombat);
+            SetupBuffRigVitals(r);
+            FakeHost.Names[Wand] = "Academy Wand";
+            FakeHost.ItemTypes[Wand] = 0x8000;
+            FakeHost.Ints[(Wand, 10)] = 0x01000000;   // CurrentWieldedLocation: in hand
+            r.S.WieldUnlistedWandWhenNoneListed = true;
+            r.B.SetWorldObjectCache(FakeHost.MakeCache(r.Host, Player, new[] { Wand }));
+            var reEquips = typeof(BuffManager).GetField("_buffStanceReEquips", Priv)!;
+            var since = typeof(BuffManager).GetField("_buffStanceStuckSince", Priv)!;
+            FakeHost.CombatModeRefuse = true;
+            r.At(0); r.B.OnHeartbeat();
+            Check.True(FakeHost.CombatModeRefusals >= 1, "set-up: the wielded-wand branch asked for the stance and was refused");
+            Check.True((DateTime)since.GetValue(r.B)! == DateTime.MinValue, "the stuck clock has not started");
+            System.Threading.Thread.Sleep(9_000);   // BuffStanceStuckRecoverMs (8 s) runs on the real clock
+            r.At(9); r.B.OnHeartbeat();
+            r.At(9.3); r.B.OnHeartbeat();
+            Check.Eq((int)reEquips.GetValue(r.B)!, 0, "9 s of refusals: _buffStanceReEquips stays 0");
+            Check.False(FakeHost.Uses.Contains(Wand), "and no UseObject(wand) - a MOVE on a wielded wand - went out");
+            Check.True((DateTime)since.GetValue(r.B)! == DateTime.MinValue, "the clock still has not started");
+
+            FakeHost.CombatModeRefuse = false;
+            r.At(9.6); r.B.OnHeartbeat();
+            Check.Eq(string.Join(",", FakeHost.CombatModeRequests), "8", "accepted: the Magic request goes out");
+            Check.True((DateTime)since.GetValue(r.B)! != DateTime.MinValue, "and only now the stuck clock starts");
+            Check.Eq((int)reEquips.GetValue(r.B)!, 0, "still no re-equip");
+            Check.False(FakeHost.Uses.Contains(Wand), "still no UseObject(wand)");
+        }
+        finally { PaceOff(); }
+    }
+
+    private static void PeaceBeforeOpenRefusedRetried()
+    {
+        LootWorld();
+        FakeHost.CombatModeCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Melee;
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        var cache = bot.Get<WorldObjectCache>("_objectCache");
+        var cm = new CombatManager(host, bot.S, cache);
+        cm.SetPlayerId(Player);
+        bot.Set("_combatManager", cm);
+        bot.Set("_targetCorpseId", unchecked((int)Corpse));
+        bot.S.PeaceModeWhenIdle = true;
+        bool Wants(long now) => (bool)bot.Call("WantsPeaceBeforeOpen", bot.S, now)!;
+        FakeHost.CombatModeRefuse = true;
+        Check.True(Wants(1_000), "first ask (refused): the open waits");
+        Check.True(Wants(1_500), "asked again (refused): still waiting");
+        Check.Eq(FakeHost.CombatModeRefusals, 2, "both asks reached the engine: the refusal did not use up the one shot");
+        FakeHost.CombatModeRefuse = false;
+        Check.True(Wants(2_000), "accepted within the ceiling: waiting for the swap");
+        Check.True(Wants(2_300), "waiting");
+        Check.True(Wants(3_000), "waiting");
+        Check.Eq(string.Join(",", FakeHost.CombatModeRequests), "1", "exactly one peace request went out");
+        Check.False(Wants(3_600), "the ceiling counts from the FIRST ask (1000 + 2500): the open goes on");
+        Check.Eq(FakeHost.CombatModeRequests.Count, 1, "and still exactly one");
+    }
+    private static void RefusalStreakExpires() => Paced(() =>
+    {
+        var host = World(combatMode: 2);
+        FakeHost.CombatModeRefuse = true;
+        Check.False(host.ChangeCombatModeFor(CombatMode.Magic, "Buff", "x"), "t0: a refusal opens a streak (false)");
+        _t += 600_000;   // a death, a logout: ten minutes of nothing, no accepted call in between
+        Check.False(host.ChangeCombatModeFor(CombatMode.Magic, "Buff", "x"), "a refusal 600 s later is a NEW streak (false), not a 600 s streak failing open");
+        Check.Eq(FakeHost.Logs.Count(l => l.Contains("the engine refused the change")), 2, "and it logged its own start line");
+
+        // Refusals closer than the gap are one streak: it still fails open at 30 s.
+        ActionPacer.Reset(); ActionPacer.Enabled = true; ActionPacer.NowMs = () => _t;
+        long start = _t;
+        bool open = false;
+        for (int s = 0; s <= 40; s += 5) { _t = start + s * 1000L; open |= host.ChangeCombatModeFor(CombatMode.Magic, "Buff", "x"); }
+        Check.True(open, "refusals 5 s apart stay one streak and fail open past 30 s");
+
+        // Forget (portal / death / logout) ends the streak too.
+        ActionPacer.Reset(); ActionPacer.Enabled = true; ActionPacer.NowMs = () => _t;
+        // Refusals 9 s apart are one streak (the gap is 10 s). Without the Forget the refusal at +36 s would be 36 s into it and fail open.
+        Check.False(host.ChangeCombatModeFor(CombatMode.Magic, "Buff", "x"), "streak begins");
+        _t += 9_000; Check.False(host.ChangeCombatModeFor(CombatMode.Magic, "Buff", "x"), "+9 s: same streak");
+        ActionPacer.Forget("death");
+        for (int s = 0; s < 3; s++) { _t += 9_000; Check.False(host.ChangeCombatModeFor(CombatMode.Magic, "Buff", "x"), $"after Forget a fresh streak, refusal {s + 1} (false)"); }
+        Check.True(ActionPacer.LastEngineRefusalMs > 0, "LastEngineRefusalMs records the newest refusal");
+        ActionPacer.Reset();
+        Check.Eq(ActionPacer.LastEngineRefusalMs, 0L, "Reset clears LastEngineRefusalMs");
+    });
+
+    private static void StuckClockRestartsOnRefusal()
+    {
+        PaceOff();
+        try
+        {
+            var r = new BuffRig(CombatMode.NonCombat);
+            SetupBuffRigVitals(r);
+            FakeHost.Names[Wand] = "Academy Wand";
+            FakeHost.ItemTypes[Wand] = 0x8000;
+            FakeHost.Ints[(Wand, 10)] = 0x01000000;   // in hand
+            r.S.WieldUnlistedWandWhenNoneListed = true;
+            r.B.SetWorldObjectCache(FakeHost.MakeCache(r.Host, Player, new[] { Wand }));
+            var reEquips = typeof(BuffManager).GetField("_buffStanceReEquips", Priv)!;
+            var since = typeof(BuffManager).GetField("_buffStanceStuckSince", Priv)!;
+            var lastTry = typeof(BuffManager).GetField("_lastBuffStanceAttempt", Priv)!;
+
+            r.At(0); r.B.OnHeartbeat();
+            Check.Eq(string.Join(",", FakeHost.CombatModeRequests), "8", "set-up: the first request is accepted and starts the stuck clock");
+            Check.True((DateTime)since.GetValue(r.B)! != DateTime.MinValue, "set-up: the clock is running");
+
+            // The request was dropped by a teleport; the engine now refuses. The backoff gate (real clock) is opened by back-dating.
+            lastTry.SetValue(r.B, DateTime.Now.AddSeconds(-3));
+            FakeHost.CombatModeRefuse = true;
+            r.At(2); r.B.OnHeartbeat();
+            Check.True(FakeHost.CombatModeRefusals >= 1, "set-up: a later request was refused");
+
+            // 9 s of that: back-date the clock as if the real time had passed (the re-equip rule reads the real clock).
+            since.SetValue(r.B, DateTime.Now.AddSeconds(-9));
+            r.At(9); r.B.OnHeartbeat();
+            r.At(9.3); r.B.OnHeartbeat();
+            Check.Eq((int)reEquips.GetValue(r.B)!, 0, "a refusal newer than the clock's start restarted it: _buffStanceReEquips stays 0");
+            Check.False(FakeHost.Uses.Contains(Wand), "and no UseObject(wand) - a MOVE on a wielded wand - went out");
+            Check.True((DateTime.Now - (DateTime)since.GetValue(r.B)!).TotalSeconds < 3, "the clock was restarted at now");
+
+            FakeHost.CombatModeRefuse = false;
+            r.At(9.6); r.B.OnHeartbeat();
+            Check.Eq(string.Join(",", FakeHost.CombatModeRequests), "8,8", "accepted again");
+            Check.Eq((int)reEquips.GetValue(r.B)!, 0, "still no re-equip");
+            Check.False(FakeHost.Uses.Contains(Wand), "still no UseObject(wand)");
+        }
+        finally { PaceOff(); }
+    }
+
+    private static void StallToggleRefusedSpendsNoStep()
+    {
+        PaceOff();
+        var host = World(combatMode: 2);
+        var s = new LegacyUiSettings { BotAction = "Combat" };
+        var cm = new CombatManager(host, s, new WorldObjectCache(host));
+        cm.SetPlayerId(Player);
+        const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic;
+        typeof(CombatManager).GetField("_activeTargetId", F)!.SetValue(cm, unchecked((int)Corpse));
+        var watch = typeof(CombatManager).GetField("_stallWatch", F)!.GetValue(cm)!;
+        var wt = watch.GetType();
+        DateTime now = DateTime.Now;
+        // The ladder stands at step 2 (re-select done 4 s ago); the next step due is the mode toggle.
+        wt.GetField("_eligibleSince", F)!.SetValue(watch, now.AddSeconds(-12));
+        wt.GetField("_lastTick", F)!.SetValue(watch, now.AddMilliseconds(-100));
+        wt.GetField("_step", F)!.SetValue(watch, 2);
+        wt.GetField("_lastStepAt", F)!.SetValue(watch, now.AddSeconds(-4));
+        wt.GetField("_stallRef", F)!.SetValue(watch, now.AddSeconds(-12));
+        int Step() => (int)wt.GetProperty("CurrentStep")!.GetValue(watch)!;
+        var run = typeof(CombatManager).GetMethod("RunStallWatchdog", F)!;
+        var lastAttack = typeof(CombatManager).GetField("lastAttackCmd", F)!;
+        lastAttack.SetValue(cm, DateTime.MinValue);
+
+        FakeHost.CombatModeRefuse = true;
+        Check.True((bool)run.Invoke(cm, new object?[] { null, 1.0 })!, "the toggle step holds the tick");
+        Check.Eq(FakeHost.CombatModeRefusals, 1, "the toggle reached the engine and was refused");
+        Check.Eq(Step(), 2, "a refusal spends no ladder step: still at step 2");
+        Check.Eq(FakeHost.CombatModeRequests.Count, 0, "nothing was sent");
+        Check.True((DateTime)lastAttack.GetValue(cm)! == DateTime.MinValue, "a refusal does not stamp the attack clock");
+
+        FakeHost.CombatModeRefuse = false;
+        Check.True((bool)run.Invoke(cm, new object?[] { null, 1.0 })!, "next tick: the toggle step is due again at once (not 3 s later)");
+        Check.Eq(string.Join(",", FakeHost.CombatModeRequests), "1", "and the accepted toggle sent Peace");
+        Check.Eq(Step(), 3, "now the ladder is at step 3");
+        Check.True((DateTime)lastAttack.GetValue(cm)! != DateTime.MinValue, "the accepted toggle stamps the attack clock");
+    }
+
+    private static void CraftingPeaceRefusal()
+    {
+        PaceOff();
+        const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic;
+        MissileCraftingManager Rig(int mode, bool refuse, out Action<double> backdateAsk)
+        {
+            var host = World(combatMode: mode);
+            FakeHost.CombatModeRefuse = refuse;
+            var cm = new MissileCraftingManager(host, new LegacyUiSettings { EnableMissileCrafting = true });
+            var t = typeof(MissileCraftingManager);
+            t.GetField("_currentRecipe", F)!.SetValue(cm, AmmoRecipes.All[0]);
+            t.GetField("_headBundleId", F)!.SetValue(cm, 0x5001);
+            t.GetField("_shaftBundleId", F)!.SetValue(cm, 0x5002);
+            t.GetField("_peaceSent", F)!.SetValue(cm, false);
+            t.GetField("_peaceAskedAt", F)!.SetValue(cm, DateTime.Now);
+            t.GetMethod("TryPeaceForCrafting", F)!.Invoke(cm, null);   // StartCrafting's first step
+            t.GetMethod("SetState", F)!.Invoke(cm, new object[] { MissileCraftingManager.CraftState.Combining });
+            backdateAsk = sec => t.GetField("_peaceAskedAt", F)!.SetValue(cm, DateTime.Now.AddSeconds(-sec));
+            return cm;
+        }
+
+        // (a) the engine always refuses: no combine inside the ceiling, the combine after it.
+        var a = Rig(CombatMode.Melee, true, out var backdate);
+        a.ProcessCrafting();
+        Check.Eq(FakeHost.UsesOn.Count, 0, "(a) refused, inside 2.5 s: the combine waits");
+        a.ProcessCrafting();
+        Check.Eq(FakeHost.UsesOn.Count, 0, "(a) still waiting");
+        Check.True(FakeHost.CombatModeRefusals >= 2, $"(a) peace was asked again each tick ({FakeHost.CombatModeRefusals} refusals)");
+        backdate(2.6);
+        a.ProcessCrafting();
+        Check.Eq(FakeHost.UsesOn.Count, 1, "(a) past the 2.5 s ceiling the combine goes out anyway");
+        Check.Eq(FakeHost.CombatModeRequests.Count, 0, "(a) no mode request ever reached the server");
+
+        // (b) already in Peace: no request at all, the combine on the first tick.
+        var b = Rig(CombatMode.NonCombat, true, out _);
+        b.ProcessCrafting();
+        Check.Eq(FakeHost.UsesOn.Count, 1, "(b) already in Peace: the combine goes out on the first tick");
+        Check.Eq(FakeHost.CombatModeRequests.Count, 0, "(b) and no mode request was made");
+        Check.Eq(FakeHost.CombatModeRefusals, 0, "(b) nor asked");
+    }
+
+    private static (Bot Bot, WorldObject Corpse) CorpseIdRig()
+    {
+        LootWorld();
+        FakeHost.Strings.Remove((Corpse, LongDescKey));   // nothing appraised yet: no killer name
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        bot.Set("_targetCorpseId", unchecked((int)Corpse));   // the corpse the bot is going for: the only one that re-asks
+        var obj = bot.Get<WorldObjectCache>("_objectCache")[unchecked((int)Corpse)]!;
+        return (bot, obj);
+    }
+
+    private static void CorpseIdRefusedRetried() => Paced(() =>
+    {
+        var (bot, obj) = CorpseIdRig();
+        FakeHost.RequestIdAccepts = false;
+        bot.Call("EvaluateCorpseLootDecision", obj);
+        Check.Eq(FakeHost.RefusedIdRequests, 1, "the engine refused the first RequestId");
+        Check.Eq(FakeHost.IdRequests.Count(i => i == Corpse), 0, "so nothing went out");
+        _t += 250;
+        FakeHost.RequestIdAccepts = true;
+        bot.Call("EvaluateCorpseLootDecision", obj);
+        Check.Eq(FakeHost.IdRequests.Count(i => i == Corpse), 1, "the next evaluation asked again and it was accepted");
+        _t += 100;
+        bot.Call("EvaluateCorpseLootDecision", obj);
+        Check.Eq(FakeHost.IdRequests.Count(i => i == Corpse), 1, "an accepted request is not repeated at once");
+    });
+
+    private static void CorpseIdReaskedWithoutData() => Paced(() =>
+    {
+        var (bot, obj) = CorpseIdRig();
+        int Asked() => FakeHost.IdRequests.Count(i => i == Corpse);
+        bot.Call("EvaluateCorpseLootDecision", obj);
+        Check.Eq(Asked(), 1, "t=0: the first request goes out");
+        _t += 2_999;
+        bot.Call("EvaluateCorpseLootDecision", obj);
+        Check.Eq(Asked(), 1, "2.999 s, no data: not yet");
+        _t += 1;
+        bot.Call("EvaluateCorpseLootDecision", obj);
+        Check.Eq(Asked(), 2, "3 s, no data: asked again");
+        _t += 1_000;
+        bot.Call("EvaluateCorpseLootDecision", obj);
+        Check.Eq(Asked(), 2, "1 s after the re-ask: waits");
+        _t += 2_000;
+        bot.Call("EvaluateCorpseLootDecision", obj);
+        Check.Eq(Asked(), 3, "one re-ask per 3 s, and no cap");
+        for (int i = 0; i < 10; i++) { _t += 3_000; bot.Call("EvaluateCorpseLootDecision", obj); }
+        Check.Eq(Asked(), 13, "ten more 3 s periods, ten more asks");
+        FakeHost.Strings[(Corpse, LongDescKey)] = $"Killed by {Me}.";
+        _t += 3_000;
+        bot.Call("EvaluateCorpseLootDecision", obj);
+        Check.Eq(Asked(), 13, "once the data has arrived nothing more is asked");
+    });
+    private static void CorpseIdOnlyCandidateReasks() => Paced(() =>
+    {
+        LootWorld();
+        FakeHost.Strings.Remove((Corpse, LongDescKey));
+        FakeHost.Strings.Remove((CorpseB, LongDescKey));
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        var cache = bot.Get<WorldObjectCache>("_objectCache");
+        var a = cache[unchecked((int)Corpse)]!;
+        var b = cache[unchecked((int)CorpseB)]!;
+        bot.Set("_targetCorpseId", unchecked((int)Corpse));
+        int Asked(uint id) => FakeHost.IdRequests.Count(i => i == id);
+        void Both() { bot.Call("EvaluateCorpseLootDecision", a); bot.Call("EvaluateCorpseLootDecision", b); }
+
+        FakeHost.RequestIdAccepts = false;
+        Both();
+        FakeHost.RequestIdAccepts = true;
+        _t += 250; Both();
+        Check.Eq(Asked(Corpse), 1, "the candidate: refused once, then one accepted request");
+        Check.Eq(Asked(CorpseB), 1, "the other corpse: a refused request is retried, one accepted request");
+        for (int i = 0; i < 4; i++) { _t += 3_000; Both(); }
+        Check.Eq(Asked(Corpse), 5, "no data: the candidate re-asks once per 3 s");
+        Check.Eq(Asked(CorpseB), 1, "the other corpse never asks a second time");
+        bot.Set("_targetCorpseId", unchecked((int)CorpseB));
+        _t += 3_000; Both();
+        Check.Eq(Asked(CorpseB), 2, "once it becomes the candidate it re-asks");
+    });
+    private static void CorpseIdBurstCapped() => Paced(() =>
+    {
+        LootWorld();
+        FakeHost.Strings.Remove((Corpse, LongDescKey));
+        FakeHost.Strings.Remove((CorpseB, LongDescKey));
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        var cache = bot.Get<WorldObjectCache>("_objectCache");
+        var ids = new System.Collections.Generic.List<uint> { Corpse, CorpseB };
+        for (uint i = 0; i < 18; i++)
+        {
+            uint id = 0x80090000 + i;
+            FakeHost.Names[id] = "Corpse of Olthoi Swarm Worker";
+            FakeHost.ItemTypes[id] = ItemTypeContainer;
+            FakeHost.NotAttackable.Add(id);
+            FakeHost.Positions[id] = (Me0.Cell, Me0.X + 2.0f + i * 0.1f, Me0.Y, Me0.Z);
+            cache.OnCreateObject(id);
+            ids.Add(id);
+        }
+        cache.Tick();
+        uint target = ids[^1];   // created last: the scan reaches it last, so only the candidate-first rule puts it among the first two
+        bot.Set("_targetCorpseId", unchecked((int)target));
+        void Scan() => bot.Call("HasUnlootedCorpsesInRange", 30.0);
+
+        FakeHost.RequestIdAccepts = false;
+        for (int k = 0; k < 3; k++) { _t += 300; Scan(); }
+        Check.Eq(FakeHost.IdRequests.Count, 0, "the refusal window: nothing accepted");
+        Check.True(FakeHost.RefusedIdRequests >= 20, $"every corpse was tried ({FakeHost.RefusedIdRequests} refusals)");
+        int refusals = FakeHost.RefusedIdRequests;
+        _t += 100; Scan();
+        Check.Eq(FakeHost.RefusedIdRequests, refusals, "100 ms later: refused corpses are not retried yet (250 ms apart)");
+
+        FakeHost.RequestIdAccepts = true;
+        _t += 300; Scan();
+        Check.True(FakeHost.IdRequests.Count <= 2, $"the first accepted tick sends at most 2 ({FakeHost.IdRequests.Count})");
+        Check.True(FakeHost.IdRequests.Contains(target), "and the candidate is among them");
+        for (int k = 0; k < 12; k++)
+        {
+            int before = FakeHost.IdRequests.Count;
+            _t += 200; Scan();
+            Check.True(FakeHost.IdRequests.Count - before <= 2, $"tick {k + 2}: at most 2 new requests");
+        }
+        Check.Eq(FakeHost.IdRequests.Distinct().Count(), 20, "within a few ticks every corpse has been asked once");
+    });
+
+    private static void CorpseIdOpenContainerAndCleanup() => Paced(() =>
+    {
+        const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic;
+        var (bot, obj) = CorpseIdRig();
+        bot.Set("_targetCorpseId", 0);
+        bot.Set("_openedContainerId", unchecked((int)Corpse));
+        int Asked() => FakeHost.IdRequests.Count(i => i == Corpse);
+        bot.Call("EvaluateCorpseLootDecision", obj);
+        _t += 3_000;
+        bot.Call("EvaluateCorpseLootDecision", obj);
+        Check.Eq(Asked(), 2, "the open container is a candidate: it re-asks after 3 s");
+
+        var asked = bot.Get<System.Collections.Generic.Dictionary<int, long>>("_corpseIdAskedAt");
+        var refused = bot.Get<System.Collections.Generic.Dictionary<int, long>>("_corpseIdRefusedAt");
+        var requested = bot.Get<System.Collections.Generic.HashSet<int>>("_corpseIdRequested");
+        int sid = unchecked((int)Corpse);
+        refused[sid] = _t;
+        Check.True(asked.ContainsKey(sid) && requested.Contains(sid), "set-up: the corpse is recorded");
+        bot.Call("HandleCorpseObjectDeleted", Corpse);
+        Check.False(asked.ContainsKey(sid), "delete clears _corpseIdAskedAt");
+        Check.False(refused.ContainsKey(sid), "delete clears _corpseIdRefusedAt");
+        Check.False(requested.Contains(sid), "delete clears _corpseIdRequested");
+
+        for (int i = 0; i < 201; i++) { requested.Add(i + 1); asked[i + 1] = _t; refused[i + 1] = _t; }
+        bot.Set("_lastCorpsePruneAt", 0L);
+        bot.Call("PruneCorpseCollections");
+        Check.Eq(requested.Count, 0, "the >200 prune clears _corpseIdRequested");
+        Check.Eq(asked.Count, 0, "the >200 prune clears _corpseIdAskedAt");
+        Check.Eq(refused.Count, 0, "the >200 prune clears _corpseIdRefusedAt");
+    });
     // ── Looting ──────────────────────────────────────────────────────────────────
 
     private static void LootWorld()
@@ -703,7 +1196,7 @@ internal static class ActionPacingTests
         _t += 110;
         Check.False(ActionPacer.MayStart(host, "Buff", HealNeed.None, out string why), "the wand waits: the swing hasn't animated yet");
         Check.True(why.Contains("swing"), "why: " + why);
-        Check.True(ActionPacer.MayStart(host, "Combat", HealNeed.None, out _, gestureGate: false), "the next attack isn't held");
+        Check.True(ActionPacer.MayStart(host, "Combat", HealNeed.None, out _, animationGate: false, settleGate: false, attackRepeat: true), "the next attack isn't held");
         _t += 200;
         FakeHost.CastBusy = 1;
         Check.False(ActionPacer.MayStart(host, "Buff", HealNeed.None, out _), "swinging: still waits");
@@ -830,10 +1323,10 @@ internal static class ActionPacingTests
     {
         var host = World(combatMode: 2);
         FakeHost.CastBusy = 1;   // the last swing still plays
-        Check.True(ActionPacer.MayStart(host, "Combat", HealNeed.None, out _, gestureGate: false), "a melee attack repeat is not held by the animation");
+        Check.True(ActionPacer.MayStart(host, "Combat", HealNeed.None, out _, animationGate: false, settleGate: false, attackRepeat: true), "a melee attack repeat is not held by the animation");
         Check.False(ActionPacer.MayStart(host, "Combat", HealNeed.None, out _), "anything gated is");
         host.UseFor(Corpse, "Loot", "open");
-        Check.False(ActionPacer.MayStart(host, "Combat", HealNeed.None, out _, gestureGate: false), "but an attack still waits for an unanswered corpse use (the server's turn)");
+        Check.False(ActionPacer.MayStart(host, "Combat", HealNeed.None, out _, animationGate: false, settleGate: false, attackRepeat: true), "but an attack still waits for an unanswered corpse use (the server's turn)");
         FakeHost.UseDone(0);
         Check.True(ActionPacer.Current(host) == null, "the use is answered");
         ActionPacer.Enabled = false;

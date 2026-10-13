@@ -45,6 +45,14 @@ internal static class MoveAudit
     private static string _lastKey = "";
     private static long _lastWrittenMs = long.MinValue;
     private static int _repeats;
+
+    // Every movement call that reached the client (a start, a stop, a turn, a held stop sent later).
+    private static long _movementSends;
+
+    /// <summary>Movement calls that reached the client so far: a start, a stop, a turn, or a held stop
+    /// sent by FlushPendingStops. Only ever grows (Reset aside); a reader compares two values to know
+    /// whether anything moved in between (BuffCastChain: no fast-path buff right after a movement change).</summary>
+    internal static long MovementSends { get { lock (Gate) return _movementSends; } }
     private static string _repeatLastArg = "";
     private static long _repeatFirstMs;
 
@@ -54,7 +62,8 @@ internal static class MoveAudit
         if (HeldForAction(host, who, on ? "SetAutoRun(True)" : "SetAutoRun(False)", isStop: !on, deferAs: on ? null : PendingStop.AutoRunOff())) return false;
         if (on) FlushPendingStops(host, "before a start");
         Note(host, who, "SetAutoRun", on ? "True" : "False", collapseByKindOnly: false);
-        lock (Gate) { _autoRunOn = on; if (on) _lastStartMs = NowMs(); else _pendingAutoRunOff = null; }
+        lock (Gate) { _autoRunOn = on; if (on) _lastStartMs = NowMs(); else _pendingAutoRunOff = null; _movementSends++; }
+        Changed(on ? "SetAutoRun(True)" : "SetAutoRun(False)");
         return host.SetAutoRun(on);
     }
 
@@ -62,7 +71,8 @@ internal static class MoveAudit
     {
         if (HeldForAction(host, who, "StopCompletely()", isStop: true, deferAs: PendingStop.Complete())) return false;
         Note(host, who, "StopCompletely", "", collapseByKindOnly: false);
-        lock (Gate) { _autoRunOn = false; _motionsOn.Clear(); ClearPendingLocked(); }   // clears everything AC has on
+        lock (Gate) { _autoRunOn = false; _motionsOn.Clear(); ClearPendingLocked(); _movementSends++; }   // clears everything AC has on
+        Changed("StopCompletely()");
         return host.StopCompletely();
     }
 
@@ -72,7 +82,8 @@ internal static class MoveAudit
         if (HeldForAction(host, who, $"SetMotion(0x{motion:X8}, {(on ? "True" : "False")})", isStop: !on, motion, on ? null : PendingStop.MotionOff(motion))) return false;
         if (on) FlushPendingStops(host, "before a start");
         Note(host, who, "SetMotion", $"0x{motion:X8}, {(on ? "True" : "False")}", collapseByKindOnly: false);
-        lock (Gate) { if (on) { _motionsOn.Add(motion); _lastStartMs = NowMs(); } else { _motionsOn.Remove(motion); _pendingMotionOff.Remove(motion); } }
+        lock (Gate) { if (on) { _motionsOn.Add(motion); _lastStartMs = NowMs(); } else { _motionsOn.Remove(motion); _pendingMotionOff.Remove(motion); } _movementSends++; }
+        Changed($"SetMotion(0x{motion:X8}, {(on ? "True" : "False")})");
         return host.SetMotion(motion, on);
     }
 
@@ -82,7 +93,8 @@ internal static class MoveAudit
         if (HeldForAction(host, who, $"DoMovement(0x{motion:X8})", isStop: false)) return false;
         FlushPendingStops(host, "before a start");
         Note(host, who, "DoMovement", $"0x{motion:X8}, {speed:0.##}, {holdKey}", collapseByKindOnly: false);
-        lock (Gate) { _motionsOn.Add(motion); _lastStartMs = NowMs(); }
+        lock (Gate) { _motionsOn.Add(motion); _lastStartMs = NowMs(); _movementSends++; }
+        Changed($"DoMovement(0x{motion:X8})");
         return host.DoMovement(motion, speed, holdKey);
     }
 
@@ -256,7 +268,7 @@ internal static class MoveAudit
                 if (host.HasStopCompletely)
                 {
                     host.StopCompletely();
-                    lock (Gate) { _autoRunOn = false; _motionsOn.Clear(); _deferredStopsSent++; }
+                    lock (Gate) { _autoRunOn = false; _motionsOn.Clear(); _deferredStopsSent++; _movementSends++; }
                     sent.Add($"StopCompletely() for {complete}");
                 }
                 else
@@ -269,26 +281,29 @@ internal static class MoveAudit
                 if (autoRunOff != null)
                 {
                     host.SetAutoRun(false);
-                    lock (Gate) { _autoRunOn = false; _deferredStopsSent++; }
+                    lock (Gate) { _autoRunOn = false; _deferredStopsSent++; _movementSends++; }
                     sent.Add($"SetAutoRun(False) for {autoRunOff}");
                 }
                 foreach (var m in motionOff)
                 {
                     if (!host.HasSetMotion) break;
                     host.SetMotion(m.Key, false);
-                    lock (Gate) { _motionsOn.Remove(m.Key); _deferredStopsSent++; }
+                    lock (Gate) { _motionsOn.Remove(m.Key); _deferredStopsSent++; _movementSends++; }
                     sent.Add($"SetMotion(0x{m.Key:X8}, False) for {m.Value}");
                 }
                 foreach (var s in stopMovement)
                 {
                     if (!host.HasStopMovement) break;
                     host.StopMovement(s.Key, s.Value.holdKey);
-                    lock (Gate) { _motionsOn.Remove(s.Key); _deferredStopsSent++; }
+                    lock (Gate) { _motionsOn.Remove(s.Key); _deferredStopsSent++; _movementSends++; }
                     sent.Add($"StopMovement(0x{s.Key:X8}) for {s.Value.who}");
                 }
             }
         }
         catch { }
+
+        // A held stop sent now is a movement change like any other: the settle wait applies to it.
+        if (sent.Count > 0) Changed(sent[sent.Count - 1]);
 
         if (sent.Count > 0 && Enabled)
         {
@@ -331,7 +346,8 @@ internal static class MoveAudit
     {
         if (HeldForAction(host, who, $"StopMovement(0x{motion:X8})", isStop: true, motion, PendingStop.StopMovement(motion, holdKey))) return false;
         Note(host, who, "StopMovement", $"0x{motion:X8}, {holdKey}", collapseByKindOnly: false);
-        lock (Gate) { _motionsOn.Remove(motion); _pendingStopMovement.Remove(motion); }
+        lock (Gate) { _motionsOn.Remove(motion); _pendingStopMovement.Remove(motion); _movementSends++; }
+        Changed($"StopMovement(0x{motion:X8})");
         return host.StopMovement(motion, holdKey);
     }
 
@@ -341,6 +357,8 @@ internal static class MoveAudit
         if (HeldForUse(host, who, "TurnToHeading")) return false;
         if (HeldForAction(host, who, "TurnToHeading", isStop: false)) return false;
         Note(host, who, "TurnToHeading", headingDegrees.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture), collapseByKindOnly: true);
+        Changed("TurnToHeading");
+        lock (Gate) _movementSends++;
         return host.TurnToHeading(headingDegrees);
     }
 
@@ -400,6 +418,39 @@ internal static class MoveAudit
             ClearPendingLocked();
             _pendingSinceMs = 0;
             _deferredStopsSent = 0;
+            _lastChangeMs = long.MinValue / 2;
+            _lastChangeWhat = "";
+            _movementSends = 0;
         }
+    }
+
+    // -- Settle after a movement change -------------------------------------------------
+    // A Bolt VII went out in the same tick as nav's SetAutoRun(False), after nav's turns; on ACE's
+    // fast tick the movement packet cancelled the cast's turn and the server held the cast 40.8 s
+    // (ActionPacer's stuck-cast notes). After any movement call RynthAi sends (a start, a stop, a
+    // turn), nothing starts until MoveSettleMinMs has passed and the client's motion queue reads
+    // clear (GetCastBusyState), or MoveSettleMaxMs. ActionPacer.MayStart asks (not for attack repeats).
+    internal const long MoveSettleMinMs = 150;
+    internal const long MoveSettleMaxMs = 600;
+    private static long _lastChangeMs = long.MinValue / 2;
+    private static string _lastChangeWhat = "";
+
+    private static void Changed(string what)
+    {
+        lock (Gate) { _lastChangeMs = NowMs(); _lastChangeWhat = what; }
+    }
+
+    /// <summary>True (with why) while the last movement change has not settled.</summary>
+    internal static bool SettleHolds(RynthCoreHost host, out string why)
+    {
+        why = "";
+        long age; string what;
+        lock (Gate) { age = NowMs() - _lastChangeMs; what = _lastChangeWhat; }
+        if (age >= MoveSettleMaxMs) return false;
+        bool queueBusy;
+        try { queueBusy = host.HasGetCastBusyState && host.GetCastBusyState() != 0; } catch { queueBusy = false; }
+        if (age >= MoveSettleMinMs && !queueBusy) return false;
+        why = $"the movement change {what} sent {age} ms ago has not settled";
+        return true;
     }
 }

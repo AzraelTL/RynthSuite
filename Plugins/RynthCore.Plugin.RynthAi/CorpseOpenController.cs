@@ -40,13 +40,23 @@ public sealed partial class RynthAiPlugin
     private readonly Dictionary<int, int> _corpseAbandonCounts = new();
     private const int NeverOpenedAbandonRetryMs = 30_000;
     private readonly HashSet<int> _ownershipSkipLogged = new();
-    private readonly HashSet<int> _corpseIdRequested = new(); // corpses whose LongDesc ID was already requested
+    private readonly HashSet<int> _corpseIdRequested = new(); // corpses whose LongDesc ID request the engine ACCEPTED
+    private readonly Dictionary<int, long> _corpseIdAskedAt = new(); // ActionPacer.NowMs of the newest accepted request, for the re-ask
+    private readonly Dictionary<int, long> _corpseIdRefusedAt = new(); // ActionPacer.NowMs of the newest REFUSED request
+    private const long CorpseIdRefusedRetryMs = 250;  // a refused request is retried no faster than this, per corpse
+    private const int CorpseIdPerTick = 2;            // new accepted requests per scan tick (the refusal window ending must not burst)
+    private int _corpseIdAcceptedThisTick;
+    private long _corpseIdBudgetAt;   // when the budget last started over (a scan tick, or CorpseIdRefusedRetryMs without one)
+    private const long CorpseIdReaskMs = 3000;   // no appraisal data this long after an accepted request: ask once more
     private int _busyCount;
     private long _busyCountLastIncrementAt;
     private long _busyCountBecamePositiveAt; // when count first went 0→positive
     private const long BUSY_TIMEOUT_MS = 10_000; // safety: force-clear if stuck >10s
     private const long NameWaitMs = 3_000;       // extra wait past the assess window for a corpse item's name
     private const long AppraisalWaitMs = 3_000;  // extra wait past the assess window for an item's appraisal
+    private const long ContentsSweepMs = 500;    // how often an open corpse's contents are checked for items the cache missed
+    private long _lastContentsSweepAt;
+    private int _lastContentsSweepCorpse;
     private const long AppraisalHoldTimeoutMarginMs = 1_000; // stop holding this long before the corpse timeout
 
     // Wedge detection: when AC's item-action state locks up (server-side, e.g.
@@ -100,6 +110,25 @@ public sealed partial class RynthAiPlugin
     private long _currentLootItemStillSince;
     private long _currentLootItemLeftAt;
     private bool _currentLootItemSawAnim;
+    private bool _currentLootItemStackable;   // a stack at send: it may merge into a pack stack and vanish
+    private bool _currentLootItemPipelined;   // sent while the last pickup's Return played (ACE queues it)
+    private int _currentLootItemErrSeqAtSend; // TryGetLastWeenieError seq at the send (0 = unknown)
+    private int _currentLootItemFreeRetries;  // resends after a too-busy answer (not counted as attempts)
+    // The last answered pickup, until the character has finished its "Return" (stood up again).
+    // The corpse/chest is closed only after this (2026-10-07), and the next move may go out while
+    // it plays: ACE queues a move that arrives during the Return as its NextPickup.
+    private int _settlingLootItemId;
+    private int _settlingContainerId;
+    private long _settlingSince;
+    private bool _settlingSawAnim;
+    private bool _settlingAllowsPipeline;
+    private int _pipelinedAfterItemId;        // the answered pickup a move was already queued behind
+    // [LootEval] lines: one per item per open (a matched item was re-printed before every pickup).
+    private readonly Dictionary<int, string> _lootEvalLogged = new();
+    private int _manaStoneCapLoggedFor;        // container the "ManaStone count for cap check" line was logged for
+    private int _manaStoneLiveCount;
+    private long _manaStoneLiveCountAt;
+    private const long ManaStoneLiveCountMs = 200;
     private long _pickupAnimSince;
     private string _currentLootItemActionLabel = string.Empty;
     private string _currentLootItemName = string.Empty;
@@ -341,7 +370,11 @@ public sealed partial class RynthAiPlugin
             Log($"[RynthAi] Pruned _ownershipSkipLogged");
         }
         if (_corpseIdRequested.Count > 200)
+        {
             _corpseIdRequested.Clear();
+            _corpseIdAskedAt.Clear();
+            _corpseIdRefusedAt.Clear();
+        }
         if (_corpseSkipLogged.Count > 200)
             _corpseSkipLogged.Clear();
         if (_corpseWaitingSince.Count > 200)
@@ -367,8 +400,14 @@ public sealed partial class RynthAiPlugin
         {
             // Non-corpse container (chest, bag, etc.) — queue a loot-check once inventory arrives.
             _pendingLootCheckContainerId = sid;
+            // And a chest to loot, if it turns out eligible (RynthAiPlugin.ChestLoot.cs).
+            NoteContainerOpened(sid);
             return;
         }
+
+        // A corpse opened while a chest was the loot container: the server closed the chest.
+        if (_lootChestId != 0 && _lootChestId != sid)
+            _lootChestId = 0;
 
         // _completedCorpses is authoritative. On an engine without CloseContainer (API
         // before v76) a looted corpse stays open server-side, so AC re-announces its
@@ -431,6 +470,9 @@ public sealed partial class RynthAiPlugin
         if (_pendingLootCheckContainerId != 0 && sid == _pendingLootCheckContainerId)
         {
             _pendingLootCheckContainerId = 0;
+            // A chest the looter takes: it logs and says per item what it does.
+            if (ChestLooterTakesContainer(sid))
+                return;
             if (_objectCache != null)
             {
                 foreach (WorldObject item in _objectCache.GetContainedItems(sid))
@@ -460,6 +502,9 @@ public sealed partial class RynthAiPlugin
         int sid = unchecked((int)objectId);
         if (_pendingLootCheckContainerId == sid)
             _pendingLootCheckContainerId = 0;
+        // A chest: closed by the player, the server (walked away) or our own close. Never reopened.
+        if (OnChestGone(sid, "was closed"))
+            return;
         bool wasOpenCorpse = _openedContainerId == sid;
         if (_openedContainerId == sid)
         {
@@ -522,11 +567,14 @@ public sealed partial class RynthAiPlugin
             return;
 
         SyncCorpseContainerState();
+        TickDeferredClose(settings);
+        TakeLootThisRequest(settings);   // /ra lootthis (RynthAiPlugin.VTankHotkeys.cs)
 
         // ── Macro off / looting disabled / nav-boost — full stop and reset ──
         // Must come before the Buffing check so that turning off the macro always
         // clears motion state (smooth turns, autorun) set during corpse approach.
-        if (!settings.IsMacroRunning || !settings.EnableLooting || settings.BoostNavPriority)
+        // A container flagged with /ra lootthis is looted anyway (only that one).
+        if ((!settings.IsMacroRunning || !settings.EnableLooting || settings.BoostNavPriority) && !ForcedLootHolds())
         {
             ResetCorpseTarget();
             return;
@@ -563,6 +611,7 @@ public sealed partial class RynthAiPlugin
             && _openedContainerId == 0)
         {
             LogCorpsesHeldByCombat();
+            LogChestHeldByCombat();
             FreezeCorpseTimeout(CorpseNowMs);
             return; // Keep our target, just wait — don't ResetCorpseTarget
         }
@@ -585,6 +634,10 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
+        // A chest the player or a meta opened: looted where it stands (RynthAiPlugin.ChestLoot.cs).
+        if (_targetCorpseId == 0 && _chestCandidateId != 0 && TryTakeOpenChest(settings, CorpseNowMs))
+            return;
+
         double maxMeters = GetCorpseApproachRangeMaxMeters(settings);
         double minMeters = GetCorpseApproachRangeMinMeters(settings, maxMeters);
         if (maxMeters <= 0.25)
@@ -599,15 +652,24 @@ public sealed partial class RynthAiPlugin
             if (IsLootingBlockedByPack(settings) && !OwnCorpseBypassesPackGate(settings, maxMeters))
                 return;
 
-            if (!TryFindNearestCorpse(maxMeters, out WorldObject? corpse, out _))
+            // A ground pickup already sent finishes before a corpse is claimed.
+            if (GroundPickupInFlight)
             {
-                // No corpses in range. STEP 4: nothing to release. The "Looting"
-                // string used to be held here from a just-completed corpse and
-                // had to be handed back so nav could resume; now HasLootWork
-                // simply stops returning true and the arbiter moves on by itself
-                // on the next tick.
+                TickGroundLoot(settings, maxMeters);
                 return;
             }
+
+            if (!TryFindNearestCorpse(maxMeters, out WorldObject? corpse, out _))
+            {
+                // No corpses in range. Loose ground items that match the loot profile
+                // get their turn here; HasLootWork keeps Looting while any remain.
+                TickGroundLoot(settings, maxMeters);
+                return;
+            }
+
+            // A corpse outranks an unsent ground claim.
+            if (_groundTargetId != 0)
+                ResetGroundLoot(clearCaches: false);
 
             if (corpse == null)
                 return;
@@ -695,6 +757,20 @@ public sealed partial class RynthAiPlugin
             FreezeCorpseTimeout(now);
             return;
         }
+        // The salvage panel is opening (UST used, execute not sent yet): the client would swallow
+        // the use (SalvageManager.PanelPending). Wait, with the claim's timeout clock stopped (this
+        // sits before the freeze reset below so the frozen age carries across held ticks).
+        if (_salvageManager?.PanelPending == true)
+        {
+            FreezeCorpseTimeout(now);
+            if (!_openHeldBySalvageLogged)
+            {
+                _openHeldBySalvageLogged = true;
+                LootDiag($"[RynthAi] Corpse loot: open of 0x{(uint)_targetCorpseId:X8} waits for the salvage panel (UST used, salvage not sent yet).");
+            }
+            return;
+        }
+        _openHeldBySalvageLogged = false;
         _corpseHoldFrozenAge = -1;
 
         // One server action at a time (2026-10-06, ActionPacer): no open while the server is still
@@ -761,6 +837,7 @@ public sealed partial class RynthAiPlugin
     }
 
     private long _corpseOpenBusyWaitSince;
+    private bool _openHeldBySalvageLogged;
 
     // Peace before the open: one request per claimed corpse, only with no monster within
     // LootStarveCloseYards (the same test that gives looting its turn while combat still has a
@@ -768,6 +845,8 @@ public sealed partial class RynthAiPlugin
     private const long PeaceBeforeOpenMaxMs = 2500;
     private int _peaceBeforeOpenFor;
     private long _peaceBeforeOpenSince;
+    /// <summary>The peace request for _peaceBeforeOpenFor was accepted by the engine (a refusal is retried).</summary>
+    private bool _peaceSent;
 
     /// <summary>True while the open should wait for the peace-mode swap it just asked for.</summary>
     private bool WantsPeaceBeforeOpen(LegacyUiSettings settings, long now)
@@ -781,10 +860,13 @@ public sealed partial class RynthAiPlugin
         if (_peaceBeforeOpenFor != _targetCorpseId)
         {
             _peaceBeforeOpenFor = _targetCorpseId;
-            _peaceBeforeOpenSince = now;
-            Host.ChangeCombatModeFor(CombatMode.NonCombat, "Loot", "peace before opening the corpse (Peace Mode When Idle)");
-            return true;
+            _peaceBeforeOpenSince = now;   // the ceiling counts from the first ask
+            _peaceSent = false;
         }
+        // One accepted request per corpse. A refusal (the engine turns stance changes away around a
+        // teleport) or a pacing hold is asked again on the next call, inside the same ceiling.
+        if (!_peaceSent)
+            _peaceSent = Host.ChangeCombatModeFor(CombatMode.NonCombat, "Loot", "peace before opening the corpse (Peace Mode When Idle)");
         return now - _peaceBeforeOpenSince < PeaceBeforeOpenMaxMs;
     }
     // Wait for busy to genuinely clear before opening the next corpse. The backstop
@@ -894,6 +976,38 @@ public sealed partial class RynthAiPlugin
         return EvaluateCorpseLootDecision(corpse).ShouldLoot;
     }
 
+    /// <summary>
+    /// Asks the engine to identify a corpse so its LongDesc (the killer name) arrives. Only a request the
+    /// engine accepted counts: it refuses RequestId around a teleport or a death and drops stale queued
+    /// requests, so a refused or dropped one is asked again. A refused one is retried every
+    /// CorpseIdRefusedRetryMs; an accepted one with no data is asked again every CorpseIdReaskMs, and only for
+    /// the corpse the bot is targeting or has open (any other corpse in range gets one accepted request, not a
+    /// stream). At most CorpseIdPerTick requests are accepted per scan tick, so a refusal window ending with
+    /// many uncached corpses in range does not burst. No give-up cap.
+    /// </summary>
+    private void TryRequestCorpseId(WorldObject corpse, string longDesc)
+    {
+        if (!string.IsNullOrWhiteSpace(longDesc) || !Host.HasRequestId) return;
+        long idNow = ActionPacer.NowMs();
+        if (idNow - _corpseIdBudgetAt >= CorpseIdRefusedRetryMs) { _corpseIdAcceptedThisTick = 0; _corpseIdBudgetAt = idNow; }   // evaluations outside a scan must not exhaust it for good
+        bool candidate = corpse.Id == _targetCorpseId || (_openedContainerId != 0 && corpse.Id == _openedContainerId);
+        bool due = !_corpseIdRequested.Contains(corpse.Id)
+                   || (candidate && _corpseIdAskedAt.TryGetValue(corpse.Id, out long askedAt) && idNow - askedAt >= CorpseIdReaskMs);
+        if (!due || _corpseIdAcceptedThisTick >= CorpseIdPerTick) return;
+        if (_corpseIdRefusedAt.TryGetValue(corpse.Id, out long refusedAt) && idNow - refusedAt < CorpseIdRefusedRetryMs) return;
+        if (Host.RequestId(unchecked((uint)corpse.Id)))
+        {
+            _corpseIdRequested.Add(corpse.Id);
+            _corpseIdAskedAt[corpse.Id] = idNow;
+            _corpseIdRefusedAt.Remove(corpse.Id);
+            _corpseIdAcceptedThisTick++;
+        }
+        else
+        {
+            _corpseIdRefusedAt[corpse.Id] = idNow;
+        }
+    }
+
     private CorpseLootDecision EvaluateCorpseLootDecision(WorldObject? corpse)
     {
         var settings = _dashboard?.Settings;
@@ -913,9 +1027,7 @@ public sealed partial class RynthAiPlugin
 
         // Corpse LongDesc is only available after the object is identified.
         // Request ID so the killer name is populated for the next check.
-        if (string.IsNullOrWhiteSpace(longDesc) && Host.HasRequestId && _corpseIdRequested.Add(corpse.Id))
-            Host.RequestId(unchecked((uint)corpse.Id));
-
+        TryRequestCorpseId(corpse, longDesc);
         string killerName = ExtractCorpseKillerName(longDesc) ?? string.Empty;
         string myName = GetPlayerNameForLootOwnership();
         bool inFellowship = _fellowshipTracker?.IsInFellowship == true;
@@ -1189,6 +1301,21 @@ public sealed partial class RynthAiPlugin
 
         long openAge = now - _openedContainerAt;
 
+        // A pickup in flight: only its answer is looked at (one ownership read), not the whole
+        // container. The snapshot below scans every object the cache knows with an ownership
+        // probe each and refreshes every item's identity - for a 100-item chest that ran on
+        // every tick of every pickup. A move is only ever sent after the contents were seen,
+        // so the observed-inventory gate below has already passed.
+        if (_currentLootItemMovePending && _openedContainerInventoryObservedAt != 0)
+        {
+            TickPendingCorpsePickup(settings);
+            if (_currentLootItemMovePending)
+                return; // Still waiting for this pickup's answer
+            if (_openedContainerId != corpseId)
+                return; // the retry finished or paused the corpse (no pack had room)
+            now = CorpseNowMs;
+        }
+
         // Snapshot the corpse's contents ONCE per tick and reuse it everywhere below.
         // GetContainedItems scans the entire landscape+inventory set (200+ objects) with
         // a native ownership probe per object; this path used to call it up to 3× per tick
@@ -1199,6 +1326,24 @@ public sealed partial class RynthAiPlugin
         for (int i = 0; i < containedItems.Count; i++)
             containedItems[i] = _objectCache.RefreshIdentity(containedItems[i]);
 
+        // Items the client has inside the corpse that the cache never classified (no create
+        // processed for them) are not in containedItems at all, so they were never judged
+        // and the corpse was finished without them. Ask the client what the corpse holds,
+        // at most every ContentsSweepMs, and look the missing ones up.
+        if (now - _lastContentsSweepAt >= ContentsSweepMs || _lastContentsSweepCorpse != corpseId)
+        {
+            _lastContentsSweepAt = now;
+            _lastContentsSweepCorpse = corpseId;
+            List<WorldObject> missed = _objectCache.RescueContainedItems(corpseId, containedItems);
+            if (missed.Count > 0)
+            {
+                foreach (WorldObject wo in missed)
+                    containedItems.Add(_objectCache.RefreshIdentity(wo));
+                LootDiag($"[RynthAi] Corpse loot: found {missed.Count} item(s) on 0x{(uint)corpseId:X8} the object cache had missed: " +
+                         string.Join(", ", missed.Select(w => $"0x{(uint)w.Id:X8} '{w.Name}' {w.ObjectClass}")) + ".");
+            }
+        }
+
         // Fast path: items for this corpse are already in the cache. AC's CreateObject
         // burst populates the corpse's contents during the landscape sweep that precedes
         // the ViewContents packet, so OnUpdateObjectInventory effectively never fires for
@@ -1207,7 +1352,7 @@ public sealed partial class RynthAiPlugin
         if (_openedContainerInventoryObservedAt == 0 && containedItems.Count > 0)
         {
             _openedContainerInventoryObservedAt = now;
-            LootDiag($"[RynthAi] Corpse loot: cache pre-populated for 0x{(uint)corpseId:X8} at {openAge}ms; skipping inv-wait.");
+            LootDiag($"[RynthAi] {LootTag}: cache pre-populated for 0x{(uint)corpseId:X8} at {openAge}ms; skipping inv-wait.");
         }
         else
         {
@@ -1221,7 +1366,7 @@ public sealed partial class RynthAiPlugin
                 if (openAge < Math.Max(300, settings.LootEmptyCorpseMs))
                     return;
                 _openedContainerInventoryObservedAt = _openedContainerAt;
-                LootDiag($"[RynthAi] Corpse loot: no inventory update for 0x{(uint)corpseId:X8}; probing after {openAge}ms.");
+                LootDiag($"[RynthAi] {LootTag}: no inventory update for 0x{(uint)corpseId:X8}; probing after {openAge}ms.");
             }
         }
 
@@ -1254,6 +1399,8 @@ public sealed partial class RynthAiPlugin
         {
             _corpseIdsRequested = true;
             _corpseIdsRequestedAt = now;
+            _lootEvalLogged.Clear();
+            _manaStoneCapLoggedFor = 0;
             int requested = 0;
             int preClassified = 0;
 
@@ -1287,13 +1434,12 @@ public sealed partial class RynthAiPlugin
             }
 
             if (requested > 0)
-            {
-                LootDiag($"[RynthAi] Corpse loot: requested {requested} item ID(s) (pre-classified {preClassified}) for 0x{(uint)corpseId:X8}.");
-                return; // One tick for server responses to start arriving
-            }
-            if (preClassified > 0)
-                LootDiag($"[RynthAi] Corpse loot: pre-classified {preClassified} item(s) without ID for 0x{(uint)corpseId:X8}.");
-            // Fall through: all items handled without ID requests — evaluate immediately
+                LootDiag($"[RynthAi] {LootTag}: requested {requested} item ID(s) (pre-classified {preClassified}) for 0x{(uint)corpseId:X8}.");
+            else if (preClassified > 0)
+                LootDiag($"[RynthAi] {LootTag}: pre-classified {preClassified} item(s) without ID for 0x{(uint)corpseId:X8}.");
+            // Fall through either way: items already decided (their appraisal is here, or the
+            // profile needs none for them) are picked up now while the other IDs stream in;
+            // the ones still waiting are held below and judged as their data arrives.
         }
 
         // Evaluate ALL items with data in one pass — do NOT gate evaluation on
@@ -1364,6 +1510,12 @@ public sealed partial class RynthAiPlugin
                 // Still no appraisal — fall through and classify best-effort.
             }
 
+            // A keeper already judged on this open is judged again only when its turn comes (it
+            // is the first match): that fresh pass is what Keep # and the mana stone cap count
+            // against. Re-running the profile on every waiting keeper each pass did nothing else.
+            if (firstMatchId != 0 && _lootEvalLogged.TryGetValue(item.Id, out string? judged) && judged.StartsWith("KEEP", StringComparison.Ordinal))
+                continue;
+
             // Evaluate against loot profile — pure classification, no UseObject.
             bool classified = ClassifyItemAgainstProfile(item, settings, out string actionLabel, out bool isSalvage, out string ruleLabel);
             // Nothing to salvage with: an item only a Salvage rule wants stays on the corpse.
@@ -1383,8 +1535,14 @@ public sealed partial class RynthAiPlugin
             // once the assess window expires, so an unappraised item can match a
             // rule it should not. If keeps correlate with appraised=False, that
             // is the cause.
-            LootDiag($"[LootEval] '{item.Name}' cls={item.ObjectClass} id=0x{(uint)item.Id:X8} value={item.Values(19, 0)} stack={item.Values(12, 0)} type=0x{item.Values(1, 0):X} wcid={item.Values(unchecked((int)WorldObjectCache.DecalTypeKey), 0)} appraised={hasAppraisalData} timedOut={assessTimedOut} -> " +
-                     (classified ? $"KEEP [{actionLabel}] rule='{ruleLabel}'" : noUst ? $"leave (Salvage rule '{ruleLabel}', no UST carried)" : "leave"));
+            // Once per item per open, and again only if the verdict changes (a matched item was
+            // re-printed before every pickup: ~200 lines for a 20-keeper chest).
+            string verdict = classified ? $"KEEP [{actionLabel}] rule='{ruleLabel}'" : noUst ? $"leave (Salvage rule '{ruleLabel}', no UST carried)" : "leave";
+            if (!_lootEvalLogged.TryGetValue(item.Id, out string? loggedVerdict) || loggedVerdict != verdict)
+            {
+                _lootEvalLogged[item.Id] = verdict;
+                LootDiag($"[LootEval] '{item.Name}' cls={item.ObjectClass} id=0x{(uint)item.Id:X8} value={item.Values(19, 0)} stack={item.Values(12, 0)} type=0x{item.Values(1, 0):X} wcid={item.Values(unchecked((int)WorldObjectCache.DecalTypeKey), 0)} appraised={hasAppraisalData} timedOut={assessTimedOut} -> " + verdict);
+            }
 
             if (classified)
             {
@@ -1409,48 +1567,55 @@ public sealed partial class RynthAiPlugin
         // Empty corpse check
         if (visibleItemCount == 0)
         {
-            if (openAge >= Math.Max(200, settings.LootEmptyCorpseMs))
+            if (openAge >= Math.Max(200, settings.LootEmptyCorpseMs) && !LastPickupSettling(now))
             {
-                LootDiag($"[RynthAi] Corpse loot: no items on 0x{(uint)corpseId:X8} after {openAge}ms; marking complete.");
+                LootDiag($"[RynthAi] {LootTag}: no items on 0x{(uint)corpseId:X8} after {openAge}ms; marking complete.");
                 MarkCorpseCompleted(corpseId);
             }
             return;
         }
 
-        // Matched item — attempt pickup
+        // Matched item — attempt pickup. Its decision is final (its own appraisal is here, the
+        // profile needs none for it, or the wait for it ran out), so it goes now: there used to
+        // be a busy-count gate here for the assess window, but the RequestIds don't hold item
+        // moves (AC's one-item-at-a-time gate is the pending inventory request, not m_cBusy).
         if (firstMatchId != 0)
         {
-            // Within the assess window, gate on busy count so we don't race with
-            // RequestId responses still in flight. After the window, items without
-            // data are already being skipped — items we're picking up here have their
-            // own ID response back (and their busy-count contribution already decremented).
-            // If busy gets genuinely stuck, CheckBusyTimeout / ForceResetBusyCount handles
-            // it; don't add a second gate here that fights the first.
-            if (_busyCount > 0 && !assessTimedOut)
-                return;
-
             // Keep room for weapon swaps: with a full pack the bow can't be put away to
             // switch to the wand, so buffs and spell heals stop (2026-09-28 death). Leave
             // the corpse rather than filling the last slots; -1 = side-pack capacity unknown.
             int freeSlots = WorldObjectCache.CountFreeItemSlots(Host, _objectCache);
             if (freeSlots >= 0 && freeSlots < WorldObjectCache.LootReserveFreeSlots)
             {
-                LootDiag($"[RynthAi] Corpse loot: skipping '{matchItemName}' on 0x{(uint)corpseId:X8} — {freeSlots} free slot(s), keeping {WorldObjectCache.LootReserveFreeSlots} for weapon swaps.");
+                if (LastPickupSettling(now))
+                    return; // the last item lands first, then the corpse closes
+                LootDiag($"[RynthAi] {LootTag}: skipping '{matchItemName}' on 0x{(uint)corpseId:X8} — {freeSlots} free slot(s), keeping {WorldObjectCache.LootReserveFreeSlots} for weapon swaps.");
                 WorldObjectCache.WarnPackFull(Host, $"looting paused with {freeSlots} free slot(s) so weapon swaps still work");
                 MarkCorpseCompleted(corpseId);
                 return;
             }
 
-            // The last pickup's bend-down still plays: the engine holds a move sent now until
-            // it ends, so wait and send it then.
-            if (PickupAnimating(CorpseNowMs))
+            // The character still animates. Right after a pickup's answer that is its "Return"
+            // (standing up): ACE queues a move that arrives then and runs it the moment the
+            // Return ends (Player.HandleActionPutItemInContainer_Verify, NextPickup), so the next
+            // move goes out now - one, never two. Any other animation: wait until it ends.
+            bool pipelined = false;
+            if (PickupAnimating(now))
+            {
+                if (!CanPipelinePickup(now))
+                    return;
+                pipelined = true;
+            }
+
+            // The server still owes an answer to a cast or use: it refuses a pickup now.
+            if (PickupHeldByServerAction())
                 return;
 
             ChatLine($"[RynthAi] Loot rule: {matchItemName} -> [{matchActionLabel}] {matchRuleLabel}");
             _currentLootItemId = firstMatchId;
             RynthCore.Plugin.RynthAi.ItemInfo.SelfSelect.Mark(unchecked((uint)firstMatchId));
             Host.SelectItem(unchecked((uint)firstMatchId));
-            LootDiag($"[RynthAi] Corpse loot: picking up 0x{(uint)firstMatchId:X8} '{matchItemName}' from corpse 0x{(uint)corpseId:X8}.");
+            LootDiag($"[RynthAi] {LootTag}: picking up 0x{(uint)firstMatchId:X8} '{matchItemName}' from corpse 0x{(uint)corpseId:X8}.");
 
             // Jump-loot: jump before the move to cancel the pickup animation.
             // Only jump when multiple items remain (single-item: no animation worth cancelling).
@@ -1461,11 +1626,18 @@ public sealed partial class RynthAiPlugin
                 && Host.HasMoveItemExternal
                 && _vitals.CurrentStamina > 5;
 
-            if (useJumpLoot && remainingItems > 1)
+            if (useJumpLoot && remainingItems > 1 && !pipelined)
                 Host.JumpNonAutonomous(Math.Clamp(settings.LootJumpHeight / 100f, 0.01f, 1f));
 
             // Always a move into a pack, never a use: a use on a wearable corpse item is
             // get-and-wield, which put salvage jewellery on the character (2026-10-02).
+            int errSeqAtSend = LastWeenieErrorSeq();
+            bool stackable = IsStackAtSend(firstMatchId);
+            if (pipelined)
+            {
+                _pipelinedAfterItemId = _settlingLootItemId;
+                LootDiag($"[RynthAi] {LootTag}: queuing 0x{(uint)firstMatchId:X8} '{matchItemName}' behind 0x{(uint)_settlingLootItemId:X8}'s Return.");
+            }
             LootPickupResult pickup = SendLootPickup(firstMatchId, matchItemName, corpseId);
             if (pickup == LootPickupResult.NoRoom || pickup == LootPickupResult.Refused)
                 return;
@@ -1478,7 +1650,7 @@ public sealed partial class RynthAiPlugin
                 if (_busyCount > 0)
                     return;
 
-                LootDiag($"[RynthAi] Corpse loot: use request failed for 0x{(uint)firstMatchId:X8}.");
+                LootDiag($"[RynthAi] {LootTag}: use request failed for 0x{(uint)firstMatchId:X8}.");
                 if (IncrementCorpseItemAttempt(firstMatchId) >= 3)
                     _processedCorpseItems.Add(firstMatchId);
                 ResetCurrentLootItem();
@@ -1502,7 +1674,13 @@ public sealed partial class RynthAiPlugin
                 _scrollLearner?.NoteLooted(firstMatchId, matchItemName, fromProfile: matchRuleLabel != ScrollLearner.RuleLabel);
             _currentLootItemMovePending      = true;
             _currentLootItemMoveRequestedAt  = now;
-            _currentLootItemMoveAttempts     = 1;
+            // A queued move that the client or server turned away (the client's one-request
+            // slot still held, or "You're too busy") must not cost the item one of its 3 tries.
+            _currentLootItemMoveAttempts     = pipelined ? 0 : 1;
+            _currentLootItemPipelined        = pipelined;
+            _currentLootItemStackable        = stackable;
+            _currentLootItemErrSeqAtSend     = errSeqAtSend;
+            _currentLootItemFreeRetries      = 0;
             _currentLootItemActionLabel      = matchActionLabel;
             _currentLootItemName             = matchItemName;
             _currentLootItemIsSalvage        = matchIsSalvage;
@@ -1510,22 +1688,74 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
-        // All items evaluated, no matches left — mark corpse complete
-        if (pendingDataCount == 0)
+        // All items evaluated, no matches left — mark corpse complete, once the last pickup
+        // has played out (closing while it was under way: 2026-10-07).
+        if (pendingDataCount == 0 && !LastPickupSettling(now))
         {
-            LootDiag($"[RynthAi] Corpse loot: all {visibleItemCount} items on 0x{(uint)corpseId:X8} evaluated; marking complete.");
+            LootDiag($"[RynthAi] {LootTag}: all {visibleItemCount} items on 0x{(uint)corpseId:X8} evaluated; marking complete.");
             MarkCorpseCompleted(corpseId);
         }
+    }
+
+    // A pickup that merges into a stack already in the pack (a Silver Pea onto the Silver Peas):
+    // the server removes the corpse item (InventoryRemoveObject) and raises the pack stack's size,
+    // so the picked object never shows up in the inventory and the arrival check waited out
+    // PickupArriveMaxMs (in a client log, 39 stack pickups: median 5018 ms to confirm against
+    // 2731 ms). The stacks of that name in the inventory are noted when the pickup goes out; one that has grown since counts as arrival.
+    private readonly Dictionary<int, int> _mergeBaseline = new();
+
+    private void NoteMergeTargets(int itemId, string itemName)
+    {
+        _mergeBaseline.Clear();
+        if (_objectCache == null || string.IsNullOrEmpty(itemName)) return;
+        foreach (WorldObject inv in _objectCache.GetDirectInventory(forceRefresh: true))
+        {
+            if (inv.Id == itemId || !string.Equals(inv.Name, itemName, StringComparison.Ordinal)) continue;
+            _mergeBaseline[inv.Id] = Math.Max(1, inv.Values(LongValueKey.StackCount, 1));
+        }
+    }
+
+    /// <summary>A same-name stack in the inventory has grown since the pickup went out.</summary>
+    private bool MergedIntoInventoryStack(out int stackId)
+    {
+        stackId = 0;
+        if (_objectCache == null) return false;
+        foreach (var kv in _mergeBaseline)
+        {
+            WorldObject? stack = _objectCache[kv.Key];
+            if (stack == null || !InPlayerInventory(stack.Container)) continue;
+            if (Math.Max(1, stack.Values(LongValueKey.StackCount, 1)) > kv.Value)
+            {
+                stackId = kv.Key;
+                return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>Longest a pickup waits on the motion queue (the engine's own hold is 2.5 s).</summary>
     internal const long PickupAnimMaxMs = 3000;
 
-    /// <summary>After the item leaves the corpse: how long to wait for its bend-down to start.</summary>
+    /// <summary>After a pickup's answer: how long to wait for its Return to show when none is seen.</summary>
     internal const long PickupSettleMs = 1000;
 
     /// <summary>Off the corpse but not seen in the inventory: counted after this anyway.</summary>
     internal const long PickupArriveMaxMs = 4000;
+
+    /// <summary>
+    /// An answer sooner than this after the send isn't believed: ACE plays the whole pickup
+    /// motion (about 0.75 s standing, longer in a combat stance) before it moves the item.
+    /// </summary>
+    internal const long PickupAnswerMinMs = 500;
+
+    /// <summary>The next move is queued behind a Return only this soon after its answer.</summary>
+    internal const long PipelineWindowMs = 1000;
+
+    /// <summary>Resends after a "You're too busy" that don't count as one of the item's 3 tries.</summary>
+    internal const int PickupFreeRetries = 3;
+
+    private const uint WeenieErrorYoureTooBusy = 0x001D;
+    private const uint EventInventoryServerSaveFailed = 0x00A0;
 
     /// <summary>The container is the character or a pack it carries.</summary>
     private bool InPlayerInventory(int containerId)
@@ -1538,7 +1768,8 @@ public sealed partial class RynthAiPlugin
     /// <summary>
     /// The character still has motions queued (the engine's cast gate, GetCastBusyState):
     /// the bend-down of the last pickup is playing. False after PickupAnimMaxMs of it, so a
-    /// stuck queue can't stop looting, and on an engine without the gate.
+    /// stuck queue can't stop looting, and on an engine without the gate. Each answered pickup
+    /// restarts that cap (queued pickups animate back to back for a whole chest).
     /// </summary>
     private bool PickupAnimating(long now)
     {
@@ -1554,6 +1785,124 @@ public sealed partial class RynthAiPlugin
         return now - _pickupAnimSince < PickupAnimMaxMs;
     }
 
+    /// <summary>The engine's refusal counter now (0 when the engine can't say).</summary>
+    private int LastWeenieErrorSeq()
+    {
+        try
+        {
+            return Host.HasGetLastWeenieError && Host.TryGetLastWeenieError(out int seq, out _, out _, out _) ? seq : 0;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>
+    /// The server turned the current item's move away since it was sent: "You're too busy"
+    /// (it arrived while the last pickup's bend-down still ran) or InventoryServerSaveFailed
+    /// naming the item. Someone else's refusal (a fizzle, a use) is not ours.
+    /// </summary>
+    private bool CurrentPickupRefused(out uint error)
+    {
+        error = 0;
+        try
+        {
+            if (!Host.HasGetLastWeenieError || !Host.TryGetLastWeenieError(out int seq, out uint err, out uint evt, out uint obj))
+                return false;
+            if (seq == 0 || seq == _currentLootItemErrSeqAtSend)
+                return false;
+            error = err;
+            return err == WeenieErrorYoureTooBusy
+                || (evt == EventInventoryServerSaveFailed && obj == unchecked((uint)_currentLootItemId));
+        }
+        catch { return false; }
+    }
+
+    /// <summary>A stack when its move is sent: it may merge into a stack in the pack and be deleted.</summary>
+    private bool IsStackAtSend(int itemId)
+    {
+        WorldObject? wo = _objectCache?[itemId];
+        if (wo == null) return false;
+        return wo.Values(LongValueKey.MaxStackSize, 0) > 1 || wo.Values(LongValueKey.StackCount, 0) > 1;
+    }
+
+    /// <summary>
+    /// The client no longer has the object at all (no name, no position, no owner): a stack that
+    /// merged into one in the pack (ACE's StackableMerge sends InventoryRemoveObject for it, so it
+    /// never shows up in the inventory) or anything else the server took away.
+    /// </summary>
+    private bool ObjectGoneFromClient(int itemId)
+    {
+        uint uid = unchecked((uint)itemId);
+        if (!Host.HasGetObjectName || !Host.HasGetObjectPosition)
+            return false; // can't tell
+        try
+        {
+            if (Host.TryGetObjectName(uid, out string n) && !string.IsNullOrEmpty(n)) return false;
+            if (Host.TryGetObjectPosition(uid, out _, out _, out _, out _)) return false;
+        }
+        catch { return false; }
+        return true;
+    }
+
+    /// <summary>
+    /// TickOpenCorpseLooting: a move may be queued behind the last pickup's Return now - the
+    /// answer was real (not timed out), it is fresh, it is on this container, and nothing was
+    /// queued behind it yet (at most one queued move: ACE refuses a second).
+    /// </summary>
+    private bool CanPipelinePickup(long now) =>
+        Host.HasMoveItemExternal   // a move (PutItemInContainer / StackableMerge), never a use
+        && _settlingLootItemId != 0
+        && _settlingAllowsPipeline
+        && _settlingContainerId == _openedContainerId
+        && _pipelinedAfterItemId != _settlingLootItemId
+        && now - _settlingSince < PipelineWindowMs;
+
+    /// <summary>
+    /// The last answered pickup is still playing out (its Return). True while it is: the corpse
+    /// or chest is not closed until it ends (2026-10-07: closed during the last pickup, and the
+    /// character picked the item up after the close). Settled once the character stands still
+    /// after its Return was seen, or PickupSettleMs after the answer when none was, or
+    /// PickupArriveMaxMs after the answer whatever the motion says.
+    /// </summary>
+    private bool LastPickupSettling(long now)
+    {
+        if (_settlingLootItemId == 0)
+            return false;
+        bool animating = PickupAnimating(now);
+        if (animating) _settlingSawAnim = true;
+        long since = now - _settlingSince;
+        bool settled = (!animating && (_settlingSawAnim || since >= PickupSettleMs)) || since >= PickupArriveMaxMs;
+        if (!settled)
+            return true;
+        _settlingLootItemId = 0;
+        _settlingContainerId = 0;
+        _settlingAllowsPipeline = false;
+        return false;
+    }
+
+    private bool _pickupHeldLogged;
+
+    /// <summary>
+    /// True while the server owes an answer to a cast or use (ActionPacer): ACE refuses a pickup
+    /// then (Player.HandleActionPutItemInContainer_Verify: IsBusy -> YoureTooBusy and
+    /// InventoryServerSaveFailed). In a client log, a pickup sent while Bloodstone Bolt VII
+    /// was unanswered came back 0x1D. The assess-timeout path skips the busy-count gate above, so
+    /// this is the gate that holds it. Logged once per hold.
+    /// </summary>
+    private bool PickupHeldByServerAction()
+    {
+        if (!ActionPacer.Outstanding(Host, out var pending) || pending == null)
+        {
+            _pickupHeldLogged = false;
+            return false;
+        }
+        if (!_pickupHeldLogged)
+        {
+            _pickupHeldLogged = true;
+            LootDiag($"[RynthAi] Corpse loot: pickup waits - the server still owes an answer to {ActionPacer.Describe(pending.Kind, pending.Label)} ({pending.Who}).");
+        }
+        return true;
+    }
+
     private void TickPendingCorpsePickup(LegacyUiSettings settings)
     {
         if (_objectCache == null || _openedContainerId == 0 || _currentLootItemId == 0)
@@ -1565,40 +1914,62 @@ public sealed partial class RynthAiPlugin
         long now = CorpseNowMs;
         WorldObject? currentItem = _objectCache[_currentLootItemId];
         int currentContainer = currentItem?.Container ?? 0;
-        bool stillVisibleOnCorpse = IsCorpseItemVisible(_openedContainerId, _currentLootItemId);
+        // One ownership read, the same test GetContainedItems makes for the listing.
+        bool stillVisibleOnCorpse = currentItem != null && currentContainer == _openedContainerId;
 
         // Watch for this pickup's bend-down (the server plays it once the move reaches it).
         bool animating = PickupAnimating(now);
         if (animating) _currentLootItemSawAnim = true;
 
-        // Off the corpse is not done yet: confirming then closed the corpse while the pickup was
-        // still under way, and the character picked the last item up after the corpse closed
-        // (2026-10-07). It counts once the item shows up in the inventory (the main pack, a side
-        // pack, or merged into a stack already there: the picked object is gone) and its
-        // bend-down has played out. Off the corpse but never seen in the inventory: counted
-        // after PickupArriveMaxMs anyway, so looting can't stall on it.
-        if (currentItem == null || !stillVisibleOnCorpse || (currentContainer != 0 && currentContainer != _openedContainerId))
+        // The server's answer: ACE moves the item at the end of the pickup motion and starts the
+        // Return in the same breath (InventoryPutObjInContainer, or for a stack that merges into
+        // one in the pack InventoryRemoveObject + SetStackSize). So the item is answered once it
+        // is off the container AND in the inventory (the main pack, a side pack) or merged away
+        // (a stack, now unowned, or the object gone from the client: it never shows up in the
+        // inventory, which made every merged stack wait PickupArriveMaxMs, 4 s, 2026-10-12).
+        // The corpse still isn't closed until the Return has played (LastPickupSettling).
+        if (!stillVisibleOnCorpse)
         {
             if (_currentLootItemLeftAt == 0) _currentLootItemLeftAt = now;
-            bool inInventory = currentItem == null || InPlayerInventory(currentContainer);
+            bool inPack = currentItem != null && InPlayerInventory(currentContainer);
+            // Merged into a stack in the pack (it never shows up in the inventory): gone from the
+            // client, unowned and a stack when sent (ours, 064a07a), or a same-name stack in the
+            // pack has grown since the send (PR #16) - whichever shows first.
+            int mergedInto = 0;
+            bool mergedAway = !inPack
+                && (currentItem == null || ObjectGoneFromClient(_currentLootItemId) || (currentContainer == 0 && _currentLootItemStackable)
+                    || MergedIntoInventoryStack(out mergedInto));
+            bool landed = inPack || mergedAway;
+            bool believable = now - _currentLootItemMoveRequestedAt >= PickupAnswerMinMs;
             long since = now - _currentLootItemLeftAt;
-            bool settled = !animating && (_currentLootItemSawAnim || since >= PickupSettleMs);
-            if (!(inInventory && settled) && since < PickupArriveMaxMs)
+            bool answered = landed && believable;
+            if (!answered && since < PickupArriveMaxMs)
                 return;
-            ConfirmCurrentLootItemMoved(
+            ConfirmCurrentLootItem(
                 now,
                 currentItem == null
                     ? "item left cache after use"
-                    : (!stillVisibleOnCorpse
+                    : inPack
                         ? "item no longer listed on corpse"
-                        : $"new container=0x{(uint)currentContainer:X8}"));
+                        : mergedInto != 0
+                            ? $"merged into the stack 0x{(uint)mergedInto:X8} in the pack"
+                            : mergedAway
+                                ? "merged into a stack in the pack"
+                                : $"off the corpse, not seen in a pack (container=0x{(uint)currentContainer:X8})",
+                answered);
             return;
         }
+
+        // The server turned the move away ("You're too busy": it arrived during the last
+        // pickup's bend-down, not its Return). Resend it as soon as the character is still,
+        // without counting it as one of the item's 3 tries.
+        bool refused = CurrentPickupRefused(out uint refusal);
 
         // Item still on corpse — wait before retrying the UseObject. The window counts from
         // when the character is still: while a pickup animation plays the engine holds the
         // move, and a retry timed from the send gave up on items whose move had not gone
         // out yet (2026-10-07: moves ran ~2.2 s late, 3 tries at 0.5 s skipped the item).
+        // A queued move waits here through the last pickup's Return and its own bend-down.
         if (PickupAnimating(now))
         {
             _currentLootItemStillSince = 0;
@@ -1606,14 +1977,15 @@ public sealed partial class RynthAiPlugin
         }
         if (_currentLootItemStillSince == 0)
             _currentLootItemStillSince = now;
+        bool freeRetry = refused && _currentLootItemFreeRetries < PickupFreeRetries;
         long verifyWindowMs = Math.Max(150, settings.LootRetryTimeoutMs);
         long windowStart = Math.Max(_currentLootItemMoveRequestedAt, _currentLootItemStillSince);
-        if (now - windowStart < verifyWindowMs)
+        if (!freeRetry && now - windowStart < verifyWindowMs)
             return;
 
-        if (_currentLootItemMoveAttempts >= 3)
+        if (!freeRetry && _currentLootItemMoveAttempts >= 3)
         {
-            LootDiag($"[RynthAi] Corpse loot: pickup failed for 0x{(uint)_currentLootItemId:X8}; container remained 0x{(uint)_openedContainerId:X8} after {_currentLootItemMoveAttempts} attempt(s).");
+            LootDiag($"[RynthAi] {LootTag}: pickup failed for 0x{(uint)_currentLootItemId:X8}; container remained 0x{(uint)_openedContainerId:X8} after {_currentLootItemMoveAttempts} attempt(s).");
             _processedCorpseItems.Add(_currentLootItemId);
             ResetCurrentLootItem();
             _lastLootActionAt = now;
@@ -1622,17 +1994,28 @@ public sealed partial class RynthAiPlugin
 
         if (_busyCount > 0)
             return; // Client is busy — don't queue retry
+        if (PickupHeldByServerAction())
+            return; // a retry now would be refused as too busy and use up an attempt
 
         RynthCore.Plugin.RynthAi.ItemInfo.SelfSelect.Mark(unchecked((uint)_currentLootItemId));
         Host.SelectItem(unchecked((uint)_currentLootItemId));
+        int errSeqAtSend = LastWeenieErrorSeq();
         LootPickupResult retry = SendLootPickup(_currentLootItemId, _currentLootItemName, _openedContainerId);
         if (retry == LootPickupResult.NoRoom || retry == LootPickupResult.Refused)
             return; // SendLootPickup finished the item / corpse
         bool retried = retry == LootPickupResult.Moved || retry == LootPickupResult.Used;
-        _currentLootItemMoveAttempts++;
+        if (freeRetry)
+            _currentLootItemFreeRetries++;
+        else
+            _currentLootItemMoveAttempts++;
+        _currentLootItemErrSeqAtSend = errSeqAtSend;
         _currentLootItemMoveRequestedAt = now;
+        _currentLootItemStillSince = 0;
+        _currentLootItemSawAnim = false;
         _lastLootActionAt = now;
-        LootDiag($"[RynthAi] Corpse loot: retrying use for 0x{(uint)_currentLootItemId:X8} attempt {_currentLootItemMoveAttempts}.");
+        LootDiag(freeRetry
+            ? $"[RynthAi] {LootTag}: the server refused 0x{(uint)_currentLootItemId:X8} (error 0x{refusal:X}); sending it again now the character is still."
+            : $"[RynthAi] {LootTag}: retrying use for 0x{(uint)_currentLootItemId:X8} attempt {_currentLootItemMoveAttempts}.");
 
         if (!retried && _currentLootItemMoveAttempts >= 3)
         {
@@ -1659,20 +2042,6 @@ public sealed partial class RynthAiPlugin
         return 0;
     }
 
-    private bool IsCorpseItemVisible(int corpseId, int itemId)
-    {
-        if (_objectCache == null || corpseId == 0 || itemId == 0)
-            return false;
-
-        foreach (WorldObject item in _objectCache.GetContainedItems(corpseId))
-        {
-            if (item.Id == itemId)
-                return true;
-        }
-
-        return false;
-    }
-
     /// <summary>
     /// Sends the pickup for a corpse item (<see cref="LootPickup"/>: a move into a pack,
     /// never a use). NoRoom finishes the corpse like the free-slot check does; Refused
@@ -1680,6 +2049,7 @@ public sealed partial class RynthAiPlugin
     /// </summary>
     private LootPickupResult SendLootPickup(int itemId, string itemName, int corpseId)
     {
+        NoteMergeTargets(itemId, itemName);
         bool ownCorpse = corpseId != 0 && corpseId == _ownRecoveryCorpseId;
         uint dest;
         LootPickupResult r = ownCorpse
@@ -1693,16 +2063,16 @@ public sealed partial class RynthAiPlugin
         switch (r)
         {
             case LootPickupResult.Moved:
-                LootDiag($"[RynthAi] Corpse loot: moving 0x{(uint)itemId:X8} '{itemName}' into {(dest == _playerId ? "the main pack" : $"pack 0x{dest:X8}")}.");
+                LootDiag($"[RynthAi] {LootTag}: moving 0x{(uint)itemId:X8} '{itemName}' into {(dest == _playerId ? "the main pack" : $"pack 0x{dest:X8}")}.");
                 break;
             case LootPickupResult.NoRoom:
-                LootDiag($"[RynthAi] Corpse loot: no pack has a free slot for '{itemName}' on 0x{(uint)corpseId:X8}; leaving the corpse.");
+                LootDiag($"[RynthAi] {LootTag}: no pack has a free slot for '{itemName}' on 0x{(uint)corpseId:X8}; leaving the corpse.");
                 WorldObjectCache.WarnPackFull(Host, "looting stopped, no pack has a free slot");
                 ResetCurrentLootItem();
                 MarkCorpseCompleted(corpseId);
                 break;
             case LootPickupResult.Refused:
-                LootDiag($"[RynthAi] Corpse loot: leaving '{itemName}' 0x{(uint)itemId:X8} — the engine has no move call and a use would put it on.");
+                LootDiag($"[RynthAi] {LootTag}: leaving '{itemName}' 0x{(uint)itemId:X8} — the engine has no move call and a use would put it on.");
                 _processedCorpseItems.Add(itemId);
                 ResetCurrentLootItem();
                 break;
@@ -1710,13 +2080,29 @@ public sealed partial class RynthAiPlugin
         return r;
     }
 
-    private void ConfirmCurrentLootItemMoved(long now, string reason)
+    /// <summary>
+    /// The current pickup is done as far as the item goes (<paramref name="answered"/>: the
+    /// server's answer was seen; false: it left the corpse and the wait for it ran out). The
+    /// character may still be standing up: that Return is tracked as the settling pickup.
+    /// </summary>
+    private void ConfirmCurrentLootItemMoved(long now, string reason) => ConfirmCurrentLootItem(now, reason, answered: true);
+
+    private void ConfirmCurrentLootItem(long now, string reason, bool answered)
     {
         if (_currentLootItemId == 0)
             return;
 
+        int itemId = _currentLootItemId;
         _processedCorpseItems.Add(_currentLootItemId);
-        LootDiag($"[RynthAi] Corpse loot: pickup confirmed for 0x{(uint)_currentLootItemId:X8}; {reason}.");
+        LootDiag($"[RynthAi] {LootTag}: pickup confirmed for 0x{(uint)_currentLootItemId:X8}; {reason}" +
+                 $" ({now - _currentLootItemMoveRequestedAt} ms after the send{(_currentLootItemPipelined ? ", queued" : "")}).");
+        // Each item taken is progress, so the corpse/chest timeout counts from the last pickup:
+        // a chest gets its 2 minutes per pickup, and a corpse with many keeps is no longer
+        // closed part way through by the 12 s timeout (SK, 2026-10-11). Not while a hold
+        // has the clock frozen.
+        if (_corpseHoldFrozenAge < 0
+            && (IsChestLoot(_targetCorpseId) || (_targetCorpseId != 0 && _targetCorpseId == _openedContainerId)))
+            _corpseTargetSince = now;
         if (_openedContainerId != 0 && _openedContainerId == _ownRecoveryCorpseId)
             NoteOwnCorpseItemRecovered(now);
         if (!string.IsNullOrWhiteSpace(_currentLootItemName))
@@ -1731,6 +2117,14 @@ public sealed partial class RynthAiPlugin
 
         ResetCurrentLootItem();
         _lastLootActionAt = now;
+
+        // Its Return now plays: the close waits for it, and one move may be queued behind it.
+        _settlingLootItemId = itemId;
+        _settlingContainerId = _openedContainerId;
+        _settlingSince = now;
+        _settlingSawAnim = false;
+        _settlingAllowsPipeline = answered;
+        _pickupAnimSince = 0; // the next pickup's animation gets its own PickupAnimMaxMs
     }
 
     /// <summary>
@@ -1747,7 +2141,8 @@ public sealed partial class RynthAiPlugin
     ///
     /// Caveat, deliberately kept: the in-range scan calls ShouldLootCorpse,
     /// which fires one Host.RequestId per corpse to populate the killer name
-    /// (guarded by _corpseIdRequested, so once per corpse ever). That is a
+    /// (guarded by _corpseIdRequested: once per accepted request, asked again after
+    /// CorpseIdReaskMs while no data has arrived). That is a
     /// memoized fetch rather than a mutation, and the old bottom-of-tick
     /// IsCorpseNavigationClaimActive call already did it on the same cadence —
     /// this moves it earlier in the tick, it does not add it.
@@ -1755,7 +2150,7 @@ public sealed partial class RynthAiPlugin
     private bool HasLootWork(LegacyUiSettings settings, long nowMs)
     {
         _lootStarved = false;
-        if (!settings.IsMacroRunning || !settings.EnableLooting)
+        if (!settings.IsMacroRunning || (!settings.EnableLooting && !ForcedLootHolds()))
             return false;
 
         // The server refuses every use (UseRefusalWatch, Stuck): no loot work until the back-off
@@ -1778,6 +2173,10 @@ public sealed partial class RynthAiPlugin
         if (IsLootingBlockedByPack(settings) && !OwnCorpseBypassesPackGate(settings, GetCorpseApproachRangeMaxMeters(settings)))
             return false;
 
+        // An open chest the player or a meta opened, eligible to loot (RynthAiPlugin.ChestLoot.cs).
+        if (HasChestLootWork(settings))
+            return true;
+
         // Loot grace: combat just ended and the corpse CreateObject has not
         // arrived yet. Hold Looting across that gap so nav doesn't walk away
         // from a body that is about to exist.
@@ -1788,7 +2187,7 @@ public sealed partial class RynthAiPlugin
         if (maxMeters <= 0.25)
             return false;
 
-        return HasUnlootedCorpsesInRange(maxMeters);
+        return HasUnlootedCorpsesInRange(maxMeters) || HasGroundLootWork(settings);
     }
 
     /// <summary>
@@ -1832,6 +2231,12 @@ public sealed partial class RynthAiPlugin
         if (_objectCache == null || _playerId == 0)
             return false;
 
+        // A new scan tick: the identify budget starts over, and the corpse the bot is going for asks first.
+        _corpseIdAcceptedThisTick = 0;
+        _corpseIdBudgetAt = ActionPacer.NowMs();
+        foreach (int cid in new[] { _targetCorpseId, _openedContainerId })
+            if (cid != 0 && _objectCache[cid] is { } cand && cand.ObjectClass == AcObjectClass.Corpse)
+                TryRequestCorpseId(cand, cand.Values(StringValueKey.LongDesc, string.Empty));
         long now = CorpseNowMs;
         int playerId = unchecked((int)_playerId);
         foreach (WorldObject candidate in _objectCache.GetLandscapeObjects())
@@ -1916,7 +2321,7 @@ public sealed partial class RynthAiPlugin
 
         int corpseId = _openedContainerId != 0 ? _openedContainerId : _targetCorpseId;
         if (corpseId != 0)
-            LootDiag($"[RynthAi] Corpse loot: pausing navigation for corpse 0x{(uint)corpseId:X8}.");
+            LootDiag($"[RynthAi] {LootTag}: pausing navigation for corpse 0x{(uint)corpseId:X8}.");
     }
 
     /// <summary>
@@ -1983,15 +2388,26 @@ public sealed partial class RynthAiPlugin
             // cache-classification race that bites AllKnownObjects() right after
             // RL/login. IsManaStone's name fallback also keys on Name (always
             // present), so the tally is reliable even before ITEM_TYPE lands.
-            int liveCount = 0;
-            if (_objectCache != null)
+            // One walk per pass, not one per stone: a chest with 9 stones walked the whole
+            // inventory 9 times in the same tick (ManaStoneLiveCountMs).
+            long nowMs = CorpseNowMs;
+            int liveCount;
+            if (_manaStoneLiveCountAt != 0 && nowMs - _manaStoneLiveCountAt < ManaStoneLiveCountMs)
+                liveCount = _manaStoneLiveCount;
+            else
             {
-                foreach (var inv in _objectCache.GetDirectInventory(forceRefresh: true))
+                liveCount = 0;
+                if (_objectCache != null)
                 {
-                    if (string.IsNullOrEmpty(inv.Name)) continue;
-                    if (_manaStoneManager?.IsManaStone(inv) == true)
-                        liveCount++;
+                    foreach (var inv in _objectCache.GetDirectInventory(forceRefresh: true))
+                    {
+                        if (string.IsNullOrEmpty(inv.Name)) continue;
+                        if (_manaStoneManager?.IsManaStone(inv) == true)
+                            liveCount++;
+                    }
                 }
+                _manaStoneLiveCount = liveCount;
+                _manaStoneLiveCountAt = nowMs;
             }
 
             // Include stones already approved this session whose CreateObject event
@@ -2005,9 +2421,13 @@ public sealed partial class RynthAiPlugin
             }
             int haveCount = liveCount + pendingNotYetCounted;
 
-            // One-time-per-corpse log so we can see what the count was based on.
-            if (!preview && _pendingManaStoneIds.Count == 0)
+            // One-time-per-corpse log so we can see what the count was based on (it was printed
+            // for every stone while none was approved: 9 lines a chest at the cap).
+            if (!preview && _pendingManaStoneIds.Count == 0 && _manaStoneCapLoggedFor != _openedContainerId)
+            {
+                _manaStoneCapLoggedFor = _openedContainerId;
                 Host.Log($"[RynthAi] ManaStone count for cap check: live={liveCount} pending={pendingNotYetCounted} cap={settings.ManaStoneKeepCount} (cache_known={_objectCache?.AllKnownObjects().Count() ?? 0})");
+            }
 
             // If this specific stone is already approved, return the same answer
             // we returned last time (no further log spam, no count change).
@@ -2375,6 +2795,13 @@ public sealed partial class RynthAiPlugin
         if (corpseId == 0)
             return;
 
+        // A chest is finished and closed, never marked: it regenerates, and the next open loots it again.
+        if (IsChestLoot(corpseId))
+        {
+            FinishChestLoot(corpseId, "completed", close: true, sayNothingMatched: true);
+            return;
+        }
+
         _completedCorpses[corpseId] = CorpseNowMs;
         _corpseCooldownUntil.Remove(corpseId);
         _processedCorpseItems.Clear();
@@ -2389,7 +2816,13 @@ public sealed partial class RynthAiPlugin
         // server closes this corpse when the next UseObject open is sent.
         // Clear container state immediately; SyncCorpseContainerState guards against
         // re-claiming via _completedCorpses until the server's close lands.
-        CloseCorpseContainer(corpseId, "completed");
+        // With another corpse to loot in range, no close at all: ACE closes the open
+        // container itself when the next one is used (Container.ActOnUse closes the player's
+        // LastOpenedContainerId first), so the close and its answer wait (CloseAnswerWaitMs) only
+        // delayed the next open. The close is held back (TickDeferredClose) and still sent if no
+        // other corpse is opened, or looting stops.
+        if (!(OtherCorpseToLoot(corpseId) && DeferClose(corpseId)))
+            CloseCorpseContainer(corpseId, "completed");
         if (_openedContainerId == corpseId)
         {
             _openedContainerId = 0;
@@ -2438,6 +2871,10 @@ public sealed partial class RynthAiPlugin
         _currentLootItemStillSince = 0;
         _currentLootItemLeftAt = 0;
         _currentLootItemSawAnim = false;
+        _currentLootItemStackable = false;
+        _currentLootItemPipelined = false;
+        _currentLootItemErrSeqAtSend = 0;
+        _currentLootItemFreeRetries = 0;
         _currentLootItemActionLabel = string.Empty;
         _currentLootItemName = string.Empty;
         _currentLootItemIsSalvage = false;
@@ -2559,6 +2996,12 @@ public sealed partial class RynthAiPlugin
         if (watch && sent)
             _useRefusals.OnOpenSent(corpseId, now, seqBefore);
         LootDiag($"[RynthAi] Corpse loot: attempting open for 0x{(uint)corpseId:X8}.");
+        // The finished corpse held open (MarkCorpseCompleted): this use closes it on the server.
+        if (sent && _closeDeferredFor != 0 && _closeDeferredFor != corpseId)
+        {
+            LootDiag($"[RynthAi] Corpse loot: 0x{(uint)_closeDeferredFor:X8} is left for the server to close with this open.");
+            _closeDeferredFor = 0;
+        }
         return true;
     }
 
@@ -2725,7 +3168,19 @@ public sealed partial class RynthAiPlugin
         if (rawOpen == _openedContainerId)
             return;
 
+        // A chest being looted ends on its own close (OnStopViewingObjectContents), not here: the
+        // engine's ground container is the last ViewContents, which a pack picked up out of the
+        // chest moves too. The loot timeout still ends it if the close is never seen.
+        if (IsChestLoot(_openedContainerId))
+            return;
+
         long now = CorpseNowMs;
+        // A finished corpse the client still shows (its close from the server not in yet: the next
+        // corpse was used without closing it, MarkCorpseCompleted) is not a close of the corpse we
+        // have open now. A real close of that one empties the client's container (or brings
+        // OnStopViewingObjectContents), never shows the old corpse again.
+        if (_openedContainerId != 0 && rawOpen != 0 && rawOpen != _openedContainerId && _completedCorpses.ContainsKey(rawOpen))
+            return;
         if (_openedContainerId != 0 && rawOpen != _openedContainerId)
         {
             int previousOpen = _openedContainerId;
@@ -2806,6 +3261,9 @@ public sealed partial class RynthAiPlugin
     private void HandleCorpseObjectDeleted(uint objectId)
     {
         int sid = unchecked((int)objectId);
+        // A chest leaving range (or despawning) ends its session; it is never completed-marked.
+        if (OnChestGone(sid, "left range"))
+            return;
         // Do NOT remove from _completedCorpses here. In AC, DeleteObject fires when a corpse
         // leaves render range as well as when it actually despawns — both look identical.
         // If we removed it here, the bot would re-open the same corpse when it circles back
@@ -2815,6 +3273,8 @@ public sealed partial class RynthAiPlugin
         _corpseCooldownUntil.Remove(sid);
         _ownershipSkipLogged.Remove(sid);
         _corpseIdRequested.Remove(sid);
+        _corpseIdAskedAt.Remove(sid);
+        _corpseIdRefusedAt.Remove(sid);
         _corpseSkipLogged.Remove(sid);
         _corpseWaitingSince.Remove(sid);
 
@@ -2909,9 +3369,17 @@ public sealed partial class RynthAiPlugin
         return minMeters;
     }
 
-    private static int GetCorpseTimeoutMs(LegacyUiSettings settings)
+    /// <summary>
+    /// How long a chest session may go without a pickup (the corpse timeout when that is longer).
+    /// A chest can hold dozens of items to assess and take, so the corpse timeout (12 s by default)
+    /// cut sessions short; each confirmed pickup restarts this clock (ConfirmCurrentLootItemMoved).
+    /// </summary>
+    internal const int ChestLootTimeoutMs = 120_000;
+
+    private int GetCorpseTimeoutMs(LegacyUiSettings settings)
     {
-        return Math.Max(2000, settings.LootCorpseTimeoutMs);
+        int ms = Math.Max(2000, settings.LootCorpseTimeoutMs);
+        return IsChestLoot(_targetCorpseId) ? Math.Max(ms, ChestLootTimeoutMs) : ms;
     }
 
     private bool HasCorpseTimedOut(LegacyUiSettings settings, long now)
@@ -2957,6 +3425,57 @@ public sealed partial class RynthAiPlugin
     private long _closeSentAt;
     private const long CloseAnswerWaitMs = 500;
 
+    // A finished corpse left open for the server to close when the next one is used (MarkCorpseCompleted).
+    private int _closeDeferredFor;
+    private long _closeDeferredAt;
+    /// <summary>A held-back close is sent anyway when no other corpse has been opened this long.</summary>
+    internal const long DeferredCloseMaxMs = 3000;
+
+    /// <summary>Another corpse to loot is in range (the finished one is already marked completed).</summary>
+    private bool OtherCorpseToLoot(int doneCorpseId)
+    {
+        var settings = _dashboard?.Settings;
+        if (settings == null || _objectCache == null) return false;
+        double maxMeters = GetCorpseApproachRangeMaxMeters(settings);
+        if (maxMeters <= 0.25) return false;
+        return TryFindNearestCorpse(maxMeters, out WorldObject? next, out _) && next != null && next.Id != doneCorpseId;
+    }
+
+    /// <summary>Holds the close of a finished corpse back. Only when the engine can close it later and
+    /// reports which container the client has open (so the hold can see the server close it).</summary>
+    private bool DeferClose(int corpseId)
+    {
+        if (!Host.HasCloseContainer || !Host.HasGetGroundContainerId)
+            return false;
+        if (unchecked((int)Host.GetGroundContainerId()) != corpseId && _openedContainerId != corpseId)
+            return false;
+        _closeDeferredFor = corpseId;
+        _closeDeferredAt = CorpseNowMs;
+        LootDiag($"[RynthAi] Corpse loot: 0x{(uint)corpseId:X8} done; no close sent (the server closes it when the next corpse is used).");
+        return true;
+    }
+
+    /// <summary>
+    /// Each tick: a held-back close. Gone from the client (the server closed it): done. Looting
+    /// stopped, or no other corpse opened within DeferredCloseMaxMs: the close is sent now.
+    /// </summary>
+    private void TickDeferredClose(LegacyUiSettings settings)
+    {
+        int id = _closeDeferredFor;
+        if (id == 0) return;
+        if (!Host.HasGetGroundContainerId || unchecked((int)Host.GetGroundContainerId()) != id)
+        {
+            _closeDeferredFor = 0;
+            LootDiag($"[RynthAi] Corpse loot: 0x{(uint)id:X8} closed by the server.");
+            return;
+        }
+        bool stopped = !settings.IsMacroRunning || !settings.EnableLooting || settings.BoostNavPriority;
+        if (!stopped && CorpseNowMs - _closeDeferredAt < DeferredCloseMaxMs)
+            return;
+        _closeDeferredFor = 0;
+        CloseCorpseContainer(id, stopped ? "completed; looting stopped" : "completed; no other corpse opened");
+    }
+
     private void CloseCorpseContainer(int corpseId, string why)
     {
         if (corpseId == 0 || !Host.HasCloseContainer)
@@ -2971,10 +3490,10 @@ public sealed partial class RynthAiPlugin
         {
             _closeSentFor = corpseId;
             _closeSentAt = CorpseNowMs;
-            LootDiag($"[RynthAi] Corpse loot: closing 0x{(uint)corpseId:X8} ({why}).");
+            LootDiag($"[RynthAi] {LootTag}: closing 0x{(uint)corpseId:X8} ({why}).");
         }
         else
-            LootDiag($"[RynthAi] Corpse loot: close of 0x{(uint)corpseId:X8} not sent ({why}).");
+            LootDiag($"[RynthAi] {LootTag}: close of 0x{(uint)corpseId:X8} not sent ({why}).");
     }
 
     /// <summary>
@@ -2987,7 +3506,7 @@ public sealed partial class RynthAiPlugin
     private void CloseOpenCorpseOnMacroStop()
     {
         int corpseId = _openedContainerId;
-        if (corpseId == 0 || !IsCorpseLikeObject(corpseId))
+        if (corpseId == 0 || !(IsCorpseLikeObject(corpseId) || IsChestLoot(corpseId)))
             return;
 
         ResetCurrentLootItem();
@@ -3001,6 +3520,15 @@ public sealed partial class RynthAiPlugin
             return;
 
         long ageMs = _corpseTargetSince != 0 ? now - _corpseTargetSince : 0;
+
+        // A chest: closed and let go, never marked (no open was sent, so no wedge count either).
+        if (IsChestLoot(corpseId))
+        {
+            LootDiag($"[RynthAi] Chest loot: giving up on chest 0x{(uint)corpseId:X8} after {ageMs}ms ({reason}).");
+            ChatLine($"[RynthAi] Chest {reason}: giving up on 0x{(uint)corpseId:X8} after {ageMs}ms.");
+            FinishChestLoot(corpseId, "abandoned", close: true, sayNothingMatched: false);
+            return;
+        }
         LootDiag($"[RynthAi] Corpse loot: abandoning corpse 0x{(uint)corpseId:X8} after {ageMs}ms ({reason}).");
         ChatLine($"[RynthAi] Corpse {(reason == "refused" ? "refuses to open" : "timeout")}: giving up on 0x{(uint)corpseId:X8} after {ageMs}ms.");
 

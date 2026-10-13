@@ -15,13 +15,25 @@ public static unsafe class PluginExports
     private static int Init(RynthCoreApiNative* api) => Runtime.Init(api);
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginShutdown", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static void Shutdown() => Runtime.Shutdown();
+    public static void Shutdown()
+    {
+        try { Runtime.Shutdown(); }   // an exception out of a native export fail-fasts the client
+        catch { }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginName", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetName() => RynthTrackerPlugin.NamePointer;
+    public static IntPtr GetName()
+    {
+        try { return RynthTrackerPlugin.NamePointer; }
+        catch { return IntPtr.Zero; }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginVersion", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetVersion() => RynthTrackerPlugin.VersionPointer;
+    public static IntPtr GetVersion()
+    {
+        try { return RynthTrackerPlugin.VersionPointer; }
+        catch { return IntPtr.Zero; }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginTick", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void Tick() => Runtime.OnTick();

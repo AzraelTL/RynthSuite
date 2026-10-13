@@ -34,7 +34,7 @@
 //      queue (CMotionInterp pending motions, the engine's cast gate: GetCastBusyState) must
 //      be empty, for uses, kits, potions, casts, stance changes, wields and the item
 //      managers' moves (GestureHolds). Melee/missile attack repeats are exempt (MayStart
-//      with gestureGate false). Time limit GestureHoldMaxMs (GestureEmergencyMaxMs for an
+//      with animationGate false). Time limit GestureHoldMaxMs (GestureEmergencyMaxMs for an
 //      emergency heal), logged, like Combat/CastGateWatchdog for casts.
 //
 //  Why the animation gate (2026-10-06 afternoon, ops/overnight/2026-10-06-turnto-stall.md,
@@ -92,6 +92,8 @@ internal sealed class PacedAction
     public long SentMs;
     public int SeqAtSend;
     public int ModeTarget;
+    public uint Target;          // a cast's target (the held-cast turn faces it)
+    public bool Script;          // a cast a script chose (the combat hook): the breaker waits ScriptCastMinBreakMs
     public bool WieldedAtSend;
     public bool ResultSeen;      // a cast's result is in (enchantment / chat); the server is in its recoil
     public bool HealQueued;      // the one heal allowed behind that recoil went out
@@ -165,6 +167,7 @@ internal static class ActionPacer
         {
             _cur = null;
             _started = _answered = _timedOut = _sentOverOutstanding = _modeRefused = _modeSkipped = 0;
+            _refuseSince = 0; _refuseLast = 0; _refuseCount = 0; _engineRefusals = 0; _lastEngineRefusalMs = 0;
             _heldStarts = _heldMoves = _healsAhead = 0;
             _gestureHolds = _gestureLimits = 0;
             _swingSentMs = 0; _swingSeenBusy = false; _swingHolds = 0; _swingLogged.Clear();
@@ -175,13 +178,44 @@ internal static class ActionPacer
             _maxWaitWhat = "";
             _holdsByWho.Clear();
             _lastTimeout = "";
+            ClearBusyLocked();
+            _stuckBreaks = 0;
+            _refusalHolds = 0;
+            _heldTurns = 0;
+            _forcedBreaks = 0;
+            _jumpAt = 0;
+            _cycleBySpell.Clear();
+            _lastSeenSeq = int.MinValue;
+            _lastFrameMs = 0;
+            _gapEnd = 0;
+            _gapLen = 0;
+            _errorAnswers.Clear();
+            _staleDrops = _latchExpiries = _burstHolds = 0;
+        }
+    }
+
+    /// <summary>
+    /// The plugin's heartbeat, every frame whatever the macro does. A gap of PollGapMs or more between
+    /// two calls (the client froze or loaded) makes a cast sent before the gap ENDED stale at the next
+    /// check (a cast sent in the tick just before a freeze is sent after that tick's NoteFrame), so
+    /// a teleport's or a freeze's gap is never mistaken for a stuck cast and broken by a jump. Never
+    /// called (a plugin without it, the tests that don't): no gap detection, only StaleCastMs.
+    /// </summary>
+    public static void NoteFrame()
+    {
+        long now = NowMs();
+        lock (Gate)
+        {
+            if (_lastFrameMs != 0 && now - _lastFrameMs >= PollGapMs) { _gapEnd = now; _gapLen = now - _lastFrameMs; }
+            _lastFrameMs = now;
         }
     }
 
     /// <summary>Forget the outstanding action (logout, death, portal): the server dropped it.</summary>
     public static void Forget(string why)
     {
-        lock (Gate) { _cur = null; }
+        // A death, portal or logout also ends a refusal streak: a refusal before it must not make one after it look like a long streak.
+        lock (Gate) { _cur = null; ClearBusyLocked(); _refuseSince = 0; _refuseLast = 0; _refuseCount = 0; }
     }
 
     // ── Recording what went out ──────────────────────────────────────────────
@@ -209,6 +243,8 @@ internal static class ActionPacer
             {
                 _sentOverOutstanding++;
                 over = $"[Pace] {who}: {Describe(kind, label)} went out while {Describe(prev.Kind, prev.Label)} ({prev.Who}) was unanswered for {now - prev.SentMs} ms";
+                // Our cast is still the server's: a 0x1D to this send says it is open (the stuck-cast rules).
+                if (prev.Kind == PacedKind.Cast && _shadow == null && _hung == null) _shadow = prev;
             }
             _cur = a;
         }
@@ -254,6 +290,12 @@ internal static class ActionPacer
                 if (hasSeq && seq != a.SeqAtSend)
                 {
                     answeredHow = "UseDone";
+                    if (a.Kind == PacedKind.Cast)
+                    {
+                        uint err = TooBusyErr;
+                        try { if (host.TryGetLastUseDone(out int ls, out uint le) && ls == a.SeqAtSend + 1) err = le; } catch { }
+                        if (err != TooBusyErr) NoteCycle(a.Id, age);
+                    }
                 }
                 else if (a.Kind == PacedKind.ItemUse && IsWieldedByPlayer(host, a.Id) != a.WieldedAtSend)
                 {
@@ -293,6 +335,7 @@ internal static class ActionPacer
             {
                 _timedOut++;
                 _lastTimeout = $"{Describe(a.Kind, a.Label)} ({a.Who}) after {age} ms";
+                if (a.Kind == PacedKind.Cast && _hung == null) _hung = a;   // still the server's: see the stuck-cast hold
                 line = $"[Pace] no answer from the server to {Describe(a.Kind, a.Label)} ({a.Who}) in {age} ms - going on (nothing cleared)";
             }
             else
@@ -317,14 +360,31 @@ internal static class ActionPacer
     /// May <paramref name="who"/> send a use, a cast or a mode change now? False (with why) while
     /// another action waits for the server, except the heal rules in the file header, and while
     /// the character is still animating (<see cref="GestureHolds"/>; skipped with
-    /// <paramref name="gestureGate"/> false: melee/missile attack repeats). One log line per
+    /// <paramref name="animationGate"/> false: melee/missile attack repeats). One log line per
     /// outstanding action (or animation) and subsystem.
     /// </summary>
-    public static bool MayStart(RynthCoreHost host, string who, HealNeed heal, out string why, bool gestureGate = true)
+    /// <param name="animationGate">False: skip <see cref="GestureHolds"/> (melee/missile attack repeats).</param>
+    /// <param name="settleGate">False: skip the movement settle (<see cref="MoveAudit.SettleHolds"/>; attack repeats only).</param>
+    /// <param name="attackRepeat">
+    /// A melee/missile attack repeat: never held by the 'too busy' latch. ACE sends no UseDone for a
+    /// swing, so a latch set by anything else (a refused pickup) would otherwise leave combat only the
+    /// probe slots.
+    /// </param>
+    public static bool MayStart(RynthCoreHost host, string who, HealNeed heal, out string why,
+        bool animationGate = true, bool settleGate = true, bool attackRepeat = false)
     {
         if (!Enabled) { why = ""; return true; }
+        if (ServerBusyHolds(host, who, attackRepeat, out why, healStart: heal != HealNeed.None)) return false;
+        if (settleGate && MoveAudit.SettleHolds(host, out why))
+        {
+            bool log;
+            lock (Gate) { _settleHolds++; log = _settleLogged.Add(who); }
+            if (log) Log(host, $"[Pace] {who} waits: {why}");
+            return false;
+        }
+        lock (Gate) _settleLogged.Clear();
         if (!OutstandingAllows(host, who, heal, out why)) return false;
-        if (gestureGate && GestureHolds(host, who, heal, out why)) return false;
+        if (animationGate && GestureHolds(host, who, heal, out why)) return false;
         return true;
     }
 
@@ -443,11 +503,16 @@ internal static class ActionPacer
     private static readonly HashSet<string> _swingLogged = new();
     public static long SwingHoldCount => _swingHolds;
 
+    /// <summary>Attacks CombatManager reported (NoteAttackSent): a caller that remembers the count can
+    /// tell whether a swing went out since (BuffCastChain). Not reset, only compared.</summary>
+    public static long AttacksSent { get; private set; }
+
     /// <summary>CombatManager sent a melee or missile attack.</summary>
     public static void NoteAttackSent()
     {
         lock (Gate)
         {
+            AttacksSent++;
             _swingSentMs = NowMs();
             _swingSeenBusy = false;
             _swingLogged.Clear();
@@ -495,7 +560,470 @@ internal static class ActionPacer
         return true;
     }
 
+    // -- A cast the server holds open, and a server that answers "too busy" ----------------
+    // Two hangs in a client log, both ACE's fast-tick turn-to-cast wait (Player_Magic
+    // TurnTo_Magic / PendingTurnRelease: the cast waits until the character faces its target within
+    // spellcast_max_angle, with no time limit): a Bolt VII sent in the same tick as nav's autorun stop
+    // (answered 40.8 s later) and a Drain at a moving target (its
+    // incantation 2865 ms after the send, fizzled 37 s later on a client mode change). The server
+    // kept IsBusy, so every cast after it came back UseDone 0x1D, and the vitals path re-sent a heal
+    // every 2.5 s. So:
+    //   * a cast that times out unanswered (CastMaxMs) is kept as the server's (hung);
+    //   * a UseDone with 0x1D latches "server busy": nothing starts (MayStart) until a UseDone with
+    //     another error arrives. With no cast of ours open, one probe goes after BusyProbeMs, then
+    //     after twice that each time, up to BusyProbeMaxMs (the busy thing may have no UseDone of its
+    //     own, e.g. a pickup). No timer re-sends into a server busy with our own cast;
+    //   * a cast of ours still unanswered TurnAfterMs past its normal cycle: turn to face its target
+    //     (the server's angle check then lets it finish), once, when RynthAi is not moving us;
+    //   * still unanswered JumpAfterMs past its normal cycle (capped by StuckCastMs), or a 0x1D to
+    //     another send while it is open past RefusalBreakMinMs: the breaker, a jump (0xF61B, TapJump):
+    //     on fast tick ACE's HandleActionJump clears the pending motions and calls FailCast (origin/
+    //     master Player.cs ~1195-1214), a 0x402 fizzle. Nothing starts until the character has landed
+    //     (a cast in the air is refused). No UseDone BreakerWaitMaxMs after landing: a Peace mode
+    //     request (HandleActionChangeCombatMode_Inner also calls FailCast, fast tick or not); then
+    //     BreakerWaitMaxMs more and it goes on (logged).
+
+    /// <summary>ACE's YoureTooBusy, as a UseDone error.</summary>
+    public const uint TooBusyErr = 0x1D;
+    /// <summary>With no cast of ours open, one start is let through this long after a 0x1D (doubling per probe).</summary>
+    public const long BusyProbeMs = 1500;
+    public const long BusyProbeMaxMs = 6000;
+    /// <summary>A cast's normal send-to-UseDone time when none was seen for its spell, and the floor of a learned one.</summary>
+    public const long DefaultCycleMs = 3000;
+    /// <summary>Past its normal cycle: turn to face the target after this, jump after this.</summary>
+    public const long TurnAfterMs = 1000;
+    public const long JumpAfterMs = 2000;
+    /// <summary>A 0x1D to another send breaks our open cast only once it is this old (a recoil refusal is normal).</summary>
+    public const long RefusalBreakMinMs = 3000;
+    /// <summary>After the jump: landed once the height is back (and this long passed), or at the max.</summary>
+    public const long JumpLandMinMs = 400;
+    public const long JumpLandMaxMs = 1500;
+    /// <summary>After landing (or after the Peace request), the longest wait for a UseDone before the next step.</summary>
+    public const long BreakerWaitMaxMs = 3000;
+    /// <summary>The stuck-cast limit (ms from the send; 0 = no turn, no breaker). RynthAi sets it from its settings.</summary>
+    public static long StuckCastMs = 8000;
+    /// <summary>
+    /// A script-chosen cast is not broken by a jump before this (ms from the send), whatever its
+    /// cycle, Stuck Cast Break or a 'too busy' answer say: a script's slower spells (a siphon
+    /// answered about 5.5 s after the send) get 6 s from the send before the first jump; the
+    /// held-cast nudge, which counts from the incantation, comes later.
+    /// </summary>
+    public const long ScriptCastMinBreakMs = 6000;
+    /// <summary>
+    /// A cast of ours this old (or one sent before a gap of PollGapMs between NoteFrame calls: a
+    /// client freeze, a long load) is stale: dropped with the latch, never broken. Bounds every hold,
+    /// the breaker off (StuckCastMs 0) included.
+    /// </summary>
+    public const long StaleCastMs = 3 * (CastMaxMs > BusyProbeMaxMs ? CastMaxMs : BusyProbeMaxMs);
+    public const long PollGapMs = 5000;
+    /// <summary>A 'too busy' latch with no cast of ours open is cleared after this long (logged).</summary>
+    public const long LatchMaxMs = 15000;
+    /// <summary>'Too busy' UseDones in the last second at which every start but a heal waits (bounds refusal chat lines).</summary>
+    public const int RefusalBurstMax = 5;
+    public const int PeaceMode = 1, MagicMode = 8;
+
+    private enum BreakStage { None, Turned, Jumped, Landed, ModeSent }
+
+    private static PacedAction? _hung;           // a cast past CastMaxMs with no UseDone
+    private static PacedAction? _shadow;         // our cast still unanswered when another action went out over it
+    private static long _busySince;              // first 0x1D of the latch (0 = no latch)
+    private static int _busyRefusals;            // 0x1D answers in this latch
+    private static int _probes;
+    private static long _lastProbeAt;
+    private static BreakStage _stage;
+    private static long _stageAt;
+    private static PacedAction? _stageFor;
+    private static long _jumpAt;                 // 0 = not in the air after a breaker jump
+    private static float _jumpZ;
+    private static int _lastSeenSeq = int.MinValue;
+    private static long _lastFrameMs;                // the last NoteFrame (gap detection; 0 = never)
+    private static long _gapEnd, _gapLen;            // the frame that ended the last gap, and its length (0 = none)
+    private static readonly Queue<long> _errorAnswers = new();   // times of error UseDones (burst limiter)
+    private static long _staleDrops, _latchExpiries, _burstHolds;
+    public static long StaleDrops => _staleDrops;
+    public static long LatchExpiries => _latchExpiries;
+    public static long BurstHolds => _burstHolds;
+    private static long _stuckBreaks, _refusalHolds, _heldTurns, _forcedBreaks, _settleHolds;
+    private static readonly HashSet<string> _settleLogged = new();
+    public static long SettleHoldCount => _settleHolds;
+    private static readonly HashSet<string> _busyLogged = new();
+    private static readonly Dictionary<uint, long> _cycleBySpell = new();
+    public static long StuckBreaks => _stuckBreaks;
+    public static long RefusalHolds => _refusalHolds;
+    public static long HeldCastTurns => _heldTurns;
+    /// <summary>True while the server is taken as busy (a 0x1D latch or a hung cast).</summary>
+    public static bool ServerBusy { get { lock (Gate) return _busySince != 0 || _hung != null; } }
+    /// <summary>True while the character is in the air after a breaker jump.</summary>
+    public static bool BreakerAirborne { get { lock (Gate) return _jumpAt != 0; } }
+
+    private static void ClearBusyLocked()
+    {
+        _hung = null;
+        _shadow = null;
+        _busySince = 0;
+        _busyRefusals = 0;
+        _probes = 0;
+        _lastProbeAt = 0;
+        _stage = BreakStage.None;
+        _stageAt = 0;
+        _stageFor = null;
+        _busyLogged.Clear();
+    }
+
+    /// <summary>The normal send-to-UseDone time of <paramref name="spellId"/>: the longest of its last answers, at least DefaultCycleMs.</summary>
+    internal static long NormalCycleMs(uint spellId)
+    {
+        lock (Gate) return _cycleBySpell.TryGetValue(spellId, out long c) ? Math.Max(DefaultCycleMs, c) : DefaultCycleMs;
+    }
+
+    /// <summary>A cast of <paramref name="spellId"/> was answered (not 0x1D) <paramref name="ms"/> after its send.</summary>
+    private static void NoteCycle(uint spellId, long ms)
+    {
+        if (ms <= 0 || ms > CastMaxMs) return;
+        lock (Gate)
+        {
+            // The longest recent answer, easing down: a slow one counts at once, old slow ones fade.
+            _cycleBySpell[spellId] = _cycleBySpell.TryGetValue(spellId, out long c) ? Math.Max(ms, (c * 7 + ms) / 8) : ms;
+        }
+    }
+
+    /// <summary>Reads the last UseDone: a 0x1D starts or feeds the latch, any other answer clears it.</summary>
+    private static void ObserveUseDone(RynthCoreHost host, long now, out string? line)
+    {
+        line = null;
+        int seq; uint err;
+        try
+        {
+            if (!host.HasUseDoneSeq || !host.TryGetLastUseDone(out seq, out err)) return;
+        }
+        catch { return; }
+        lock (Gate)
+        {
+            if (_lastSeenSeq == int.MinValue) { _lastSeenSeq = seq; return; }
+            if (seq == _lastSeenSeq) return;
+            _lastSeenSeq = seq;
+            if (err == TooBusyErr) _errorAnswers.Enqueue(now);   // the burst counts 'too busy' only (0x401 retries are paced on their own)
+            if (err == TooBusyErr)
+            {
+                if (_busySince == 0) { _busySince = now; if (_hung == null) _busyLogged.Clear(); }
+                _busyRefusals++;
+                return;
+            }
+            if (_busySince != 0 || _hung != null || _stage != BreakStage.None)
+                line = $"[Pace] the server answered again (UseDone 0x{err:X}): casting resumes" +
+                       (_hung != null ? $" ({Describe(_hung.Kind, _hung.Label)} ended {now - _hung.SentMs} ms after its send)" : "");
+            ClearBusyLocked();
+        }
+    }
+
+    /// <summary>
+    /// True (with why) while the server is taken as busy (a 0x1D answer with no other answer since,
+    /// a hung cast) or the character is in the air after a breaker jump. Runs the held-cast turn and
+    /// the stuck-cast breaker. Called by MayStart.
+    /// </summary>
+    private static bool ServerBusyHolds(RynthCoreHost host, string who, bool attackRepeat, out string why, bool healStart = false)
+    {
+        why = "";
+        long now = NowMs();
+        long gapEnd, gapLen;
+        lock (Gate) { gapEnd = _gapEnd; gapLen = _gapLen; }
+        ObserveUseDone(host, now, out string? line);
+        if (line != null) Log(host, line);
+
+        if (AirborneHolds(host, now, out why)) return true;
+
+        PacedAction? open = Current(host);
+        PacedAction? stuck;
+        bool probe = false;
+        long age = 0;
+        string? staleLine = null;
+        lock (Gate)
+        {
+            if (_shadow != null && _hung == null && now - _shadow.SentMs >= CastMaxMs) { _hung = _shadow; _shadow = null; }
+            stuck = _hung ?? _shadow ?? (open is { Kind: PacedKind.Cast } ? open : null);
+            if (stuck != null) age = now - stuck.SentMs;
+            // Stale: too old to still be the server's, or sent before a gap with no checks (a freeze,
+            // portal space, the macro off). Dropped with the latch, never broken.
+            bool beforeGap = stuck != null && gapEnd != 0 && stuck.SentMs < gapEnd;
+            if (stuck != null && (age >= StaleCastMs || beforeGap))
+            {
+                staleLine = $"[Pace] {Describe(stuck.Kind, stuck.Label)} ({stuck.Who}) is stale ({age} ms" +
+                            (beforeGap ? $", sent before a {gapLen} ms gap with no check" : "") + "): dropped, the server is taken as free";
+                if (ReferenceEquals(_cur, stuck)) _cur = null;
+                ClearBusyLocked();
+                _staleDrops++;
+                stuck = null;
+            }
+            // A 'too busy' latch with no cast of ours open: bounded, not probed for ever.
+            else if (stuck == null && _busySince != 0 && now - _busySince >= LatchMaxMs && _stage == BreakStage.None)
+            {
+                staleLine = $"[Pace] no answer cleared the 'too busy' latch in {now - _busySince} ms and no cast of ours is open: going on";
+                ClearBusyLocked();
+                _latchExpiries++;
+            }
+            if (_stageFor != null && !ReferenceEquals(_stageFor, stuck)) { _stage = BreakStage.None; _stageAt = 0; _stageFor = null; }
+            // A forced break with no cast of ours open (stage for nothing): once on the ground, it is
+            // over. Left set it would block the latch expiry and the probe for good.
+            else if (_stageFor == null && _stage != BreakStage.None && _jumpAt == 0) { _stage = BreakStage.None; _stageAt = 0; }
+            if (!attackRepeat && stuck == null && _busySince != 0 && _stage == BreakStage.None
+                && now - Math.Max(_busySince, _lastProbeAt) >= Math.Min(BusyProbeMs << Math.Min(_probes, 8), BusyProbeMaxMs))
+            {
+                probe = true;
+                _probes++;
+                _lastProbeAt = now;
+            }
+        }
+
+        if (staleLine != null) Log(host, staleLine);
+        if (stuck != null && !IsPortaling(host)) StepBreaker(host, stuck, age, now);
+        if (AirborneHolds(host, now, out why)) return true;
+
+        // Any source: RefusalBurstMax 'too busy' answers in the last second hold every start but a heal for the rest
+        // of that second (each refusal is a chat line; a burst of them is the 0x00460D1D crash class).
+        int burst;
+        lock (Gate)
+        {
+            while (_errorAnswers.Count > 0 && now - _errorAnswers.Peek() >= 1000) _errorAnswers.Dequeue();
+            burst = _errorAnswers.Count;
+            if (burst >= RefusalBurstMax && !healStart) _burstHolds++;
+        }
+        // A heal is never held by the burst (an emergency must not wait on refusals of other starts).
+        if (burst >= RefusalBurstMax && !healStart)
+        {
+            why = $"{burst} refusals from the server in the last second";
+            return true;
+        }
+
+        // Attack repeats are never held by the latch (no UseDone ever comes for a swing).
+        if (attackRepeat) return false;
+
+        bool latched;
+        lock (Gate) latched = _busySince != 0 || _hung != null;
+        // Our cast still inside CastMaxMs with no 0x1D: OutstandingAllows holds it (heal rules included).
+        if (!latched) return false;
+        if (probe)
+        {
+            Log(host, $"[Pace] {who}: one try (#{_probes}) after the server's 'too busy' answer; no cast of ours is open");
+            return false;
+        }
+
+        int refusals;
+        BreakStage stage;
+        lock (Gate)
+        {
+            _refusalHolds++;
+            _holdsByWho[who] = _holdsByWho.TryGetValue(who, out int n) ? n + 1 : 1;
+            refusals = _busyRefusals;
+            stage = _stage;
+        }
+        string what = stuck != null ? $"{Describe(stuck.Kind, stuck.Label)} ({stuck.Who}) has had no answer for {age} ms" : "the server answered 'too busy'";
+        why = stage >= BreakStage.Jumped
+            ? $"{what}; stuck-cast break sent, waiting for its UseDone"
+            : $"{what}{(refusals > 0 ? $" ({refusals} 'too busy' answer(s))" : "")}: nothing goes until the server answers";
+        bool log;
+        lock (Gate) log = _busyLogged.Add(who);
+        if (log) Log(host, $"[Pace] {who} waits: {why}");
+        return true;
+    }
+
+    /// <summary>The held-cast turn and the breaker steps for <paramref name="stuck"/> (one step per call at most).</summary>
+    private static void StepBreaker(RynthCoreHost host, PacedAction stuck, long age, long now)
+    {
+        if (StuckCastMs <= 0) return;
+        long cycle = NormalCycleMs(stuck.Id);
+        long jumpAt = Math.Min(cycle + JumpAfterMs, StuckCastMs);
+        long turnAt = Math.Min(cycle + TurnAfterMs, jumpAt);
+        long refusalBreakAt = RefusalBreakMinMs;
+        if (stuck.Script) { jumpAt = Math.Max(jumpAt, ScriptCastMinBreakMs); refusalBreakAt = Math.Max(refusalBreakAt, ScriptCastMinBreakMs); }
+        BreakStage stage; long stageAt; int refusals;
+        lock (Gate) { stage = _stage; stageAt = _stageAt; refusals = _busyRefusals; }
+
+        if (stage == BreakStage.None && age >= turnAt && age < jumpAt)
+        {
+            SetStage(BreakStage.Turned, now, stuck);
+            TurnToFace(host, stuck, age);
+            return;
+        }
+        if (stage <= BreakStage.Turned && (age >= jumpAt || (refusals > 0 && age >= refusalBreakAt)))
+        {
+            string why = age >= jumpAt ? $"{age} ms with no answer ({cycle} ms is normal for it)" : $"a send was refused 'too busy' while it was open {age} ms";
+            Jump(host, stuck, age, why, forced: false);
+            return;
+        }
+        if (stage == BreakStage.Landed && now - stageAt >= BreakerWaitMaxMs)
+        {
+            SetStage(BreakStage.ModeSent, now, stuck);
+            PeaceBreak(host, stuck, age);
+            return;
+        }
+        if (stage == BreakStage.ModeSent && now - stageAt >= BreakerWaitMaxMs)
+        {
+            lock (Gate) ClearBusyLocked();
+            Log(host, $"[Pace] no UseDone after the stuck-cast break ({Describe(stuck.Kind, stuck.Label)}, {age} ms) - going on");
+        }
+    }
+
+    private static void SetStage(BreakStage stage, long now, PacedAction? forAction)
+    {
+        lock (Gate) { _stage = stage; _stageAt = now; _stageFor = forAction; }
+    }
+
+    /// <summary>In the air after a breaker jump: hold until landed (height back, or JumpLandMaxMs).</summary>
+    private static bool AirborneHolds(RynthCoreHost host, long now, out string why)
+    {
+        why = "";
+        long jumpAt; float z0;
+        lock (Gate) { jumpAt = _jumpAt; z0 = _jumpZ; }
+        if (jumpAt == 0) return false;
+        long air = now - jumpAt;
+        bool landed = air >= JumpLandMaxMs;
+        if (!landed && air >= JumpLandMinMs)
+        {
+            try { landed = !host.HasGetPlayerPose || (host.TryGetPlayerPose(out _, out _, out _, out float z, out _, out _, out _, out _) && Math.Abs(z - z0) < 0.1f); }
+            catch { landed = true; }
+        }
+        if (!landed)
+        {
+            why = $"in the air after the stuck-cast jump ({air} ms)";
+            return true;
+        }
+        lock (Gate)
+        {
+            _jumpAt = 0;
+            if (_stage == BreakStage.Jumped)
+            {
+                if (_stageFor == null) { _stage = BreakStage.None; _stageAt = 0; }   // a forced break with no cast of ours open
+                else { _stage = BreakStage.Landed; _stageAt = now; }
+            }
+        }
+        return false;
+    }
+
+    /// <summary>The breaker jump (TapJump: the keyboard jump, 0xF61B). No TapJump: the Peace request instead.</summary>
+    private static void Jump(RynthCoreHost host, PacedAction? stuck, long age, string why, bool forced)
+    {
+        long now = NowMs();
+        string what = stuck != null ? Describe(stuck.Kind, stuck.Label) : "the server's busy action";
+        if (!host.HasTapJump)
+        {
+            SetStage(BreakStage.ModeSent, now, stuck);
+            Log(host, $"[Pace] stuck cast: no TapJump on this engine; {what}: {why}");
+            PeaceBreak(host, stuck, age);
+            return;
+        }
+        float z = 0;
+        try { if (host.HasGetPlayerPose) host.TryGetPlayerPose(out _, out _, out _, out z, out _, out _, out _, out _); } catch { }
+        bool ok;
+        try { ok = host.TapJump(); } catch { ok = false; }
+        lock (Gate)
+        {
+            _stuckBreaks++;
+            if (forced) _forcedBreaks++;
+            _stage = BreakStage.Jumped;
+            _stageAt = now;
+            _stageFor = stuck;
+            if (ok) { _jumpAt = now; _jumpZ = z; }
+        }
+        Log(host, $"[Pace] stuck cast broken by jump after {age} ms: {what} - {why}{(ok ? "" : " (the jump was refused by the client)")}; nothing starts until landed and answered");
+        // Refused by the client: nothing in the air. For no cast of ours, nothing to wait for either.
+        if (!ok) { SetStage(stuck == null ? BreakStage.None : BreakStage.Landed, now, stuck); }
+    }
+
+    /// <summary>The Peace mode request (ACE fails a cast in progress on a mode change). Only from Magic.</summary>
+    private static void PeaceBreak(RynthCoreHost host, PacedAction? stuck, long age)
+    {
+        int mode = -1;
+        try { if (host.HasGetCurrentCombatMode) mode = host.GetCurrentCombatMode(); } catch { mode = -1; }
+        string what = stuck != null ? Describe(stuck.Kind, stuck.Label) : "the server's busy action";
+        if (mode == MagicMode && host.HasChangeCombatMode)
+        {
+            int seq = UseDoneSeqNow(host);
+            bool ok;
+            try { ok = host.ChangeCombatMode(PeaceMode); } catch { ok = false; }
+            lock (Gate) _stuckBreaks++;
+            if (ok)
+            {
+                PacedAction? keep;
+                lock (Gate) keep = _hung;
+                Begin(host, PacedKind.CombatMode, 0, ModeName(PeaceMode), "StuckCast", seq, PeaceMode);
+                lock (Gate) _hung = keep;
+            }
+            Log(host, $"[Pace] stuck cast broken by Peace mode after {age} ms: {what} - no answer after the jump; Peace {(ok ? "requested" : "refused by the client")}");
+        }
+        else
+        {
+            Log(host, $"[Pace] stuck cast: {what} still unanswered after the jump, not in Magic mode ({ModeName(mode)}): nothing more to cancel");
+        }
+    }
+
+    /// <summary>
+    /// Turn to face a held cast's target (once per cast), when RynthAi is not moving the character:
+    /// ACE's fast-tick cast waits for the facing to come within spellcast_max_angle.
+    /// </summary>
+    private static void TurnToFace(RynthCoreHost host, PacedAction stuck, long age)
+    {
+        uint target = stuck.Target;
+        uint player = 0;
+        try { if (host.HasGetPlayerId) player = host.GetPlayerId(); } catch { }
+        if (target == 0 || target == player || !host.HasTurnToHeading || MoveAudit.OwnMovementActive) return;
+        if (!TryHeadingTo(host, target, out double want, out double off)) return;
+        if (off < 10.0) return;   // already facing it: the turn is not what holds it
+        try { host.TurnToHeading((float)want); } catch { return; }
+        lock (Gate) _heldTurns++;
+        Log(host, $"[Pace] held cast: {Describe(stuck.Kind, stuck.Label)} unanswered {age} ms; turning {off:0} deg to face 0x{target:X8} (heading {want:0})");
+    }
+
+    /// <summary>The heading to <paramref name="target"/> (AC degrees: 0 north, 90 east) and how far off the player faces.</summary>
+    internal static bool TryHeadingTo(RynthCoreHost host, uint target, out double heading, out double offDeg)
+    {
+        heading = 0; offDeg = 180;
+        try
+        {
+            if (!host.HasGetPlayerPose || !host.HasGetObjectPosition) return false;
+            if (!host.TryGetPlayerPose(out uint pcell, out float px, out float py, out _, out float qw, out _, out _, out float qz)) return false;
+            if (!host.TryGetObjectPosition(target, out uint tcell, out float tx, out float ty, out _)) return false;
+            double dx = (((tcell >> 24) & 0xFF) - (double)((pcell >> 24) & 0xFF)) * 192.0 + (tx - px);
+            double dy = (((tcell >> 16) & 0xFF) - (double)((pcell >> 16) & 0xFF)) * 192.0 + (ty - py);
+            if (Math.Abs(dx) < 0.01 && Math.Abs(dy) < 0.01) return false;
+            heading = Math.Atan2(dx, dy) * (180.0 / Math.PI);
+            if (heading < 0) heading += 360.0;
+            double yaw = 2.0 * Math.Atan2(qz, qw) * (180.0 / Math.PI);
+            double cur = ((-yaw) % 360.0 + 720.0) % 360.0;
+            double e = heading - cur;
+            while (e > 180) e -= 360;
+            while (e < -180) e += 360;
+            offDeg = Math.Abs(e);
+            return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// The HP failsafe's break (BuffManager): a jump now, whatever is open (on fast tick it fails a
+    /// cast in progress and clears the pending motions). False when one is already under way or
+    /// this engine has no TapJump.
+    /// </summary>
+    public static bool ForceBreak(RynthCoreHost host, string why)
+    {
+        if (!Enabled || !host.HasTapJump || IsPortaling(host)) return false;
+        PacedAction? stuck;
+        lock (Gate)
+        {
+            if (_jumpAt != 0 || _stage == BreakStage.Jumped) return false;
+            stuck = _hung ?? _shadow ?? (_cur is { Kind: PacedKind.Cast } ? _cur : null);
+        }
+        long age = stuck != null ? NowMs() - stuck.SentMs : 0;
+        Jump(host, stuck, age, why, forced: true);
+        return true;
+    }
+
     // ── Helpers ─────────────────────────────────────────────────────────────
+
+    /// <summary>In portal space: no breaker step, no forced break (the server is moving us).</summary>
+    internal static bool IsPortaling(RynthCoreHost host)
+    {
+        try { return host.HasIsPortaling && host.IsPortaling(); } catch { return false; }
+    }
 
     internal static string Describe(PacedKind kind, string label) => kind switch
     {
@@ -560,6 +1088,7 @@ internal static class ActionPacer
             lines.Add($"  Starts held {_heldStarts}, moves held {_heldMoves}, heals let ahead {_healsAhead}, sent over an unanswered one {_sentOverOutstanding}");
             lines.Add($"  Mode changes refused while waiting {_modeRefused}, skipped (already in that mode) {_modeSkipped}");
             lines.Add($"  Held while the character was animating {_gestureHolds}, animation time limits {_gestureLimits}");
+            lines.Add($"  Held after a 'too busy' answer {_refusalHolds}, held casts turned to {_heldTurns}, stuck casts broken {_stuckBreaks} ({_forcedBreaks} by the HP failsafe; limit {StuckCastMs} ms)");
             if (_maxWaitMs > 0) lines.Add($"  Longest wait seen: {_maxWaitMs} ms ({_maxWaitWhat})");
             if (_holdsByWho.Count > 0)
             {
@@ -585,18 +1114,44 @@ internal static class ActionPacer
         MoveAudit.FlushPendingStops(host, "before a cast", force: true);
         int seq = UseDoneSeqNow(host);
         bool ok = host.CastSpell(targetId, spellId);
-        if (ok) Begin(host, PacedKind.Cast, unchecked((uint)spellId), label, who, seq);
+        if (ok)
+        {
+            CastsSent++;
+            LastCastSeqAtSend = host.HasUseDoneSeq ? seq : -1;
+            Begin(host, PacedKind.Cast, unchecked((uint)spellId), label, who, seq);
+            lock (Gate) { if (_cur is { Kind: PacedKind.Cast } c && c.Id == unchecked((uint)spellId)) c.Target = targetId; }
+        }
         return ok;
     }
+
+    /// <summary>The open cast of <paramref name="spellId"/> was chosen by a script (see <see cref="ScriptCastMinBreakMs"/>).</summary>
+    public static void MarkScriptCast(int spellId)
+    {
+        lock (Gate) { if (_cur is { Kind: PacedKind.Cast } c && c.Id == unchecked((uint)spellId)) c.Script = true; }
+    }
+
+    /// <summary>
+    /// The UseDone count read just before the last cast <see cref="CastSpellFor"/> sent (its answer is
+    /// the next UseDone after it); -1 when the engine has no UseDone count.
+    /// </summary>
+    public static int LastCastSeqAtSend { get; private set; } = -1;
+
+    /// <summary>
+    /// Casts sent through <see cref="CastSpellFor"/> in this plugin (every caller: combat, buffs,
+    /// nav, commands, meta): a caller that remembers the count at its own cast can tell whether
+    /// another cast went out since (a refusal then may be that one's).
+    /// </summary>
+    public static long CastsSent { get; private set; }
 
     /// <summary>
     /// ChangeCombatMode with the pacing rules: nothing is sent when the client already reads that
     /// mode (the engine would push a raw 0x53 to the server anyway, and on ACE every mode change
     /// cancels the walk/turn of a pending use and fails a cast in progress) unless
     /// <paramref name="force"/>; and nothing while another server action is unanswered unless
-    /// <paramref name="force"/>. Returns false only when the pacing held the request back (or the
-    /// client already reads that mode); otherwise the request was made, as a plain ChangeCombatMode
-    /// call was before (whose result the callers never read), so their retry timers run as before.
+    /// <paramref name="force"/>. Returns false when nothing went out: the pacing held the request back,
+    /// the client already reads that mode, or the engine refused the call. True only when the request
+    /// was made (or the host has no ChangeCombatMode, where there is nothing to send or pace). Callers
+    /// count a try, a backoff step or a log line only on true.
     /// </summary>
     public static bool ChangeCombatModeFor(this RynthCoreHost host, int mode, string who, string why, bool force = false)
     {
@@ -630,8 +1185,63 @@ internal static class ActionPacer
             }
         }
         int seq = UseDoneSeqNow(host);
-        if (host.ChangeCombatMode(mode))
-            Begin(host, PacedKind.CombatMode, 0, ModeName(mode), who, seq, mode);
+        if (!host.ChangeCombatMode(mode))
+            return NoteEngineRefusal(host, mode);
+        NoteEngineAccepted(host);
+        Begin(host, PacedKind.CombatMode, 0, ModeName(mode), who, seq, mode);
         return true;
+    }
+
+    // -- The engine turning a mode change away -----------------------------------------------
+    // ChangeCombatMode returns false when the engine refused: it turns non-teardown actions away for
+    // a few seconds around a teleport or a death, its action ring can be full, or the hook is
+    // missing. Nothing was sent, so no action is outstanding and the callers must not count a try
+    // or a backoff step: ChangeCombatModeFor returns false and they ask again next tick. A refusal
+    // that lasts longer than EngineRefusalFailOpenMs is no longer a transition (a missing hook or a
+    // stuck ring never recovers): the call then returns true again, which puts the callers back on
+    // their own failure counting (NoWandFlipMaxFails and the potion fallbacks). One log line when a
+    // streak starts, one when it ends; any accepted call ends it.
+
+    /// <summary>A streak of consecutive engine refusals this long makes ChangeCombatModeFor return true again.</summary>
+    public const long EngineRefusalFailOpenMs = 30_000;
+    /// <summary>Refusals further apart than this are separate streaks (the streak never outlives a quiet spell).</summary>
+    public const long RefuseGapMs = 10_000;
+    private static long _refuseSince;     // start of the current streak of engine refusals (0 = none)
+    private static long _refuseLast;      // time of the newest refusal in the streak
+    private static long _lastEngineRefusalMs;
+    /// <summary>NowMs of the newest engine refusal (0 = none since Reset). Stuck-stance clocks restart when this is newer than their start.</summary>
+    public static long LastEngineRefusalMs { get { lock (Gate) return _lastEngineRefusalMs; } }
+    private static int _refuseCount;
+    private static long _engineRefusals;  // lifetime
+    public static long EngineModeRefusals => _engineRefusals;
+
+    private static bool NoteEngineRefusal(RynthCoreHost host, int mode)
+    {
+        bool startLine = false, failOpen;
+        long now = NowMs();
+        lock (Gate)
+        {
+            _engineRefusals++;
+            if (_refuseSince != 0 && now - _refuseLast > RefuseGapMs) _refuseSince = 0;
+            if (_refuseSince == 0) { _refuseSince = now; _refuseCount = 0; startLine = true; }
+            _refuseLast = now; _lastEngineRefusalMs = now;
+            _refuseCount++;
+            failOpen = now - _refuseSince > EngineRefusalFailOpenMs;
+        }
+        if (startLine)
+            Log(host, $"[Pace] the engine refused the change to {ModeName(mode)} mode: asking again each tick (no try counted), counted as a failure after {EngineRefusalFailOpenMs / 1000} s");
+        return failOpen;
+    }
+
+    private static void NoteEngineAccepted(RynthCoreHost host)
+    {
+        int count; long span;
+        lock (Gate)
+        {
+            if (_refuseSince == 0) return;
+            count = _refuseCount; span = NowMs() - _refuseSince;
+            _refuseSince = 0; _refuseLast = 0; _refuseCount = 0;
+        }
+        Log(host, $"[Pace] the engine accepts mode changes again after {count} refusal(s) over {span} ms");
     }
 }

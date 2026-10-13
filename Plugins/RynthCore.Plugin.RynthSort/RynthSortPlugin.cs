@@ -30,7 +30,7 @@ namespace RynthCore.Plugin.RynthSort;
 /// </summary>
 public sealed class RynthSortPlugin : RynthPluginBase
 {
-    public const string Version = "0.3.0";
+    public const string Version = "0.3.1";
     private const long IdentityRetryMs = 1000;
     private const long SaveDelayMs = 750;
     private const long PassIntervalMs = 500;
@@ -55,6 +55,16 @@ public sealed class RynthSortPlugin : RynthPluginBase
     private bool _noUiLogged;
     private bool _backupOnSave;
     private readonly List<string> _warnings = new();
+    private volatile int _autoState = -1;
+
+    /// <summary>For the engine's dashboard toggle (RynthSortAutoState): -1 not logged in yet, 0 auto-sort off, 1 on. Any thread.</summary>
+    public int AutoState => _autoState;
+
+    /// <summary>An /rsort command from the engine (RynthSortCommand), without "/rsort". Any thread; runs on the tick.</summary>
+    public void EnqueueCommand(string? arg)
+    {
+        if (arg != null) _commands.Enqueue(arg.Trim());
+    }
 
     public override int Initialize()
     {
@@ -144,7 +154,9 @@ public sealed class RynthSortPlugin : RynthPluginBase
             case "on":
             case "off":
                 _sort.SetAuto(word == "on");
-                Print("Auto-sort " + word);
+                // "quiet": the dashboard's toggle, which shows the state itself.
+                if (!(words.Length > 1 && words[1].Equals("quiet", StringComparison.OrdinalIgnoreCase)))
+                    Print("Auto-sort " + word);
                 break;
             case "now":
             case "tidy":
@@ -204,6 +216,7 @@ public sealed class RynthSortPlugin : RynthPluginBase
             }
         }
         if (_saveDueMs != 0 && now >= _saveDueMs) SaveNow();
+        _autoState = _inWorld && _identityKnown ? (_sort.Data.Settings.Auto ? 1 : 0) : -1;
 
         if (!Host.HasUi || _window == null || _panel == null) return;
         Record(_window, now);

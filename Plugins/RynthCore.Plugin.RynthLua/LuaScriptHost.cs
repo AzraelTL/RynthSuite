@@ -34,6 +34,8 @@ internal sealed class LuaScriptHost
         public Func<bool>? WaitFor;     // await: resume only once this is true
         public DynValue[] Args = Array.Empty<DynValue>();
         public bool Started;
+        /// <summary>Called once when the thread ends: its return values, or the error message.</summary>
+        public Action<DynValue?, string?>? OnDone;
     }
 
     private readonly Action<string> _log;
@@ -206,12 +208,42 @@ internal sealed class LuaScriptHost
     }
 
     /// <summary>Starts <paramref name="fn"/> as a new script thread.</summary>
-    public void Start(DynValue fn, DynValue[] args)
+    public void Start(DynValue fn, DynValue[] args) => Start(fn, args, onDone: null);
+
+    /// <summary>
+    /// Starts <paramref name="fn"/> as a new script thread and calls <paramref name="onDone"/> once
+    /// it ends: with its return values (a tuple for several, Nil for none) and a null error, or with
+    /// a null result and the error message when it raised one. Not called when the script stops
+    /// first (its stop handlers clean up), nor after <see cref="Abort"/>. Returns the thread's
+    /// handle (for Abort), or null when nothing was started.
+    /// </summary>
+    public object? Start(DynValue fn, DynValue[] args, Action<DynValue?, string?>? onDone)
     {
-        if (_script == null || fn.Type != DataType.Function) return;
+        if (_script == null || fn.Type != DataType.Function) return null;
         DynValue co = _script.CreateCoroutine(fn);
         co.Coroutine.AutoYieldCounter = AutoYieldCounter;
-        _threads.Add(new LuaThread { Co = co, Args = args });
+        var t = new LuaThread { Co = co, Args = args, OnDone = onDone };
+        _threads.Add(t);
+        return t;
+    }
+
+    /// <summary>
+    /// Ends the thread <paramref name="handle"/> (from <see cref="Start(DynValue, DynValue[], Action{DynValue?, string?}?)"/>)
+    /// without resuming it again; its onDone is not called. Returns false when it had already ended.
+    /// </summary>
+    public bool Abort(object? handle)
+    {
+        if (handle is not LuaThread t) return false;
+        t.OnDone = null;
+        if (ReferenceEquals(_botTickThread, t)) _botTickThread = null;
+        return _threads.Remove(t);
+    }
+
+    private static void Done(LuaThread t, DynValue? result, string? error)
+    {
+        Action<DynValue?, string?>? cb = t.OnDone;
+        t.OnDone = null;
+        try { cb?.Invoke(result, error); } catch { }
     }
 
     /// <summary>Calls every v1 handler registered for <paramref name="evt"/>, each on its own thread.</summary>
@@ -276,11 +308,12 @@ internal sealed class LuaScriptHost
             }
 
             _current = t;
+            DynValue r = DynValue.Nil;
             try
             {
                 while (_script != null)
                 {
-                    DynValue r = t.Started ? t.Co.Coroutine.Resume() : t.Co.Coroutine.Resume(t.Args);
+                    r = t.Started ? t.Co.Coroutine.Resume() : t.Co.Coroutine.Resume(t.Args);
                     t.Started = true;
                     if (t.Co.Coroutine.State == CoroutineState.Dead) break;
                     // Forced (auto) yield: keep going while this tick has budget.
@@ -292,18 +325,24 @@ internal sealed class LuaScriptHost
             {
                 Print("error: " + (ex.DecoratedMessage ?? ex.Message));
                 _threads.Remove(t);
+                Done(t, null, ex.DecoratedMessage ?? ex.Message);
                 continue;
             }
             catch (Exception ex)
             {
                 Print("error: " + ex.Message);
                 _threads.Remove(t);
+                Done(t, null, ex.Message);
                 continue;
             }
             finally { _current = null; }
 
             if (_script == null) return;
-            if (t.Co.Coroutine.State == CoroutineState.Dead) _threads.Remove(t);
+            if (t.Co.Coroutine.State == CoroutineState.Dead)
+            {
+                _threads.Remove(t);
+                Done(t, r, null);
+            }
             if (OverBudget()) break;
         }
     }

@@ -255,11 +255,30 @@ public sealed partial class RynthLuaPlugin
 
     // ── /lua commands ───────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Every built-in /lua verb. The one list behind both the dispatch gate in HandleLuaChatCommand
+    /// (a verb never falls back to a script command) and the usage summary (a script command with
+    /// one of these names is unreachable through /lua). A new verb goes in the switch AND here.
+    /// </summary>
+    private static readonly HashSet<string> BuiltInLuaVerbs = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "run", "start", "restart", "stop", "exec", "execin", "autostart", "list", "hud",
+    };
+
     private void HandleLuaChatCommand(string line)
     {
         string[] parts = line.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
         string sub = parts.Length > 1 ? parts[1].ToLowerInvariant() : "";
+        if (sub.StartsWith('/')) sub = sub[1..];   // "/lua /demo": the usage lists names with a slash, one is accepted
         string rest = parts.Length > 2 ? parts[2].Trim() : "";
+        // Not a built-in verb (those always win): in a Decal (bridge-mode) client the engine only
+        // forwards /lua, so "/lua demo status" (or "/lua /demo status", as the usage text lists them) is
+        // the way to reach a script's game.RegisterCommand("/demo"). Same queue as a typed "/demo status":
+        // the handler runs once on the tick thread with args "status".
+        if (!BuiltInLuaVerbs.Contains(sub))
+        {
+            if (sub.Length > 0 && TryQueueScriptCommand("/" + sub + (rest.Length > 0 ? " " + rest : ""))) return;
+        }
         switch (sub)
         {
             case "run":
@@ -322,7 +341,21 @@ public sealed partial class RynthLuaPlugin
                 break;
             default:
                 ChatLine("/lua list | start <script> | stop <script>|all | restart <script> | exec <code> | execin <script> <code> | autostart <script> none|global|character | hud list|show|hide|toggle <script>/<hud>|bench <n>|bench off");
+                ChatLine("/lua <command> [args] runs a script command (game.RegisterCommand) - " + ScriptCommandsSummary());
                 break;
         }
+    }
+
+    /// <summary>The registered script commands for the /lua usage text.</summary>
+    private string ScriptCommandsSummary()
+    {
+        // Names as /lua takes them (no slash); a name equal to a built-in verb can't be reached here.
+        var names = _commandOwners.Keys
+            .Select(k => k.TrimStart('/'))
+            .Where(n => n.Length > 0 && !BuiltInLuaVerbs.Contains(n))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return names.Count == 0 ? "none registered now." : "registered: " + string.Join(", ", names) + ".";
     }
 }

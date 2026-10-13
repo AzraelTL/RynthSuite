@@ -223,7 +223,9 @@ public class MissileCraftingManager
         _combinesCompleted = 0;
         _allCombinesDone = false;
 
-        try { _host.ChangeCombatModeFor(CombatMode.NonCombat, "Crafting", "missile crafting needs peace mode"); } catch { }
+        _peaceSent = false;
+        _peaceAskedAt = DateTime.Now;   // the wait for the stance counts from the first ask
+        TryPeaceForCrafting();
 
         var headItems  = inv.Where(i => recipe.IsHead(i.Name)).ToList();
         var shaftItems = inv.Where(i => recipe.IsShaft(i.Name)).ToList();
@@ -258,6 +260,22 @@ public class MissileCraftingManager
     //  COMBINING
     // ══════════════════════════════════════════════════════════════════
 
+    private bool _peaceSent;
+    private DateTime _peaceAskedAt;
+    private const double PeaceWaitMaxMs = 2500;
+
+    /// <summary>Asks for Peace mode until the engine accepts (a refusal is retried, not counted as sent).</summary>
+    private void TryPeaceForCrafting()
+    {
+        if (_peaceSent) return;
+        try
+        {
+            if (_host.HasGetCurrentCombatMode && _host.GetCurrentCombatMode() == CombatMode.NonCombat) { _peaceSent = true; return; }
+            _peaceSent = _host.ChangeCombatModeFor(CombatMode.NonCombat, "Crafting", "missile crafting needs peace mode");
+        }
+        catch { }
+    }
+
     private void ProcessCombining()
     {
         if (_allCombinesDone)
@@ -281,6 +299,12 @@ public class MissileCraftingManager
                 Reset("Craft timed out — no response from server");
             }
             return;
+        }
+
+        if (!_peaceSent)
+        {
+            TryPeaceForCrafting();
+            if (!_peaceSent && (DateTime.Now - _peaceAskedAt).TotalMilliseconds < PeaceWaitMaxMs) return;   // still asking, inside the ceiling
         }
 
         if ((DateTime.Now - _lastApplyAttempt).TotalMilliseconds >= APPLY_RETRY_MS)

@@ -30,6 +30,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using RynthCore.Plugin.RynthAi.Raycasting;
+using RynthCore.Install;
 
 namespace RynthCore.Plugin.RynthAi;
 

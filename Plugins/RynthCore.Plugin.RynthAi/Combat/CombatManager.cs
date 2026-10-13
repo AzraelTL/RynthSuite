@@ -65,6 +65,7 @@ public partial class CombatManager : IDisposable
     // equip path would only re-send ChangeCombatMode forever (it never re-equips a
     // "wielded" wand) — a hours-long wedge with NO m_cBusy pin so no watchdog fires.
     private DateTime _stanceStuckSince   = DateTime.MinValue;
+    private long     _stanceStuckStartMs;      // ActionPacer.NowMs when the clock started (a later engine refusal restarts it)
     private DateTime _lastStanceRecoverAt = DateTime.MinValue;
     private const double StanceStuckRecoverMs = 8000;
     // Re-equip attempts spent in the CURRENT deadlock episode. ⚠ UseObject on an
@@ -296,6 +297,11 @@ public partial class CombatManager : IDisposable
     /// Stamina to Mana), or null to cast. Null hook = never hold (2026-10-11).
     /// </summary>
     public Func<int, string?>? ManaReserveHold { get; set; }
+    /// <summary>
+    /// BuffManager.CanEverAfford, for the script hook: false when a spell costs more than max mana,
+    /// so ManaReserveHold would hold it forever. Null hook = always affordable.
+    /// </summary>
+    public Func<int, bool>? ManaCanEverAfford { get; set; }
     private bool _manaCastHeld;        // AttackWithMagic held its cast for mana this tick
     private bool _manaHoldLogged;
 
@@ -417,6 +423,36 @@ public partial class CombatManager : IDisposable
     private string   _lastSwingEvidenceKind = "none";
 
     private readonly CombatStallWatchdog _stallWatch = new();
+
+    // ── Early stall step and stale objects (Drakkon 2026-10-12, Olthoi in 0x6146) ────────────
+    // The flight recorder showed the stall: the server answered a MeleeAttack with a MoveToObject
+    // to the target 2 m away, the character took a step and stopped, and the server waited for it
+    // to arrive; every further attack was dropped ("already in melee loop") until the watchdog's
+    // CancelAttack 6 s later, after which the server turned us and swung at once. Three such
+    // stalls cost 7-9 s each and one good target got blacklisted a second after the cancel. Now
+    // step 1 goes out after QuietStallMs when the stall is plain to see: attacks sent, no swing
+    // playing, the character standing still (see SampleMeleeQuiet).
+    // From 21:00 the same client fought four "Olthoi" for 25+ minutes without one swing: ghosts,
+    // objects the client still drew but the server no longer had for him (see GhostCheck.cs). Each
+    // was blacklisted for 30 s at a time, round and round, with navigation never getting a turn.
+    // Now a target that shows no swing after the step-1 re-issue, hasn't moved and that the server
+    // has said nothing about for GhostCheck.NoUpdateMs is a ghost: skipped until the server shows
+    // it is real (an update, a create, it moves) or the character changes landblock, and removed
+    // from the client when the engine can (plugin API v83 RemoveClientObject).
+    private readonly GhostCheck _ghostCheck = new();
+    internal readonly GhostTracker Ghosts = new();
+    private int _ghostsSkippedInScan;                    // ghosts the last scan passed over (lock log)
+    private GhostSpot? _lockSpot;                        // where the locked target was when locked
+    private uint _ghostLandblock;
+    private int      _attacksSinceEvidence;              // melee/missile attacks sent since the last hit, miss or kill
+    private bool     _rebindThisTick;                    // AttackTarget sent a rebind CancelAttack this tick
+    private DateTime _lastAnimatingAt = DateTime.MinValue;   // the motion queue last read busy (a swing playing)
+    private DateTime _lastPlayerMovedAt = DateTime.MinValue; // the character last moved QuietMoveM
+    private DateTime _lastQuietSampleAt = DateTime.MinValue;
+    private double   _moveAnchorX, _moveAnchorY, _moveAnchorZ;
+    private const double QuietNoAnimMs = 1500;           // no swing playing for this long
+    private const double QuietStillMs  = 1000;           // and standing still this long
+    private const double QuietMoveM    = 0.3;
     private DateTime _stallToggleAt = DateTime.MinValue;        // step 3 sent peace; the flip back follows
     private DateTime _lastMissileNoAmmoAt = DateTime.MinValue;   // missile mode waiting on ammo is not a stall
     private int      _stallRewieldId;                            // step 4 in progress (weapon id)
@@ -787,6 +823,9 @@ public partial class CombatManager : IDisposable
             PickedWeaponWieldLoc = weaponWieldLoc,
             HasWieldedAmmoFlag   = hasAmmo,
             LastCombatSkipReason = LastCombatSkipReason,
+            ScriptHookOwner      = CombatHook.IsActive(RynthAiCombat.KindsAll) ? CombatHook.Owner : "",
+            ScriptHookKinds      = CombatHook.IsActive(RynthAiCombat.KindsAll) ? CombatHook.Kinds : 0,
+            ScriptHook           = CombatHook.Describe(),
         };
     }
 
@@ -817,6 +856,11 @@ public partial class CombatManager : IDisposable
         public int      PickedWeaponWieldLoc;
         public bool     HasWieldedAmmoFlag;
         public string   LastCombatSkipReason;
+        /// <summary>The script holding the combat hook (RynthAi.Combat), "" when none; and its kinds (RynthAiCombat.Kind* bits).</summary>
+        public string   ScriptHookOwner;
+        public uint     ScriptHookKinds;
+        /// <summary>The hook's one-line summary (owner, lease, per-kind counters).</summary>
+        public string   ScriptHook;
     }
 
     /// <summary>
@@ -888,6 +932,14 @@ public partial class CombatManager : IDisposable
         bool hasPlayerPos = _host.TryGetObjectPosition((uint)playerId, out uint meCell,
             out float meX, out float meY, out float meZ);
 
+        // Ghosts that moved are real after all; a new landblock lets them all go.
+        _ghostsSkippedInScan = 0;
+        if (Ghosts.Count > 0)
+        {
+            if (hasPlayerPos) Ghosts.OnPlayerLandblock(meCell >> 16);
+            Ghosts.CheckMoved(TargetSpot);
+        }
+
         foreach (var wo in _worldFilter.GetLandscape())
         {
             if (wo.Id == playerId) continue;
@@ -932,14 +984,20 @@ public partial class CombatManager : IDisposable
             // out of range and now cost only their distance, not the name list, blacklist,
             // attackable and health reads as well.
             bool isEngaged = wo.Id != 0 && (wo.Id == activeTargetId || wo.Id == _lockedTargetId);
-            if (dist > (isEngaged ? Math.Max(maxDist, DisengageDistance) : maxDist)) continue;
+            // Target lock (/ra targetlock): the player picked this one; the name list and
+            // Priority 0 don't keep it out (attackable, alive and LOS still do).
+            bool isForced = wo.Id != 0 && wo.Id == ForcedTargetId;
+            if (dist > (isEngaged || isForced ? Math.Max(maxDist, DisengageDistance) : maxDist)) continue;
 
             // User-configured "never attack" list — excluded from acquisition
             // entirely (an already-engaged match drops out of _scannedTargets
             // here and is released by the scan-grace timer in Think).
-            if (IsUserBlacklistedName(wo.Name)) continue;
+            if (!isForced && IsUserBlacklistedName(wo.Name)) continue;
 
             if (_blacklistManager.IsBlacklisted(wo.Id)) continue;
+
+            // A ghost (the server doesn't have it for us): skipped until it shows it is real.
+            if (Ghosts.IsGhost(wo.Id)) { _ghostsSkippedInScan++; continue; }
 
             // Just killed (KillerNotification) but not yet a corpse — skip so we
             // don't re-lock and cast at it during its death animation.
@@ -949,6 +1007,13 @@ public partial class CombatManager : IDisposable
 
             // Dead but not yet reclassified as corpse — skip
             if (_worldFilter.GetHealthRatio(wo.Id) == 0f) continue;
+
+            // Monster rule Priority 0 = IGNORE, with no exception: even one attacking us is never
+            // attacked (a monster worth fighting back needs a rule above 0). Left out of the
+            // scan entirely, so it is neither a target nor a reason to hold nav,
+            // combat, looting or buffs: every consumer reads this list or _nearbyNoLos, and an
+            // ignored monster is not counted in either (it is dropped before the LOS check).
+            if (!isForced && PriorityOf(wo.Id) <= 0) continue;
 
             bool losBlocked = false;
             if (_settings.EnableRaycasting && RaycastInitialized && _raycastSystem?.TargetingFSM != null)
@@ -1007,6 +1072,7 @@ public partial class CombatManager : IDisposable
         // Diagnostic: surface every blacklist (any path) with id + reason so a
         // single login test is conclusive instead of another guess.
         _blacklistManager.Log = m => _host.Log($"[Blacklist] {m}");
+        Ghosts.Cleared = (id, why) => _host.Log($"[Ghost] 0x{(uint)id:X8} '{_worldFilter[id]?.Name}' is real after all ({why}) - targetable again.");
         ElementTracker = new WeaponElementTracker(host);
     }
 
@@ -1034,6 +1100,7 @@ public partial class CombatManager : IDisposable
         _recentlyKilled.Remove(id);
         _hitAt.Remove(id);
         _blacklistManager.ForgetTarget(id);
+        Ghosts.NoteDeleted(id);
 
         if (id == activeTargetId || id == _lockedTargetId || id == _lastAttackedTargetId)
             _awaitingCastResolution = false;
@@ -1100,6 +1167,29 @@ public partial class CombatManager : IDisposable
     // chat-confirmation handler can record the cast against the right target
     // for blacklist judgement — even if activeTargetId has since changed.
     private int _pendingOffensiveTargetId = 0;
+    // The UseDone count at the pending offensive cast's send, and its answer (-1 = not seen yet).
+    private int _pendingOffensiveSeqAtSend;
+    private long _pendingOffensiveErr = -1;
+    /// <summary>Casts the server refused 'too busy' that were kept out of the no-damage count (tests, status).</summary>
+    internal int RefusedCastsNotJudged { get; private set; }
+
+    private void NoteOffensiveSeq()
+    {
+        _pendingOffensiveSeqAtSend = _host.HasUseDoneSeq ? _host.GetUseDoneSeq() : 0;
+        _pendingOffensiveErr = -1;
+    }
+
+    /// <summary>The first UseDone after the pending offensive cast's send is its answer.</summary>
+    private void ObserveOffensiveAnswer()
+    {
+        if (_pendingOffensiveErr >= 0 || !_host.HasUseDoneSeq) return;
+        try
+        {
+            if (_host.TryGetLastUseDone(out int seq, out uint err) && seq == _pendingOffensiveSeqAtSend + 1)
+                _pendingOffensiveErr = err;
+        }
+        catch { }
+    }
     private const double OFFENSIVE_NOCHAT_TIMEOUT_MS = 5000.0;
     // ACE doesn't emit "You cast X" chat for offensive war magic, so we infer
     // a successful server cast by NEGATION: if no "You're too busy!" arrives
@@ -1530,6 +1620,9 @@ public partial class CombatManager : IDisposable
         // BuffManager's categorisation so a war spell the char can't actually
         // cast gets marked unresolvable and FindBestOffensiveSpellId drops to
         // an alternative, instead of silently re-firing the dead spell forever.
+        // A script's cast (RynthAi.Combat) is remembered on its own: it may not have armed the
+        // pending judgement (an area, nojudge or off-target cast) yet must not be re-cast forever.
+        NoteScriptCastRefusal(text);
         if (_pendingOffensiveSpellId != 0)
         {
             string lo = text.ToLowerInvariant();
@@ -1791,6 +1884,7 @@ public partial class CombatManager : IDisposable
         DateTime now = DateTime.Now;
         _lastSwingEvidenceAt = now;
         _lastSwingEvidenceKind = kind;
+        _attacksSinceEvidence = 0;
         switch (kind)
         {
             case "hit":  _lastHitAt  = now; break;
@@ -1938,6 +2032,21 @@ public partial class CombatManager : IDisposable
         FlightRecorderSignal.Dump(_host, $"casts with no damage at 0x{(uint)tid:X8}");
     }
 
+    /// <summary>
+    /// For the no-damage blacklist: <paramref name="tid"/> is the locked target, no swing evidence
+    /// came since it was locked (not a hit or evade on anything), it hasn't moved since, and the
+    /// server has said nothing about it for <see cref="GhostCheck.NoUpdateMs"/>.
+    /// </summary>
+    private bool LooksLikeGhost(int tid, out double silentMs)
+    {
+        silentMs = -1;
+        if (tid == 0 || tid != _lockedTargetId || _targetLockedAt == DateTime.MinValue) return false;
+        if (_lastSwingEvidenceAt >= _targetLockedAt) return false;
+        if (_lockSpot == null || TargetSpot(tid) is not GhostSpot now || now.MovedFrom(_lockSpot.Value)) return false;
+        silentMs = ServerSilentMs(tid, DateTime.Now);
+        return silentMs < 0 || silentMs >= GhostCheck.NoUpdateMs;
+    }
+
     private void JudgePendingCast()
     {
         if (_pendingJudgeCastAt == DateTime.MinValue) return;
@@ -1956,6 +2065,12 @@ public partial class CombatManager : IDisposable
         if (_consecutiveCastMisses >= _settings.BlacklistAttempts)
         {
             if (CurrentCombatMode == CombatMode.Magic) ReportNoDamageCasts(tid);
+            if (CurrentCombatMode != CombatMode.Magic && LooksLikeGhost(tid, out double silentMs))
+            {
+                _consecutiveCastMisses = 0;
+                MarkGhost(tid, _worldFilter[tid]?.Name, silentMs, $"{_settings.BlacklistAttempts} attacks with no swing, no hit and no evade");
+                return;
+            }
             _blacklistManager.ReportFailure(tid);
             if (_blacklistManager.IsBlacklisted(tid))
             {
@@ -1984,8 +2099,23 @@ public partial class CombatManager : IDisposable
         if (_pendingOffensiveSpellId == 0) return;
         if (_pendingOffensiveTargetId == 0) return;
         if (_pendingOffensiveCastAt == DateTime.MinValue) return;
+        ObserveOffensiveAnswer();
         if ((DateTime.Now - _pendingOffensiveCastAt).TotalMilliseconds < OffensiveRefusalWindowMs)
             return;
+
+        // A refusal is not a cast (in a client log, three healthy targets were blacklisted 'after 3
+        // no-damage casts' whose casts had all come back UseDone 0x1D):
+        // the answer 0x1D, or no answer yet while the server is taken as busy, is not judged.
+        bool refused = _pendingOffensiveErr == ActionPacer.TooBusyErr || (_pendingOffensiveErr < 0 && ActionPacer.ServerBusy);
+        if (refused)
+        {
+            RefusedCastsNotJudged++;
+            _host.Log($"[Blacklist] cast at 0x{(uint)_pendingOffensiveTargetId:X8} {(_pendingOffensiveErr >= 0 ? "refused 'too busy' (UseDone 0x1D)" : "unanswered while the server is busy")}: not counted as a no-damage cast");
+            _pendingOffensiveSpellId  = 0;
+            _pendingOffensiveTargetId = 0;
+            _pendingOffensiveCastAt   = DateTime.MinValue;
+            return;
+        }
 
         // Refusal window passed without a "too busy" — the server accepted
         // the gesture. Queue this cast for blacklist judgement.
@@ -2623,6 +2753,15 @@ public partial class CombatManager : IDisposable
     /// <summary>The least Attack Spell Delay on an engine without the server gates.</summary>
     internal const double NoGatesAttackFloorMs = 250;
 
+    /// <summary>Melee/missile: the first attack at a new target, with the server gates (see
+    /// <see cref="AttackIntervalMs"/>).</summary>
+    internal const double NewTargetPhysicalFloorMs = 200;
+
+    /// <summary>Melee/missile: the attack after a CancelAttack (attack rebind or stall re-issue).
+    /// ACE answers the cancel within a server tick or two; a swing still playing holds the attack
+    /// through the busy count, so the full 1000 ms interval is not needed here.</summary>
+    internal const double AttackAfterCancelMs = 300;
+
     /// <summary>True when <see cref="BusyCount"/> is positive only because AC lowered it inline at a
     /// server UseDone the busy hook can't see (see <see cref="CombatBusyGate"/>).</summary>
     internal bool BusyIsLeftover()
@@ -2643,10 +2782,16 @@ public partial class CombatManager : IDisposable
     /// server gates (UseDone and the cast gesture): those already hold the cast until the
     /// previous one is finished, so the new target only waits <see cref="NewTargetCastFloorMs"/>.
     /// Casting at the same target keeps the full setting.
+    /// Melee/missile at a new target with the server gates: <see cref="NewTargetPhysicalFloorMs"/>.
+    /// The 1000 ms is the re-assert cadence for the target being fought; the first swing at the
+    /// next one only waited out what was left of it ([CombatLatency] "interval 9xx" on most locks,
+    /// Drakkon 2026-10-12), while the busy count already holds the attack until the last swing's
+    /// AttackDone and an attack still bound to a live old target is released first (rebind).
     /// </summary>
     internal static double AttackIntervalMs(int combatMode, int attackSpellIntervalMs, bool hasServerGates, bool newTarget)
     {
-        if (combatMode != CombatMode.Magic) return 1000.0;
+        if (combatMode != CombatMode.Magic)
+            return newTarget && hasServerGates ? NewTargetPhysicalFloorMs : 1000.0;
         // 0 is allowed (2026-10-08): no delay of its own, the server gates (UseDone and the cast
         // gesture) alone hold the next cast until the last one is done. A file without the setting
         // keeps 1500 (the payload is nullable). An engine without those gates keeps a 250 ms floor,
@@ -2684,6 +2829,7 @@ public partial class CombatManager : IDisposable
 
     private bool ThinkCore()
     {
+        _rebindThisTick = false;
         if (!_settings.EnableCombat) return false;
 
         // A stall-watchdog re-wield must finish (weapon back in hand) before anything
@@ -2775,6 +2921,12 @@ public partial class CombatManager : IDisposable
 
             if (blacklisted)
                 DropTarget("blacklisted");
+            else if (target != null && activeTargetId != ForcedTargetId && PriorityOf(activeTargetId) <= 0)
+            {
+                // The rule says ignore (it changed, or the rule cache caught up).
+                ForgetScanned(activeTargetId);
+                DropTarget("ignored (monster rule Priority 0)");
+            }
             else if (target != null && IsSpellProjectileName(target.Name))
                 DropTarget("spell projectile (not a monster)");
             else if (target != null && (int)target.ObjectClass != (int)AcObjectClass.Monster)
@@ -2919,12 +3071,13 @@ public partial class CombatManager : IDisposable
         // wield, attack or cast while the server is still answering the last action (a kit, a corpse
         // use, a buff, the last stance change). On ACE a mode change cancels a pending use's walk
         // and fails a cast in progress; that interleaving began every stuck-use stall on record.
-        // Melee/missile attack repeats skip the animation gate (gestureGate false): the server swings
+        // Melee/missile attack repeats skip the animation and settle gates and the 'too busy' latch (ACE
+        // sends no UseDone for a swing, so a latch set by a refused pickup would starve them): the server swings
         // on its own timers, a swing can't land inside a use's server turn because the use above holds
         // every attack until it is answered, and waiting for each swing animation would cost DPS. A
         // stance change still waits (ChangeCombatModeFor), and so does everything in peace/magic.
         bool attackRepeat = CurrentCombatMode == CombatMode.Melee || CurrentCombatMode == CombatMode.Missile;
-        if (!ActionPacer.MayStart(_host, "Combat", HealNeed.None, out _, gestureGate: !attackRepeat))
+        if (!ActionPacer.MayStart(_host, "Combat", HealNeed.None, out _, animationGate: !attackRepeat, settleGate: !attackRepeat, attackRepeat: attackRepeat))
         {
             LastCombatSkipReason = "server-answering"; // D4 record-only
             _tickWait = CombatLatencyTracker.Wait.Busy;
@@ -3141,6 +3294,15 @@ public partial class CombatManager : IDisposable
                     return true;
                 }
 
+                // Waiting on a script's choice of spell (RynthAi.Combat): nothing was sent. The same
+                // as the wall hold: the attack interval doesn't start, the target and scan stay as they
+                // are, and the next tick asks again (bounded by the request's deadline).
+                if (_scriptHeld)
+                {
+                    _tickWait = CombatLatencyTracker.Wait.Other;
+                    return true;
+                }
+
                 // Don't restore the physical weapon on top of a cast just issued this tick
                 // (AttackWithMagic → MarkCombatCastIssued): the UseObject + re-equip below would
                 // truncate the in-flight gesture and strand Player.IsBusy. Defer one windup
@@ -3225,6 +3387,10 @@ public partial class CombatManager : IDisposable
                 RecordOffensiveCast(activeTargetId);
             lastAttackCmd = DateTime.Now;
             _lastAttackCmdTargetId = activeTargetId;
+            // A rebind sent only the CancelAttack: the attack follows as soon as the cancel can
+            // have landed, not a whole interval later ("lock->attack 1750 ms (interval 1671)").
+            if (!physicalSent && _rebindThisTick)
+                lastAttackCmd = AttackAfterCancel(lastAttackCmd);
 
             // Predicted kill shot (set in AttackWithMagic): the cast we just fired
             // is expected to finish this mob. DON'T swap yet — on ACE a war cast is
@@ -3313,7 +3479,22 @@ public partial class CombatManager : IDisposable
             return false;
         }
 
-        var act = _stallWatch.Tick(now, eligible, _lastSwingEvidenceAt, out double stalledMs);
+        bool quiet = SampleMeleeQuiet(now, eligible && mode == CombatMode.Melee);
+
+        // After the step-1 re-issue: still no swing, not moved, nothing from the server = a ghost.
+        if (_ghostCheck.IsArmed)
+        {
+            int tid = activeTargetId;
+            double silent = ServerSilentMs(tid, now);
+            if (_ghostCheck.Check(tid, now, _lastSwingEvidenceAt, TargetSpot(tid), silent) == GhostCheck.Verdict.Ghost)
+            {
+                MarkGhost(tid, targetObj.Name, silent, $"no swing after {_attacksSinceEvidence} attack(s) and a re-issue");
+                lastAttackCmd = now;
+                return true;
+            }
+        }
+
+        var act = _stallWatch.Tick(now, eligible, _lastSwingEvidenceAt, out double stalledMs, quiet);
         switch (act)
         {
             case CombatStallWatchdog.StallAction.None:
@@ -3341,10 +3522,14 @@ public partial class CombatManager : IDisposable
         switch (act)
         {
             case CombatStallWatchdog.StallAction.Reissue:
+            {
                 ReleaseServerAttack("stall watchdog", log: false);
-                lastAttackCmd = now; // the attack goes out again one cycle later, after the cancel lands
-                _host.Log($"{head} re-issue: CancelAttack, attack 0x{activeTargetId:X8} again next cycle");
+                lastAttackCmd = AttackAfterCancel(now); // the attack goes out again once the cancel has landed
+                _ghostCheck.Arm(activeTargetId, now, TargetSpot(activeTargetId));
+                _host.Log($"{head} re-issue: CancelAttack, attack 0x{activeTargetId:X8} again next cycle" +
+                          (_stallWatch.LastFireWasEarly ? $" (early: {stalledMs / 1000:0.0}s with no swing playing and the character standing still)" : ""));
                 return true;
+            }
 
             case CombatStallWatchdog.StallAction.Reselect:
             {
@@ -3363,13 +3548,22 @@ public partial class CombatManager : IDisposable
                 // Same effect on the server as the wand heal: a mode change runs
                 // HandleActionCancelAttack. EquipWeaponAndSetStance flips back after its
                 // stance retry delay (~1 s with the flip backoff reset).
-                _host.ChangeCombatModeFor(CombatMode.NonCombat, "Combat/Stall", "stall watchdog: toggle the mode", force: true);
-                _stallToggleAt = now;
-                ResetStanceFlipBackoff();
-                lastStanceAttempt = now;
-                _serverAttackTargetId = 0;
-                lastAttackCmd = now;
-                _host.Log($"{head} toggle mode: peace, then back to {CombatModeName(mode)} on the next stance pass");
+                // Only a toggle the engine accepted starts the flip-back bookkeeping. A refusal (a teleport,
+                // a death) leaves it untouched and takes the ladder step back (Unfire), so it spends no step
+                // and the toggle is asked for again next tick.
+                if (_host.ChangeCombatModeFor(CombatMode.NonCombat, "Combat/Stall", "stall watchdog: toggle the mode", force: true))
+                {
+                    _stallToggleAt = now;
+                    ResetStanceFlipBackoff();
+                    lastStanceAttempt = now;
+                    _serverAttackTargetId = 0;
+                    _host.Log($"{head} toggle mode: peace, then back to {CombatModeName(mode)} on the next stance pass");
+                    lastAttackCmd = now;
+                }
+                else
+                {
+                    _stallWatch.Unfire();
+                }
                 return true;
 
             case CombatStallWatchdog.StallAction.Rewield:
@@ -3381,6 +3575,117 @@ public partial class CombatManager : IDisposable
     }
 
     private CombatStallWatchdog.StallAction _lastStallStep = CombatStallWatchdog.StallAction.None;
+
+    /// <summary>How long the server has said nothing about <paramref name="id"/>: the engine's
+    /// record (plugin API v83) when it has one, else the plugin's own OnUpdateObject/OnCreateObject
+    /// record; -1 when neither has any.</summary>
+    internal double ServerSilentMs(int id, DateTime now)
+    {
+        if (_host.HasGetObjectServerAge)
+        {
+            int age = _host.GetObjectServerAge((uint)id);
+            if (age >= 0) return age;
+        }
+        return Ghosts.SilentMs(id, now);
+    }
+
+    /// <summary>
+    /// <paramref name="id"/> is a ghost: logged once, skipped by targeting until the server shows
+    /// it is real or the landblock changes, dropped as the target, and removed from the client
+    /// when the engine can (v83). Its no-damage blacklist entry, if any, is dropped (the ghost
+    /// mark outlives it).
+    /// </summary>
+    internal void MarkGhost(int id, string? name, double silentMs, string why)
+    {
+        if (id == 0) return;
+        uint pid = _playerId != 0 ? _playerId : _host.GetPlayerId();
+        uint lb = pid != 0 && _host.TryGetObjectPosition(pid, out uint pc, out _, out _, out _) ? pc >> 16 : 0;
+        GhostSpot spot = TargetSpot(id) ?? new GhostSpot(double.NaN, double.NaN, double.NaN);
+        Ghosts.Mark(id, name ?? "", spot, lb, DateTime.Now);
+        _blacklistManager.ClearFailure(id);
+        string silent = silentMs < 0 ? "nothing from the server about it since it was first seen" : $"nothing from the server about it for {silentMs / 1000:0}s";
+        _host.Log($"[Ghost] 0x{id:X8} '{name}' is a ghost: {why}, {silent}, it hasn't moved [{DescribeTargetPos(id)}]. " +
+                  $"Skipped until the server sends anything about it or the landblock changes (ghosts now: {Ghosts.Count}).");
+        if (id == activeTargetId || id == _lockedTargetId)
+            DropTarget("ghost (the server doesn't have it)");
+        if (_host.HasRemoveClientObject)
+        {
+            int r = _host.RemoveClientObject((uint)id);
+            _host.Log($"[Ghost] 0x{id:X8}: " + r switch
+            {
+                1 => "removed from the client",
+                2 => "removal queued (AC's main thread)",
+                -1 => "not removed: the client's DeleteObject isn't bound yet (no delete since the engine loaded)",
+                _ => "not removed: the engine refused (see the engine log)",
+            });
+        }
+    }
+
+    /// <summary>The server sent an update for <paramref name="objectId"/> (RynthAiPlugin.OnUpdateObject).</summary>
+    public void OnServerObjectUpdate(uint objectId) => Ghosts.NoteServerUpdate((int)objectId, DateTime.Now);
+
+    /// <summary>The server created <paramref name="objectId"/> (RynthAiPlugin.OnCreateObject).</summary>
+    public void OnObjectCreated(uint objectId) => Ghosts.NoteServerUpdate((int)objectId, DateTime.Now, "the server created it again");
+
+    /// <summary>
+    /// Samples the swing animation and the character's position every stall-watch tick and says
+    /// whether melee is plainly stuck: at least two attacks sent since the last hit, miss or kill,
+    /// nothing animating for <see cref="QuietNoAnimMs"/> and the character not moving for
+    /// <see cref="QuietStillMs"/>. A swing in progress animates and a server move-to to the target
+    /// moves the character, so neither reads as quiet. False without the engine's motion read.
+    /// </summary>
+    private bool SampleMeleeQuiet(DateTime now, bool melee)
+    {
+        if (!_host.HasGetCastBusyState) return false;
+        // A gap (combat paused, a loot run): start the clocks over rather than read the gap as quiet.
+        if (_lastQuietSampleAt == DateTime.MinValue || (now - _lastQuietSampleAt).TotalMilliseconds > CombatStallWatchdog.TickGapResetMs)
+        {
+            _lastAnimatingAt = now;
+            _lastPlayerMovedAt = now;
+            _moveAnchorX = double.NaN;
+        }
+        _lastQuietSampleAt = now;
+
+        bool animating;
+        try { animating = _host.GetCastBusyState() != 0; } catch { animating = true; }
+        if (animating) _lastAnimatingAt = now;
+
+        uint pid = _playerId != 0 ? _playerId : _host.GetPlayerId();
+        if (pid != 0 && _host.TryGetObjectPosition(pid, out uint pc, out float px, out float py, out float pz))
+        {
+            double gx = ((pc >> 24) & 0xFF) * 192.0 + px, gy = ((pc >> 16) & 0xFF) * 192.0 + py;
+            if (double.IsNaN(_moveAnchorX))
+            {
+                _moveAnchorX = gx; _moveAnchorY = gy; _moveAnchorZ = pz;
+            }
+            else
+            {
+                double dx = gx - _moveAnchorX, dy = gy - _moveAnchorY, dz = pz - _moveAnchorZ;
+                if (dx * dx + dy * dy + dz * dz > QuietMoveM * QuietMoveM)
+                {
+                    _moveAnchorX = gx; _moveAnchorY = gy; _moveAnchorZ = pz;
+                    _lastPlayerMovedAt = now;
+                }
+            }
+        }
+        else _lastPlayerMovedAt = now;   // no position: never call it standing still
+
+        return melee
+               && _attacksSinceEvidence >= 2
+               && (now - _lastAnimatingAt).TotalMilliseconds >= QuietNoAnimMs
+               && (now - _lastPlayerMovedAt).TotalMilliseconds >= QuietStillMs;
+    }
+
+    /// <summary>Where a target is (landblock-global x/y and z), or null.</summary>
+    private GhostSpot? TargetSpot(int id)
+    {
+        if (id == 0 || !_host.TryGetObjectPosition((uint)id, out uint c, out float x, out float y, out float z)) return null;
+        return new GhostSpot(((c >> 24) & 0xFF) * 192.0 + x, ((c >> 16) & 0xFF) * 192.0 + y, z);
+    }
+
+    /// <summary>The lastAttackCmd stamp that lets the next melee/missile attack go
+    /// <see cref="AttackAfterCancelMs"/> after <paramref name="now"/> (the interval is 1000 ms there).</summary>
+    private static DateTime AttackAfterCancel(DateTime now) => now.AddMilliseconds(AttackAfterCancelMs - 1000.0);
 
     /// <summary>Stall watchdog / attack-rebind counters for /ra why.</summary>
     public int StallEpisodes   => _stallWatch.Episodes;
@@ -3652,6 +3957,7 @@ public partial class CombatManager : IDisposable
     public void HandleCombatTrigger()
     {
         if (_scannedTargets.Count == 0) return;
+        if (TryLockForcedTarget()) return;   // Target lock (/ra targetlock): CombatManager.TargetLock.cs
 
         DateTime now = TargetClock();
         double acquireRange = Math.Max(1.0, _settings.MonsterRange);
@@ -3739,14 +4045,20 @@ public partial class CombatManager : IDisposable
         // One line per real switch. A switch should be a genuine event (target died, left,
         // or a higher priority showed up; with the lock off, something clearly better). If
         // this floods the log, selection is thrashing again.
+        int bestPriority = PriorityOf(best.Id);
+        LockTarget(best, bestPriority, $"{SchemeName(scheme)}: {DescribeSchemeValue(scheme, best)}, priority {bestPriority}, {DescribeTargetPos(best.Id)}", switchWhy);
+    }
+
+    /// <summary>Makes <paramref name="best"/> the fight target (one log line; the switch says why).</summary>
+    private void LockTarget(ScannedTarget best, int bestPriority, string picked, string? switchWhy)
+    {
         int bestId = best.Id;
-        int bestPriority = PriorityOf(bestId);
-        string picked = $"{SchemeName(scheme)}: {DescribeSchemeValue(scheme, best)}, priority {bestPriority}, {DescribeTargetPos(bestId)}";
         if (_lockedTargetId != 0)
             _host.Log($"[CombatTarget] switch 0x{_lockedTargetId:X8} '{_worldFilter[_lockedTargetId]?.Name}' ({switchWhy}, {DescribeTargetPos(_lockedTargetId)}) " +
                       $"-> 0x{bestId:X8} '{_worldFilter[bestId]?.Name}' ({picked})");
         else
-            _host.Log($"[CombatTarget] lock 0x{bestId:X8} '{_worldFilter[bestId]?.Name}' ({picked})");
+            _host.Log($"[CombatTarget] lock 0x{bestId:X8} '{_worldFilter[bestId]?.Name}' ({picked})" +
+                      (_ghostsSkippedInScan > 0 ? $" [{_ghostsSkippedInScan} ghost(s) in range skipped]" : ""));
 
         // [CombatLatency]: time this engagement from the lock to its first attack.
         double lockMs = Environment.TickCount64;
@@ -3757,9 +4069,10 @@ public partial class CombatManager : IDisposable
         _lockedTargetId     = bestId;
         _lockedPriority     = bestPriority;
         _targetLockedAt     = DateTime.Now;
+        _lockSpot           = TargetSpot(bestId);
         _lastDamageDealtAt  = DateTime.MinValue;
         _lockedLastSeen       = best;   // it was in this tick's scan: the grace covers a blink next tick
-        _lockedLastSeenInScan = now;
+        _lockedLastSeenInScan = TargetClock();
         _consecutiveCastMisses = 0;
         _pendingJudgeCastAt = DateTime.MinValue;
         _facingTarget       = false;
@@ -3859,6 +4172,9 @@ public partial class CombatManager : IDisposable
         DateTime progress = _lastDamageDealtAt != DateTime.MinValue ? _lastDamageDealtAt : _targetLockedAt;
         return progress != DateTime.MinValue && (now - progress).TotalMilliseconds <= UndamagedCommitmentMaxMs;
     }
+
+    /// <summary>True when the monster rule for <paramref name="id"/> says Priority 0 (never attacked).</summary>
+    internal bool IsIgnored(int id) => id != ForcedTargetId && PriorityOf(id) <= 0;
 
     /// <summary>The Priority of the monster rule that applies to <paramref name="id"/> (its own
     /// row by name or match expression, else the DEFAULT row; 1 when neither exists). Cached per
@@ -4039,14 +4355,33 @@ public partial class CombatManager : IDisposable
     /// <summary>The Items list's usable weapons, in list order, with their kind, element, rending and whether each is in hand.</summary>
     internal List<WeaponCandidate> ListedCandidates()
     {
+        var list = ListedCandidates(admitCasters: false, out List<int>? leftOut);
+        // A script choosing the attack spells (RynthAi.Combat) can attack with a caster whatever
+        // War/Void training says, but only when the list has no melee/missile weapon to use:
+        // a fighter's listed buff wand must not pull it out of melee.
+        if (list.Count == 0 && leftOut != null && ScriptPicksAttack)
+            return ListedCandidates(admitCasters: true, out _);
+        if (list.Count == 0 && leftOut != null)
+            foreach (int id in leftOut)
+                if (_wandRejectedNoted.Add(id))
+                    _host.Log($"[EquipDiag] caster 0x{(uint)id:X8} '{_worldFilter[id]?.Name}' is not a combat weapon: {CanMagicDiag()}");
+        return list;
+    }
+
+    /// <param name="admitCasters">Take listed casters even with War and Void untrained.</param>
+    /// <param name="leftOut">The casters skipped for that (null when none).</param>
+    private List<WeaponCandidate> ListedCandidates(bool admitCasters, out List<int>? leftOut)
+    {
+        leftOut = null;
         int inHand = InHandWeaponId();
         var list = new List<WeaponCandidate>();
         foreach (var r in _settings.ItemRules)
         {
-            if (r.Id == 0 || !IsUsableCombatWeapon(r.Id)) continue;
-            if (list.Any(c => c.Id == r.Id)) continue;
+            if (r.Id == 0) continue;
             var wo = _worldFilter[r.Id];
             if (wo == null) continue;
+            if (!admitCasters && !IsUsableCombatWeapon(r.Id)) { (leftOut ??= new List<int>()).Add(r.Id); continue; }
+            if (list.Any(c => c.Id == r.Id)) continue;
             if (wo.ObjectClass == AcObjectClass.MissileWeapon && IsAmmoItem(wo)) continue;   // listed arrows are the ammo choice, never a weapon to wield
             if (IsShieldItem(wo)) continue;                                                  // listed shields are the off hand's (CombatManager.Offhand.cs)
             var info = ElementTracker.Read(r.Id, wo.Name);
@@ -4128,13 +4463,23 @@ public partial class CombatManager : IDisposable
         return any ? CreatureWeakness.FromAppraisal(m) : null;
     }
 
+    /// <summary>
+    /// Optional UtilityBelt damage seed lookup (wcid, name) → damage types best first, or null.
+    /// Set by the plugin when the seed store loads; null (default) leaves the ranking as before.
+    /// Called on the combat thread.
+    /// </summary>
+    internal Func<uint, string, IReadOnlyList<string>?>? MobSeedLookup { get; set; }
+
     /// <summary>The same by wcid and name; <paramref name="objectId"/> (optional) reads a live creature type.</summary>
     internal CreatureWeakness.Ranking? WeaknessFor(uint wcid, string? name, int objectId = 0)
     {
         name ??= "";
         int ctype = CreatureTypeOf(wcid, name, objectId);
         string learned = wcid != 0 ? _damageStore?.GetBestElement(wcid) ?? "" : "";
-        return CreatureWeakness.Rank(wcid, name, ctype, learned);
+        IReadOnlyList<string>? seeded = null;
+        try { seeded = MobSeedLookup?.Invoke(wcid, name); }
+        catch { seeded = null; }   // a bad seed file must never stop element choice
+        return CreatureWeakness.Rank(wcid, name, ctype, learned, seeded);
     }
 
     // Server replies seen when the last combat wield was sent (UseDone / WeenieError sequence).
@@ -4148,7 +4493,7 @@ public partial class CombatManager : IDisposable
     {
         DateTime now = DateTime.Now;
         if (SwapTracker.PendingId != 0 && ServerRefusedSinceSend()) SwapTracker.Refused(now, WeaponName);
-        var step = SwapTracker.Next(chosenId, inHandId, now, WeaponName);
+        var step = SwapTracker.Next(chosenId, inHandId, now, WeaponName, forKey: activeTargetId);
         if (SwapTracker.Notice != null)
         {
             _host.Log($"[EquipDiag] {SwapTracker.Notice}");
@@ -4290,7 +4635,7 @@ public partial class CombatManager : IDisposable
             if ((DateTime.Now - _lastEquipDiagAt).TotalSeconds > 5)
             {
                 _lastEquipDiagAt = DateTime.Now;
-                _host.Log($"[EquipDiag] no weapon found (source=none, desired='{desired}', ItemRules={_settings.ItemRules.Count}, MonsterRule='{rule?.Name ?? "null"}') — proceeding unarmed");
+                _host.Log($"[EquipDiag] no weapon found (source=none, desired='{desired}', ItemRules={_settings.ItemRules.Count}, MonsterRule='{rule?.Name ?? "null"}', {CanMagicDiag()}) - proceeding unarmed");
             }
             return EnsureUnarmedStance();
         }
@@ -4447,9 +4792,15 @@ public partial class CombatManager : IDisposable
             // watchdog won't) and RE-EQUIP the wand (UseObject resyncs the wield; on a
             // truly-unwielded wand it wields it, which is the actual fix). Without this
             // the bot sat in NonCombat for 5h, buffs expired, never fighting (2026-06-10).
-            if (_stanceStuckSince == DateTime.MinValue)
+            // The clock starts when a stance request has actually gone out (below), never on refusals
+            // (see BuffManager's _buffStanceStuckSince): a clock counting through them ends in a re-equip.
+            // A refusal newer than the clock's start: the request that started it was dropped (a teleport), so restart the clock.
+            if (_stanceStuckSince != DateTime.MinValue && ActionPacer.LastEngineRefusalMs > _stanceStuckStartMs)
+            {
                 _stanceStuckSince = DateTime.Now;
-            double stuckMs = (DateTime.Now - _stanceStuckSince).TotalMilliseconds;
+                _stanceStuckStartMs = ActionPacer.NowMs();
+            }
+            double stuckMs = _stanceStuckSince == DateTime.MinValue ? 0 : (DateTime.Now - _stanceStuckSince).TotalMilliseconds;
             // RE-EQUIP recovery — only for the first couple of attempts in an
             // episode (handles a stale "wielded reads true" on a wand that
             // actually isn't wielded). Capped: UseObject on a genuinely wielded
@@ -4485,6 +4836,7 @@ public partial class CombatManager : IDisposable
             if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs()
                 && _host.ChangeCombatModeFor(desiredMode, "Combat", "stance"))
             {
+                if (_stanceStuckSince == DateTime.MinValue) { _stanceStuckSince = DateTime.Now; _stanceStuckStartMs = ActionPacer.NowMs(); }
                 if (diagNow) { _lastEquipDiagAt = DateTime.Now; _host.Log($"[EquipDiag] wielded=true mode={CurrentCombatMode}→{desiredMode} (weapon=0x{targetWeaponId:X8} '{weaponObj.Name}' src={weaponSource}) — sending ChangeCombatMode"); }
                 lastStanceAttempt = DateTime.Now;
                 NoteStanceFlipSent();
@@ -5216,6 +5568,7 @@ public partial class CombatManager : IDisposable
                 && !IsKnownDead(_serverAttackTargetId))
             {
                 _attackRebinds++;
+                _rebindThisTick = true;
                 ReleaseServerAttack($"target is now 0x{targetId:X8} '{_worldFilter[activeTargetId]?.Name}' {DescribeTargetPos(activeTargetId)}", log: true);
                 LastCombatSkipReason = "attack-rebind";
                 return false;
@@ -5252,6 +5605,7 @@ public partial class CombatManager : IDisposable
 
             RynthCore.Plugin.Shared.ActionPacer.NoteAttackSent();   // nothing else starts before this swing plays
             _serverAttackTargetId = activeTargetId;
+            _attacksSinceEvidence++;
             LastCombatSkipReason = "attack"; // D4 record-only: physical attack sent this tick
             return true;
         }
@@ -5299,6 +5653,7 @@ public partial class CombatManager : IDisposable
     {
         _wallFaceHeld = false;
         _manaCastHeld = false;
+        _scriptHeld = false;
         if (_spellManager == null || target == null) return;
 
         // Hard safety veto: never cast offensive magic at something AC's combat
@@ -5399,6 +5754,11 @@ public partial class CombatManager : IDisposable
             }
         }
 
+        // A script chooses this cast (RynthAi.Combat, CombatManager.ScriptHook.cs): ask it, wait for
+        // its answer (held, not an attack yet), cast what it chose; a decline, a bad answer or no
+        // answer in time falls through to RynthAi's own choice below, this same tick.
+        if (TryScriptAttack(target, element)) return;
+
         if (rule != null && PickBaseShape(rule) < 0)
         {
             _host.Log($"[CombatCast] rule '{rule.Name}' has no attack shapes enabled (UseArc/Ring/Streak/Bolt/Blast/Wall all false) — no offensive cast");
@@ -5464,6 +5824,7 @@ public partial class CombatManager : IDisposable
                 _pendingOffensiveSpellId   = offensiveSpellId;
                 _pendingOffensiveCastAt    = DateTime.Now;
                 _pendingOffensiveTargetId  = activeTargetId;
+                NoteOffensiveSeq();
 
                 // Tag this cast's weapon + element + tier so the pushed damage event
                 // can be attributed to it, count it for casts-to-kill learning, then
@@ -5596,12 +5957,31 @@ public partial class CombatManager : IDisposable
 
     private static bool IsWandObject(WorldObject wo) => WeaponList.IsWand(wo);
 
-    /// <summary>War or Void Magic trained — the character can attack with a caster.
-    /// Skills not read yet count as trained, like the other skill gates here.</summary>
-    private bool CanAttackWithMagic =>
+    /// <summary>War or Void Magic trained. Skills not read yet count as trained, like the
+    /// other skill gates here.</summary>
+    private bool AttackMagicTrained =>
         _charSkills == null
         || _charSkills[AcSkillType.WarMagic].Training >= 2
         || _charSkills[AcSkillType.VoidMagic].Training >= 2;
+
+    /// <summary>A script holds the attack kind (RynthAi.Combat): it picks the attack spell, from
+    /// any school, so a caster is the combat weapon whatever War/Void training says.</summary>
+    private static bool ScriptPicksAttack => CombatHook.IsActive(RynthAiCombat.KindAttack);
+
+    /// <summary>The character can attack with a caster: War or Void Magic trained, or a script
+    /// choosing the attack spells (a Life-only caster whose script drains, for one). Gates the
+    /// wand fallback when no weapon was chosen; the Items list itself admits a caster under the
+    /// hook only when it has no melee/missile weapon (ListedCandidates).</summary>
+    private bool CanAttackWithMagic => AttackMagicTrained || ScriptPicksAttack;
+
+    /// <summary>For the [EquipDiag] lines: canMagic and whether the script hook made it true.</summary>
+    private string CanMagicDiag()
+    {
+        bool trained = AttackMagicTrained, hook = ScriptPicksAttack;
+        return $"canMagic={trained || hook}" + (hook && !trained ? " (script attack hook)" : "");
+    }
+
+    private readonly HashSet<int> _wandRejectedNoted = new();
 
     /// <summary>A weapon combat may fight with: anything the character has (in the world
     /// cache) but a caster when the character has no attack magic. Debuff casting picks its
@@ -5613,7 +5993,7 @@ public partial class CombatManager : IDisposable
     {
         var wo = _worldFilter[id];
         if (wo == null) return false;
-        return CanAttackWithMagic || !IsWandObject(wo);
+        return AttackMagicTrained || !IsWandObject(wo);
     }
 
     private static List<string> BuildDebuffList(MonsterRule rule, string element)

@@ -263,7 +263,9 @@ internal sealed class LegacyNavigationUi
         return Math.Clamp(active, 0, newCount - 1);
     }
 
-    public const string NavFolder = @"C:\Games\RynthSuite\RynthAi\NavProfiles";
+    /// <summary>NavProfiles in the resolved RynthSuite folder. It was hard-coded to C:\Games, so with a
+    /// moved install /ra nav save &lt;name&gt; wrote where the nav picker never looks (2026-10-13).</summary>
+    public static string NavFolder => Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "NavProfiles");
 
     public void TryAutoSaveNav()
     {
@@ -274,7 +276,10 @@ internal sealed class LegacyNavigationUi
             if (TryGetEmbeddedKey(path, out string key))
                 _settings.EmbeddedNavs[key] = _settings.CurrentRoute.ToLines();
             else
-                _settings.CurrentRoute.Save(path);
+            {
+                NavRouteParser route = _settings.CurrentRoute;
+                RynthCore.Plugin.RynthAi.Diagnostics.DataWriteGuard.TrySave("the nav", path, () => route.Save(path));
+            }
         }
         catch (Exception ex) { _host.Log($"[RynthAi] Nav auto-save to {path} failed: {ex.Message}"); }
     }
@@ -313,7 +318,9 @@ internal sealed class LegacyNavigationUi
                 do path = Path.Combine(NavFolder, $"Route {n++}.nav"); while (File.Exists(path));
             }
 
-            route.Save(path);
+            string target = path;
+            if (!RynthCore.Plugin.RynthAi.Diagnostics.DataWriteGuard.TrySave("the nav", target, () => route.Save(target), out string why, callerShows: true))
+                return $"[RynthAi] Nav NOT saved to {target}: {why}";
             _settings.CurrentNavPath = path;
             return $"[RynthAi] Saved {route.Points.Count} waypoints to {Path.GetFileName(path)}.";
         }

@@ -101,10 +101,16 @@ public sealed partial class RynthLuaPlugin : RynthPluginBase
 
     public override void Shutdown()
     {
+        // Forget RynthAi's cached tables first: stopping the scripts releases their combat
+        // handlers (ClearCombatHandlers -> CombatRelease), and RynthAi may have been unloaded or
+        // reloaded since the last tick looked them up, so a cached pointer could be stale.
+        // (Null when Initialize never ran: nothing is cached and nothing must throw here.)
+        try { _ai?.Reset(); } catch { }
         // The resume list is taken while the scripts still run; the file is written last.
         List<string> resume = new();
         try { resume = CaptureResume(); } catch { }
         try { StopAll("stopped: RynthLua unloaded"); } catch (Exception ex) { Log("[RynthLua] shutdown: " + ex.Message); }
+        try { ReleaseCombatHook(); } catch { }   // RynthAi goes native now, not when the lease lapses
         try { ShutdownHuds(); } catch { }
         FlushHudMemory();
         SaveEditor();
@@ -134,6 +140,10 @@ public sealed partial class RynthLuaPlugin : RynthPluginBase
         try { PollHudEvents(); }   // script windows: input first, so this tick's passes see it
         catch (Exception ex) { LogHudFault("events", ex); }
         TickApi();
+        // RynthAi's combat hook: renew the lease, start handlers for new requests (they run in
+        // TickScripts just below, so a handler that doesn't yield answers in this same tick).
+        try { PumpCombatHook(); }
+        catch (Exception ex) { Log("[RynthLua] combat hook: " + ex.Message); }
         TickScripts();
         try { TickHuds(); }        // render passes that are due, then submit what changed
         catch (Exception ex) { LogHudFault("passes", ex); }

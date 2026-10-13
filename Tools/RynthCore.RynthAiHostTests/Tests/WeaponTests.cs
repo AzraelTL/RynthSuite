@@ -48,10 +48,12 @@ internal static class WeaponTests
         r.Add("slayer: creature type unknown, the old choice", SlayerUnknownType);
         r.Add("slayer: the element follows the chosen weapon", SlayerElement);
         r.Add("slayer: read through the host (int 166, float 138, monster int 2), cached by wcid", SlayerFromHost);
+        r.Add("refusal: a refused stance change in combat's equip pass sets no backoff and starts no stuck clock", StanceRefusedKeepsBackoff);
         r.Add("weapon choice: an unlisted wand is never picked (Damage tab, learned, pack, name)", UnlistedNeverPicked);
         r.Add("Items list: a listed item no longer carried is reported missing (pack, hand, unknown)", MissingFromPack);
         r.Add("weapon swap: one in flight, confirmed, retry cap, then what's in hand", SwapOneInFlight);
         r.Add("weapon swap: no flip-flop between two weapons", SwapNoFlipFlop);
+        r.Add("weapon swap: a new target that wants the weapon just swapped away from gets it at once (Drakkon 2026-10-12)", SwapBackForNewTarget);
         r.Add("weapon swap: a server refusal counts as a failed try", SwapRefused);
         r.Add("tester's case: Dragon's Isle, an unlisted fire wand and Blades", TesterDragonsIsle);
     }
@@ -645,10 +647,11 @@ internal static class WeaponTests
         public readonly MonsterDamageStore Store = new();
         public WorldObject Target;
 
-        public Rig(uint wcid, string monsterName)
+        public Rig(uint wcid, string monsterName, bool modeCalls = false)
         {
             FakeHost.Reset();
             FakeHost.WeaponCalls = true;
+            FakeHost.CombatModeCalls = modeCalls;
             FakeHost.CombatModeValue = CombatMode.Magic;
             FakeHost.Names[ListedWand] = "Wand"; FakeHost.ItemTypes[ListedWand] = 0x8000;
             FakeHost.Ints[(ListedWand, 45)] = 0x40;            // identified: Lightning
@@ -698,6 +701,26 @@ internal static class WeaponTests
         Check.Eq(missing.Count, 0, "inventory not known yet (empty, logging in): nothing reported missing");
     }
 
+    private static void StanceRefusedKeepsBackoff()
+    {
+        var rig = new Rig(1535, "Ethereal Wisp", modeCalls: true);
+        rig.C.InHandOverride = () => unchecked((int)ListedWand);   // the wand is in hand
+        FakeHost.CombatModeValue = CombatMode.NonCombat;           // but the stance is not Magic yet
+        FakeHost.Ints[(ListedWand, 10)] = 0x01000000;               // CurrentWieldedLocation: reads wielded (the stuck-clock branch)
+        var equip = typeof(CombatManager).GetMethod("EquipWeaponAndSetStance", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var last = typeof(CombatManager).GetField("lastStanceAttempt", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var stuck = typeof(CombatManager).GetField("_stanceStuckSince", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        FakeHost.CombatModeRefuse = true;
+        for (int i = 0; i < 5; i++) equip.Invoke(rig.C, new object[] { rig.Target, "Auto" });
+        Check.Eq(FakeHost.CombatModeRefusals, 5, "every pass asks again: a refusal sets no backoff");
+        Check.True((DateTime)last.GetValue(rig.C)! == DateTime.MinValue, "lastStanceAttempt stays put");
+        Check.True((DateTime)stuck.GetValue(rig.C)! == DateTime.MinValue, "the stuck clock has not started");
+        Check.Eq(FakeHost.Uses.Count, 0, "no re-equip UseObject");
+        FakeHost.CombatModeRefuse = false;
+        equip.Invoke(rig.C, new object[] { rig.Target, "Auto" });
+        Check.Eq(string.Join(",", FakeHost.CombatModeRequests), CombatMode.Magic.ToString(), "accepted: the request goes out");
+        Check.True((DateTime)last.GetValue(rig.C)! != DateTime.MinValue, "and only now lastStanceAttempt is stamped");
+    }
     private static void UnlistedNeverPicked()
     {
         var rig = new Rig(1535, "Ethereal Wisp");
@@ -797,6 +820,48 @@ internal static class WeaponTests
             hand = want;
         }
         Check.Eq(tr2.Next(99, hand, t.AddSeconds(5)), WeaponSwapTracker.Step.Hold, "a fifth swap inside a minute: held");
+    }
+
+    // Drakkon 2026-10-12 (0x01C5): Tetsubo -> Lightning Quadrelle for a Giant Maggot; 16 s later
+    // the next target, a Noble Grub weak to Bludgeon, was fought with the Quadrelle ("keeping ...
+    // just swapped away from it") until the 20 s dwell ran out, 5.3 s after the lock.
+    private static void SwapBackForNewTarget()
+    {
+        const int Tetsubo = 1, Quadrelle = 2, Maggot = 0x7001, Grub = 0x7002;
+        var tr = new WeaponSwapTracker();
+        DateTime t = new(2026, 10, 12, 20, 35, 8);
+        Check.Eq(tr.Next(Quadrelle, Tetsubo, t, forKey: Maggot), WeaponSwapTracker.Step.Swap, "maggot: Tetsubo -> Quadrelle");
+        tr.Sent(Quadrelle, Tetsubo, t);
+        tr.Next(Quadrelle, Quadrelle, t.AddSeconds(1), forKey: Maggot);              // landed
+        Check.Eq(tr.Next(Tetsubo, Quadrelle, t.AddSeconds(16), forKey: Grub), WeaponSwapTracker.Step.Swap,
+            "the grub (a new target) gets the Tetsubo back at once");
+        tr.Sent(Tetsubo, Quadrelle, t.AddSeconds(16));
+        tr.Next(Tetsubo, Tetsubo, t.AddSeconds(17), forKey: Grub);                  // landed
+
+        // The same target asking to flip back is still held (weakness data flickering mid-fight).
+        Check.Eq(tr.Next(Quadrelle, Tetsubo, t.AddSeconds(19), forKey: Grub), WeaponSwapTracker.Step.Hold,
+            "same target flipping straight back: held");
+        Check.Eq(tr.HoldReason, "just swapped away from it", "the reason");
+        // No target given (old callers): the old rule.
+        Check.Eq(tr.Next(Quadrelle, Tetsubo, t.AddSeconds(20)), WeaponSwapTracker.Step.Hold, "no key: held as before");
+        // A third target: free to swap.
+        Check.Eq(tr.Next(Quadrelle, Tetsubo, t.AddSeconds(20), forKey: 0x7003), WeaponSwapTracker.Step.Swap, "another new target: swap");
+
+        // The window cap still holds a fight that alternates between two kinds of monster.
+        var tr2 = new WeaponSwapTracker();
+        DateTime u = new(2026, 10, 12, 21, 0, 0);
+        int hand = Tetsubo;
+        for (int i = 0; i < 4; i++)
+        {
+            int want = hand == Tetsubo ? Quadrelle : Tetsubo;
+            u = u.AddSeconds(5);
+            Check.Eq(tr2.Next(want, hand, u, forKey: 0x8000 + i), WeaponSwapTracker.Step.Swap, $"alternating target {i}: swap");
+            tr2.Sent(want, hand, u);
+            tr2.Next(want, want, u.AddSeconds(1), forKey: 0x8000 + i);
+            hand = want;
+        }
+        int next = hand == Tetsubo ? Quadrelle : Tetsubo;
+        Check.Eq(tr2.Next(next, hand, u.AddSeconds(5), forKey: 0x8010), WeaponSwapTracker.Step.Hold, "a fifth swap inside a minute: held");
     }
 
     private static void SwapRefused()

@@ -21,6 +21,10 @@ public sealed partial class RynthAiPlugin
         Host.WriteToChat(text, 1);
     }
 
+    /// <summary>/ra items clean and the engine Items panel's Remove Missing button (RynthPluginCleanItems).</summary>
+    internal void CleanMissingItems()
+        => ChatLine(_dashboard?.CleanMissingItems(_objectCache, _playerId) ?? "[RynthAi] Settings not ready.");
+
     private void HandleHelpCommand()
     {
         ChatLine("[RynthAi] === Commands ===");
@@ -94,6 +98,8 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra panic         — full AC state reset (cancel attack + peace mode + stop motion + clear busy)");
         ChatLine("[RynthAi] /ra forcebuff          — force-recast all buffs immediately");
         ChatLine("[RynthAi] /ra cancelforcebuff    — cancel an in-progress force rebuff");
+        ChatLine("[RynthAi] /ra vtkeys             — VTank-style commands (targetlock, recharge, lootthis, meleelow/mid/high, navprio...)");
+        ChatLine("[RynthAi] /ra buff force|cancel|skipped - force buff, cancel it, or list buffs left out as unusable");
         ChatLine("[RynthAi] /ra bufftest           — one-shot: snapshot enchant registries pre/post next item-spell cast (logs to RynthCore.log)");
         ChatLine("[RynthAi] /ra settings savechar <name> — save current settings to named profile (create if new)");
         ChatLine("[RynthAi] /ra settings loadchar <name> — load named settings profile (create from current if new)");
@@ -1519,7 +1525,7 @@ public sealed partial class RynthAiPlugin
                                   $"but the file holds {profile.Rules.Count}; all {profile.Rules.Count} are in use. " +
                                   "Re-save the profile in the loot editor to correct the header.";
             ChatLine(countMessage);
-            Host.Log(countMessage);
+            RynthLog.Write(LogCat.Looting, countMessage);
         }
 
         var bad = new List<string>();
@@ -1538,7 +1544,7 @@ public sealed partial class RynthAiPlugin
         string message = $"[RynthAi] Loot profile '{fileName}': {bad.Count} rule(s) use condition types " +
                          $"RynthAi does not support and will never match: {string.Join(", ", bad)}.";
         ChatLine(message);
-        Host.Log(message);
+        RynthLog.Write(LogCat.Looting, message);
     }
 
     // ── Loot Editor (engine ImGui panel) ────────────────────────────────────
@@ -1873,6 +1879,75 @@ public sealed partial class RynthAiPlugin
         ChatLine($"[RynthAi] likely: {why}");
     }
 
+    /// <summary>
+    /// /ra ghosts            list the ghosts combat found (objects the client draws but the server
+    ///                       doesn't have for this character: no swing at them ever starts)
+    /// /ra ghosts clear      remove them from the client (engine API v83), like a server delete
+    /// /ra ghosts forget     make them targetable again
+    /// /ra ghost             mark the selected monster as a ghost and remove it from the client
+    /// </summary>
+    private void HandleGhostsCommand(string cmd, string[] parts)
+    {
+        if (_combatManager == null) { ChatLine("[RynthAi] Combat manager not ready."); return; }
+        var ghosts = _combatManager.Ghosts;
+        string sub = parts.Length >= 3 ? parts[2].ToLowerInvariant() : "";
+        bool canRemove = Host.HasRemoveClientObject;
+
+        if (cmd.Equals("ghost", StringComparison.OrdinalIgnoreCase) && sub.Length == 0)
+        {
+            uint sel = Host.HasGetSelectedItemId ? Host.GetSelectedItemId() : 0;
+            var wo = sel != 0 ? _objectCache?[(int)sel] : null;
+            if (wo == null || (int)wo.ObjectClass != (int)AcObjectClass.Monster)
+            {
+                ChatLine("[RynthAi] /ra ghost: select the monster that never takes a swing first.");
+                return;
+            }
+            double silent = _combatManager.ServerSilentMs((int)sel, DateTime.Now);
+            _combatManager.MarkGhost((int)sel, wo.Name, silent, "marked by /ra ghost");
+            ChatLine($"[RynthAi] 0x{sel:X8} '{wo.Name}' marked as a ghost" + (canRemove ? " and sent for removal from the client (see the log)." : " (this engine can't remove it from the client; it is skipped)."));
+            return;
+        }
+
+        switch (sub)
+        {
+            case "clear":
+            {
+                if (!canRemove) { ChatLine("[RynthAi] This engine can't remove objects from the client (needs plugin API v83)."); return; }
+                int sent = 0, refused = 0;
+                foreach (var g in ghosts.All.ToList())
+                {
+                    int r = Host.RemoveClientObject((uint)g.Id);
+                    if (r == 1 || r == 2) sent++; else refused++;
+                }
+                ChatLine($"[RynthAi] Ghosts: {sent} removed from the client" + (refused > 0 ? $", {refused} refused (the server talked about them recently, or not a creature - they stay skipped)." : "."));
+                return;
+            }
+            case "forget":
+            {
+                int n = ghosts.Count;
+                ghosts.Clear();
+                ChatLine($"[RynthAi] Ghosts: {n} forgotten; they can be targeted again.");
+                return;
+            }
+        }
+
+        if (ghosts.Count == 0)
+        {
+            ChatLine($"[RynthAi] No ghosts found this session ({ghosts.MarkedTotal} marked in all). /ra ghost marks the selected monster.");
+            return;
+        }
+        ChatLine($"[RynthAi] {ghosts.Count} ghost(s) skipped by combat (the client draws them, the server doesn't have them):");
+        DateTime now = DateTime.Now;
+        foreach (var g in ghosts.All)
+        {
+            double silent = _combatManager.ServerSilentMs(g.Id, now);
+            string s = silent < 0 ? "no server update seen" : $"server silent {silent / 1000:0}s";
+            ChatLine($"  0x{(uint)g.Id:X8} '{g.Name}' - marked {(now - g.MarkedAt).TotalSeconds:0}s ago, {s}");
+        }
+        ChatLine(canRemove ? "[RynthAi] /ra ghosts clear removes them from the client; /ra ghosts forget makes them targetable again."
+                           : "[RynthAi] /ra ghosts forget makes them targetable again (removing them needs engine API v83).");
+    }
+
     private void HandleCombatStateCommand()
     {
         if (_combatManager == null) { ChatLine("[RynthAi] Combat manager not ready."); return; }
@@ -1905,6 +1980,7 @@ public sealed partial class RynthAiPlugin
         ChatLine($"[RynthAi] scanned={s.ScannedCount}  closest=0x{(uint)s.ClosestScannedId:X8} '{s.ClosestScannedName}' @ {s.ClosestScannedDist:F1}yd");
         ChatLine($"[RynthAi] weapon=0x{(uint)s.PickedWeaponId:X8} '{s.PickedWeaponName}' ({s.PickedWeaponWhy}) wieldLoc={s.PickedWeaponWieldLoc} ammoWielded={s.HasWieldedAmmoFlag}");
         ChatLine($"[RynthAi] busy={s.BusyCount}  sinceAtk={sinceAttackS:F1}s sinceStance={sinceStanceS:F1}s sinceEquip={sinceEquipS:F1}s sinceLost={sinceLostS:F1}s");
+        ChatLine($"[RynthAi] script {s.ScriptHook}");
 
         // Dump every cache-known object that's wielded — using Host.TryGetObjectWielderInfo
         // as the authoritative check, not the cached WieldedLocation/Wielder fields
@@ -2050,6 +2126,7 @@ public sealed partial class RynthAiPlugin
 
         ChatLine("[RynthAi] === Salvage State ===");
         ChatLine($"[RynthAi] panelApi={v.HasPanelApi}  combineEnabled={v.EnableCombine}");
+        ChatLine($"[RynthAi] withoutPanel={(v.DirectOn ? "on" : "off")}{(v.DirectOffReason.Length > 0 ? $" ({v.DirectOffReason})" : "")}  directApi={v.HasDirectApi}  requests={v.DirectRequests}  panelFallbacks={v.DirectFallbacks}");
         ChatLine($"[RynthAi] phase={v.Phase} readyIn={v.PhaseReadyInMs}ms  queue={v.QueueCount}  panelEverOpened={v.PanelEverOpened}");
         ChatLine($"[RynthAi] batch={v.BatchSize} first=0x{v.CurrentItemId:X8}  ust=0x{v.CurrentUstId:X8}  tracked={v.TrackedItems}");
         ChatLine($"[RynthAi] items: {v.ItemsSalvaged} salvaged in {v.Batches} batch(es), {v.ItemsSkipped} skipped (reasons in the log)");
@@ -2061,7 +2138,7 @@ public sealed partial class RynthAiPlugin
             ? $"[RynthAi] lastError: '{v.LastError}' ({v.MsSinceLastError / 1000}s ago)"
             : "[RynthAi] lastError: none");
 
-        Host.Log($"[RynthAi salvstate] panelApi={v.HasPanelApi} combine={v.EnableCombine} phase={v.Phase}/{v.PhaseReadyInMs}ms "
+        Host.Log($"[RynthAi salvstate] panelApi={v.HasPanelApi} directApi={v.HasDirectApi} direct={v.DirectOn}/'{v.DirectOffReason}' req={v.DirectRequests} fb={v.DirectFallbacks} combine={v.EnableCombine} phase={v.Phase}/{v.PhaseReadyInMs}ms "
                  + $"queue={v.QueueCount} batch={v.BatchSize} item=0x{v.CurrentItemId:X8} ust=0x{v.CurrentUstId:X8} tracked={v.TrackedItems} salvaged={v.ItemsSalvaged} skipped={v.ItemsSkipped} "
                  + $"cphase={v.CombinePhase} grp={v.CombineGroupIdx}/{v.CombineGroupCount} add={v.CombineAddIdx} "
                  + $"openAttempts={v.CombineOpenAttempts} pendingScan={v.PendingCombineScan} sinceSweep={v.MsSinceCombineSweep}ms "
@@ -2249,6 +2326,32 @@ public sealed partial class RynthAiPlugin
     {
         if (_buffManager == null) { ChatLine("[RynthAi] Buff manager not ready."); return; }
         _buffManager.RequestForceFullRebuff();   // chat commands run on AC's thread; applied on the pump
+    }
+
+    // /ra buff force | cancel | skipped: the same actions as /ra forcebuff, /ra cancelforcebuff
+    // and the Force Buff button, plus the buffs the "Skip buffs this character can't use"
+    // setting is leaving out right now.
+    private void HandleBuffCommand(string[] parts)
+    {
+        string sub = parts.Length >= 3 ? parts[2].ToLowerInvariant() : "";
+        switch (sub)
+        {
+            case "force":  HandleForceBuff(); break;
+            case "cancel": HandleCancelForceBuff(); break;
+            case "skipped":
+                if (_buffManager == null) { ChatLine("[RynthAi] Buff manager not ready."); break; }
+                _buffManager.BuildDynamicBuffList();   // refresh the skip list
+                string summary = _buffManager.FilterSkipSummary();
+                ChatLine(summary.Length == 0
+                    ? "[RynthAi] Buff filter: nothing is being skipped."
+                    : $"[RynthAi] Buff filter skips: {summary}");
+                break;
+            default:
+                ChatLine("[RynthAi] /ra buff force    - recast every buff now, whatever time is left");
+                ChatLine("[RynthAi] /ra buff cancel   - cancel an in-progress force buff");
+                ChatLine("[RynthAi] /ra buff skipped  - buffs left out because this character can't use them");
+                break;
+        }
     }
 
     private void HandleCancelForceBuff()
@@ -2802,12 +2905,23 @@ public sealed partial class RynthAiPlugin
     /// </summary>
     public void HandleDungeonNavPatrol() => BuildDunPatrol(isRebuild: false);
 
+    /// <summary>The Dungeon Patrol settings (Settings > Navigation) as patrol options, in range.</summary>
+    internal static DungeonPatrolOptions PatrolOptionsFrom(LegacyUiSettings s) => new DungeonPatrolOptions
+    {
+        Coverage          = (PatrolCoverage)Math.Clamp(s.DunPatrolCoverage, 0, 2),
+        MaxDeadEndCells      = s.DunPatrolSkipDeadEnds,
+        AvoidHazardFloors = s.DunPatrolAvoidFloors,
+        WallClearance     = s.DunPatrolWallDistance,
+        LookInRoomMeters  = s.DunPatrolLookInSize,
+    }.Clamped();
+
     /// <summary>
     /// Builds (or rebuilds) the circular dungeon patrol route from the player's current
     /// cell, excluding all currently-known hazard cells, and installs it as the active
     /// route. When <paramref name="isRebuild"/> is true this was triggered by OnTick
-    /// after a new hazard was sighted mid-patrol — it reroutes silently (no fresh
-    /// "patrol started" chatter, just a one-line note) and never flips IsMacroRunning.
+    /// after a new hazard was sighted mid-patrol, or a Dungeon Patrol setting changed
+    /// (<paramref name="settingsChanged"/>) — it reroutes silently (no fresh "patrol
+    /// started" chatter, just a one-line note) and never flips IsMacroRunning.
     /// </summary>
     // One log line per patrol waypoint and a summary (diagnostics: which rule put each point
     // where it is, e.g. the patrol walking into small rooms it should only look into).
@@ -2828,10 +2942,11 @@ public sealed partial class RynthAiPlugin
         }
     }
 
-    private void BuildDunPatrol(bool isRebuild)
+    private void BuildDunPatrol(bool isRebuild, bool settingsChanged = false)
     {
         var settings = _dashboard?.Settings;
         if (settings == null) { if (!isRebuild) ChatLine("[RynthAi] Settings not ready."); return; }
+        var patrolOptions = PatrolOptionsFrom(settings);
 
         if (!Host.TryGetPlayerPose(out uint playerCell, out float playerLocalX, out float playerLocalY,
                                    out float patrolWZ, out _, out _, out _, out _))
@@ -2886,13 +3001,18 @@ public sealed partial class RynthAiPlugin
         // invisible-HotSpot majority the live weenie scan can't see — pure dat reads, cached per
         // landblock. No-op unless the user has flagged hazard textures (/ra hazard learnhere|texture).
         var portalDat = _raycast?.GeometryLoader?.PortalDat;
+        HashSet<uint>? surfaceHazards = null;
         if (portalDat != null)
         {
-            var surfaceHazards = DungeonHazardSurfaces.ComputeHazardCells(landblockKey, cellDat, portalDat);
+            surfaceHazards = DungeonHazardSurfaces.ComputeHazardCells(landblockKey, cellDat, portalDat);
             if (surfaceHazards.Count > 0) _objectCache?.SeedSurfaceHazards(surfaceHazards);
         }
 
-        var hazards = _objectCache?.GetHazardCells();
+        // Settings "Avoid Lava/Acid Floors" off: the floor-texture cells stay walkable for the
+        // patrol (the live set keeps them for everything else). Pools sighted or marked by hand
+        // (DungeonHazardStore) are avoided either way.
+        var hazards = DungeonPathfinder.PatrolHazards(_objectCache?.GetHazardCells(), surfaceHazards,
+            patrolOptions.AvoidHazardFloors ? null : DungeonHazardStore.Load(landblockKey), patrolOptions);
 
         // Start-in-hazard evacuation: if the player is standing on an excluded (acid/lava) cell, build
         // the patrol from the nearest SAFE cell and prepend a lead-in waypoint so the first move walks
@@ -2917,7 +3037,7 @@ public sealed partial class RynthAiPlugin
         var pointLog = new Dictionary<NavPoint, DungeonPathfinder.PatrolPointInfo>(ReferenceEqualityComparer.Instance);
         DungeonPathfinder.PointLog = pointLog;
         NavRouteParser route;
-        try { route = DungeonPathfinder.BuildPatrolRoute(graph, startCell, hazards, geometry); }
+        try { route = DungeonPathfinder.BuildPatrolRoute(graph, startCell, hazards, geometry, patrolOptions); }
         finally { DungeonPathfinder.PointLog = null; }
 
         // Lead the bot out of the hazard first.
@@ -2972,10 +3092,15 @@ public sealed partial class RynthAiPlugin
         _dunPatrolActive        = true;
         _dunPatrolLandblock     = landblockKey;
         _dunPatrolHazardVersion = _objectCache?.HazardVersion ?? 0;
+        _dunPatrolSettings.MarkBuilt(patrolOptions);
 
         int hazardCount = hazards?.Count ?? 0;
         string hazardNote = hazardCount > 0 ? $", {hazardCount} hazard cell(s) avoided" : "";
-        if (isRebuild)
+        if (isRebuild && settingsChanged)
+        {
+            ChatLine($"[RynthAi] DunNav-Patrol: patrol settings changed → rebuilt from here, {route.Points.Count} waypoints ({patrolOptions.Describe()}).");
+        }
+        else if (isRebuild)
         {
             ChatLine($"[RynthAi] DunNav-Patrol: new hazard sighted → rerouted around it ({hazardCount} hazard cell(s) avoided).");
         }
@@ -2994,7 +3119,9 @@ public sealed partial class RynthAiPlugin
     /// <summary>
     /// Called once per OnTick while logged in. If a dunnav-patrol is running and a new
     /// hazard (lava/acid hotspot) has been sighted since the route was built, rebuilds the
-    /// route so the hotspot is treated as a wall the bot turns around at. No-op otherwise.
+    /// route so the hotspot is treated as a wall the bot turns around at. Likewise when a
+    /// Dungeon Patrol setting changed (once it has settled, PatrolSettingsWatch): the patrol
+    /// is rebuilt from where the character is, the macro keeps running. No-op otherwise.
     /// </summary>
     private void TickDunPatrolHazardReroute()
     {
@@ -3012,7 +3139,10 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
-        if (_objectCache.HazardVersion == _dunPatrolHazardVersion) return; // nothing new sighted
+        var patrolOptions = PatrolOptionsFrom(settings);
+        bool settingsChanged = _dunPatrolSettings.ShouldRebuild(patrolOptions, Environment.TickCount64);
+        bool hazardsChanged = _objectCache.HazardVersion != _dunPatrolHazardVersion;
+        if (!hazardsChanged && !settingsChanged) return; // nothing new sighted, settings as built
 
         // Only reroute if still in the dungeon this patrol was built for. A portal to a new
         // landblock means BuildDunPatrol would (correctly) re-home, but that should happen via
@@ -3021,10 +3151,13 @@ public sealed partial class RynthAiPlugin
             || (playerCell >> 16) != _dunPatrolLandblock)
         {
             _dunPatrolHazardVersion = _objectCache.HazardVersion;
+            _dunPatrolSettings.MarkBuilt(patrolOptions);
             return;
         }
 
-        BuildDunPatrol(isRebuild: true);
+        BuildDunPatrol(isRebuild: true, settingsChanged: settingsChanged);
+        // A rebuild that gave up (graph not loaded, ...) keeps the old route: don't retry every tick.
+        if (settingsChanged) _dunPatrolSettings.MarkBuilt(patrolOptions);
     }
 
     // ── Patrol-management info / actions (engine-side right-click flyout) ──────
@@ -3080,8 +3213,8 @@ public sealed partial class RynthAiPlugin
         return sb.ToString();
     }
 
-    // Minimal JSON string escaper for route names (which can contain user-chosen chars).
-    private static string JsonEscape(string s)
+    // Minimal JSON string escaper for hand-built export JSON (route names, ILT Hub text).
+    internal static string JsonEscape(string s)
     {
         var sb = new System.Text.StringBuilder(s.Length + 8);
         foreach (char c in s)

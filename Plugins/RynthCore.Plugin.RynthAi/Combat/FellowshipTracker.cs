@@ -348,12 +348,40 @@ public class FellowshipTracker : IDisposable
             int bufPtr = Marshal.ReadInt32(addr);
             if (bufPtr == 0) return "";
             IntPtr strAddr = new IntPtr(bufPtr + 0x14);
-            if (!IsReadablePointer(strAddr)) return "";
-            string? raw = Marshal.PtrToStringAnsi(strAddr);
-            if (raw == null) return "";
-            if (raw.Length > 64) raw = raw[..64];
-            return raw;
+            // Bounded read: PtrToStringAnsi scans to a NUL however far that is, past
+            // the probed region into unmapped memory if the buffer is mid-free or never terminated.
+            return ReadBoundedAnsi(strAddr, MaxNameChars, ReadableBytesFrom(strAddr));
         }
         catch { return ""; }
+    }
+
+    /// <summary>A fellowship member's name is at most this long (AC names are under 20).</summary>
+    internal const int MaxNameChars = 64;
+
+    /// <summary>Bytes from <paramref name="ptr"/> to the end of its committed region (the probed
+    /// page run); 0 when the address is not readable.</summary>
+    internal static int ReadableBytesFrom(IntPtr ptr)
+    {
+        if (ptr == IntPtr.Zero) return 0;
+        if (VirtualQuery(ptr, out var mbi, Marshal.SizeOf<MEMORY_BASIC_INFORMATION>()) == 0) return 0;
+        if (mbi.State != MEM_COMMIT) return 0;
+        if ((mbi.Protect & PAGE_NOACCESS) != 0 || (mbi.Protect & PAGE_GUARD) != 0) return 0;
+        long left = (long)mbi.BaseAddress + (long)mbi.RegionSize - (long)ptr;
+        return left <= 0 ? 0 : (int)Math.Min(left, int.MaxValue);
+    }
+
+    /// <summary>
+    /// Reads a NUL-terminated ANSI string of at most <paramref name="maxChars"/> characters and
+    /// never more than <paramref name="readableBytes"/> bytes from <paramref name="addr"/>. An
+    /// unterminated run is cut at the bound, not scanned on. Internal for the tests.
+    /// </summary>
+    internal static unsafe string ReadBoundedAnsi(IntPtr addr, int maxChars, int readableBytes)
+    {
+        int limit = Math.Min(maxChars, readableBytes);
+        if (addr == IntPtr.Zero || limit <= 0) return "";
+        byte* p = (byte*)addr;
+        int n = 0;
+        while (n < limit && p[n] != 0) n++;
+        return n == 0 ? "" : Marshal.PtrToStringAnsi(addr, n) ?? "";
     }
 }

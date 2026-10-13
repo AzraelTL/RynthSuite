@@ -29,12 +29,16 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- UB damage-insights seed schema, shared with the Monster Editor importer. -->
+    <Compile Include="..\..\Shared\UbMobSeed.cs" Link="Shared\UbMobSeed.cs" />
     <!-- Interfaces shared with other RynthSuite plugins (RynthLua uses RynthAi.Script, RynthNet RynthAi.Status). -->
     <Compile Include="..\Shared\RynthAiScriptApi.cs" Link="Shared\RynthAiScriptApi.cs" />
     <!-- RynthNet reads the bot state through RynthAi.Status. -->
     <Compile Include="..\Shared\RynthAiStatusApi.cs" Link="Shared\RynthAiStatusApi.cs" />
     <!-- RynthSort reads what the bot is doing through RynthAi.Activity (read only). -->
     <Compile Include="..\Shared\RynthAiActivityApi.cs" Link="Shared\RynthAiActivityApi.cs" />
+    <!-- RynthLua's scripts choose attack and heal spells through RynthAi.Combat. -->
+    <Compile Include="..\Shared\RynthAiCombatApi.cs" Link="Shared\RynthAiCombatApi.cs" />
     <!-- RynthNav's navmesh path queries (stuck-recovery detours outdoors). -->
     <Compile Include="..\Shared\RynthNavPathApi.cs" Link="Shared\RynthNavPathApi.cs" />
     <!-- Reading our hits out of the combat log (victim + amount); RynthTracker reads the same lines. -->
@@ -47,6 +51,11 @@
     <Compile Include="..\Shared\ActionPacer.cs" Link="Shared\ActionPacer.cs" />
     <!-- Text in the world on the Nav3D buffer (waypoint labels; RynthNav's path markers use it too). -->
     <Compile Include="..\Shared\Nav3DText.cs" Link="Shared\Nav3DText.cs" />
+    <!-- Mini Remote session stats: RynthTracker's code, so the two show the same numbers (2026-10-11). -->
+    <Compile Include="..\Shared\KillCounter.cs" Link="Shared\KillCounter.cs" />
+    <Compile Include="..\Shared\TrackerSessionStore.cs" Link="Shared\TrackerSessionStore.cs" />
+    <Compile Include="..\Shared\SessionStats.cs" Link="Shared\SessionStats.cs" />
+    <Compile Include="..\Shared\SessionStatsTracker.cs" Link="Shared\SessionStatsTracker.cs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -60,6 +69,8 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Combat\SpellData.txt" />
+    <!-- ACECustom spell catalog (Tools\Generate-SpellCatalog.ps1): Spells window + buff profiles. -->
+    <EmbeddedResource Include="Combat\SpellCatalog.tsv" />
     <!-- Creature weaknesses (ops/rynth-creature-resists.py builds both). -->
     <EmbeddedResource Include="CreatureData\creature_resists.tsv" />
     <EmbeddedResource Include="CreatureData\creature_types.txt" />

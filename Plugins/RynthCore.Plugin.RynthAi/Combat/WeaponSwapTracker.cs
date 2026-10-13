@@ -13,8 +13,13 @@ namespace RynthCore.Plugin.RynthAi;
 ///   * Retry cap: a weapon that doesn't reach the hand after <see cref="MaxTries"/> sends is
 ///     rested for <see cref="GiveUpMs"/>; combat carries on with what's in hand (logged once).
 ///   * No flip-flop: having swapped A → B, swapping back to A within <see cref="MinDwellMs"/>
-///     is held, and so is any swap once <see cref="MaxSwapsPerWindow"/> landed inside
-///     <see cref="SwapWindowMs"/>. Combat keeps fighting with B.
+///     for the same fight (the same <c>forKey</c>, the target) is held, and so is any swap once
+///     <see cref="MaxSwapsPerWindow"/> landed inside <see cref="SwapWindowMs"/>. Combat keeps
+///     fighting with B. A NEW target that wants A back gets it at once (2026-10-12, Drakkon:
+///     Lightning Quadrelle for a Giant Maggot, then the next target, a Grub weak to Bludgeon,
+///     was fought with the Quadrelle for 5-10 s until the 20 s dwell from the last swap ran out
+///     - "he attacks for about 5 seconds with the wrong element weapon"). The window cap still
+///     bounds a fight that alternates between two kinds of monster.
 /// </summary>
 internal sealed class WeaponSwapTracker
 {
@@ -44,6 +49,7 @@ internal sealed class WeaponSwapTracker
     private readonly List<DateTime> _landed = new();
     private int _lastFrom, _lastTo;
     private DateTime _lastLandedAt = DateTime.MinValue;
+    private int _askKey, _pendingKey, _lastKey;   // the fight (target id) each swap was for; 0 = unknown
 
     /// <summary>The weapon a swap is in flight for (0 = none).</summary>
     public int PendingId => _pendingId;
@@ -56,11 +62,13 @@ internal sealed class WeaponSwapTracker
 
     /// <summary>
     /// What to do about <paramref name="chosenId"/> with <paramref name="inHandId"/> in hand
-    /// (0 = nothing readable in hand).
+    /// (0 = nothing readable in hand). <paramref name="forKey"/> is the fight the weapon is
+    /// chosen for (the target id; 0 = unknown, treated as the same fight as the last swap).
     /// </summary>
-    public Step Next(int chosenId, int inHandId, DateTime now, Func<int, string>? nameOf = null)
+    public Step Next(int chosenId, int inHandId, DateTime now, Func<int, string>? nameOf = null, int forKey = 0)
     {
         HoldReason = "";
+        _askKey = forKey;
         if (chosenId == 0) return Step.InHand;
 
         if (inHandId == chosenId)
@@ -84,7 +92,8 @@ internal sealed class WeaponSwapTracker
 
         if (inHandId != 0)
         {
-            if (chosenId == _lastFrom && inHandId == _lastTo && (now - _lastLandedAt).TotalMilliseconds < MinDwellMs)
+            bool sameFight = forKey == 0 || _lastKey == 0 || forKey == _lastKey;
+            if (sameFight && chosenId == _lastFrom && inHandId == _lastTo && (now - _lastLandedAt).TotalMilliseconds < MinDwellMs)
             {
                 HoldReason = "just swapped away from it";
                 return Step.Hold;
@@ -102,6 +111,7 @@ internal sealed class WeaponSwapTracker
     /// <summary>A wield of <paramref name="id"/> was sent with <paramref name="fromId"/> in hand.</summary>
     public void Sent(int id, int fromId, DateTime now)
     {
+        _pendingKey = _askKey;   // the fight the last Next was asked about
         _pendingId = id;
         _pendingFrom = fromId;
         _pendingAt = now;
@@ -129,6 +139,7 @@ internal sealed class WeaponSwapTracker
         _landed.Clear();
         _lastFrom = _lastTo = 0;
         _lastLandedAt = DateTime.MinValue;
+        _askKey = _pendingKey = _lastKey = 0;
         HoldReason = "";
         Notice = null;
     }
@@ -139,6 +150,7 @@ internal sealed class WeaponSwapTracker
         {
             _lastFrom = _pendingFrom;
             _lastTo = _pendingId;
+            _lastKey = _pendingKey;
             _lastLandedAt = now;
             _landed.Add(now);
         }

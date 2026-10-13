@@ -21,6 +21,7 @@ public class MonsterRule : INotifyPropertyChanged
     private bool _useArc, _useBolt = true, _useRing, _useStreak, _useBlast, _useWall;
     private string _exVuln = "None";
     private int _offhandId;
+    private int _preferredAmmoItemId;
     private string _petDamage = "PAuto";
 
     public string Name        { get => _name;        set { _name        = value; OnPropertyChanged(); } }
@@ -32,7 +33,12 @@ public class MonsterRule : INotifyPropertyChanged
     /// Empty = match by name only. Kept and editable here (before 2026-10-05 an editor save
     /// dropped it, so expression rules fell back to name-only).</summary>
     public string MatchExpression { get => _matchExpression; set { _matchExpression = value ?? ""; OnPropertyChanged(); } }
-    public int    Priority    { get => _priority;    set { _priority    = value; OnPropertyChanged(); } }
+    /// <summary>Target order: a higher Priority is fought first. 0 (or less) means IGNORE: RynthAi never targets the
+    /// monster, even one attacking the player, and does not wait on it.</summary>
+    public int    Priority    { get => _priority;    set { _priority    = value; OnPropertyChanged(); OnPropertyChanged(nameof(PriorityText)); } }
+    /// <summary>What the Priority column shows: the number, or "ign" for Priority 0 (ignore).</summary>
+    [JsonIgnore]
+    public string PriorityText => _priority <= 0 ? "ign" : _priority.ToString();
     public string DamageType  { get => _damageType;  set { _damageType  = value; OnPropertyChanged(); } }
     public int    WeaponId    { get => _weaponId;    set { _weaponId    = value; OnPropertyChanged(); } }
     public bool   Fester      { get => _fester;      set { _fester      = value; OnPropertyChanged(); } }
@@ -49,6 +55,8 @@ public class MonsterRule : INotifyPropertyChanged
     public bool   UseWall     { get => _useWall;     set { _useWall     = value; OnPropertyChanged(); } }
     public string ExVuln      { get => _exVuln;      set { _exVuln      = value; OnPropertyChanged(); } }
     public int    OffhandId   { get => _offhandId;   set { _offhandId   = value; OnPropertyChanged(); } }
+    /// <summary>Optional loose ammo stack id for missile combat while this rule matches (0 = auto).</summary>
+    public int    PreferredAmmoItemId { get => _preferredAmmoItemId; set { _preferredAmmoItemId = value; OnPropertyChanged(); } }
     public string PetDamage   { get => _petDamage;   set { _petDamage   = value; OnPropertyChanged(); } }
 
     /// <summary>Every field in the file this class doesn't know (e.g. the plugin's CustomDebuffs,
@@ -57,7 +65,64 @@ public class MonsterRule : INotifyPropertyChanged
     public Dictionary<string, JsonElement>? ExtraFields { get; set; }
 
     [JsonIgnore]
+    /// <summary>True for the special row named "Default" — the catch-all when no other rule matches.</summary>
     public bool IsDefault => string.Equals(_name, "Default", System.StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Full copy (for import merge). Copies every rule field, UseBlast included.</summary>
+    public MonsterRule Clone()
+    {
+        return new MonsterRule
+        {
+            Name                = _name,
+            Category            = _category,
+            MatchExpression     = _matchExpression,
+            Priority            = _priority,
+            DamageType          = _damageType,
+            WeaponId            = _weaponId,
+            Fester              = _fester,
+            Broadside           = _broadside,
+            GravityWell         = _gravityWell,
+            Imperil             = _imperil,
+            Yield               = _yield,
+            Vuln                = _vuln,
+            UseArc              = _useArc,
+            UseBolt             = _useBolt,
+            UseRing             = _useRing,
+            UseStreak           = _useStreak,
+            UseBlast            = _useBlast,
+            ExVuln              = _exVuln,
+            OffhandId           = _offhandId,
+            PreferredAmmoItemId = _preferredAmmoItemId,
+            PetDamage           = _petDamage,
+        };
+    }
+
+    /// <summary>Overwrites combat fields (used to merge a VT Default row into the Rynth Default row).</summary>
+    public void CopyCombatSettingsFrom(MonsterRule? src)
+    {
+        if (src == null) return;
+        // Keep Name: must stay "Default". Use public setters so the grid updates.
+        Category            = src.Category;
+        MatchExpression     = src.MatchExpression;
+        Priority            = src.Priority;
+        DamageType          = src.DamageType;
+        WeaponId            = src.WeaponId;
+        Fester              = src.Fester;
+        Broadside           = src.Broadside;
+        GravityWell         = src.GravityWell;
+        Imperil             = src.Imperil;
+        Yield               = src.Yield;
+        Vuln                = src.Vuln;
+        UseArc              = src.UseArc;
+        UseBolt             = src.UseBolt;
+        UseRing             = src.UseRing;
+        UseStreak           = src.UseStreak;
+        UseBlast            = src.UseBlast;
+        ExVuln              = src.ExVuln;
+        OffhandId           = src.OffhandId;
+        PreferredAmmoItemId = src.PreferredAmmoItemId;
+        PetDamage           = src.PetDamage;
+    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
     protected void OnPropertyChanged([CallerMemberName] string? name = null)

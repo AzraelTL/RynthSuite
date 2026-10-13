@@ -422,6 +422,7 @@ public sealed class LootEditSession
     /// </summary>
     public bool Save(bool force = false)
     {
+        _writeError = null;
         if (!IsOpen) return Fail("No profile open.");
         if (_utl == null) return Fail(_readOnlyReason);
         try
@@ -441,8 +442,38 @@ public sealed class LootEditSession
         }
         catch (Exception ex)
         {
+            _writeError = ex;
             return Fail($"Save failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The exception of the last save that threw (folder not writable, file in use, ...), once:
+    /// the in-game bridge hands it to RynthAi's save-failure report (2026-10-13). Null when
+    /// the last save failed for another reason or succeeded.
+    /// </summary>
+    public Exception? TakeWriteError()
+    {
+        Exception? e = _writeError;
+        _writeError = null;
+        return e;
+    }
+
+    private Exception? _writeError;
+
+    /// <summary>
+    /// Clears the ReadOnly attribute of a file we are about to replace (a read-only profile,
+    /// its .bak or a stale .tmp can't be overwritten). Never throws.
+    /// </summary>
+    internal static void ClearReadOnly(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return;
+            FileAttributes a = File.GetAttributes(path);
+            if ((a & FileAttributes.ReadOnly) != 0) File.SetAttributes(path, a & ~FileAttributes.ReadOnly);
+        }
+        catch { }
     }
 
     /// <summary>Writes a temp file and swaps it in, the old file kept as .bak.</summary>
@@ -451,6 +482,9 @@ public sealed class LootEditSession
         string? dir = System.IO.Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
         string tmp = path + ".tmp";
+        ClearReadOnly(tmp);
+        ClearReadOnly(path);
+        ClearReadOnly(path + ".bak");
         File.WriteAllBytes(tmp, bytes);
         if (File.Exists(path))
         {
@@ -549,6 +583,7 @@ public sealed class LootEditSession
 
     private bool InsertJson(LootRule native, int index)
     {
+        _writeError = null;
         try
         {
             byte[] bytes = File.ReadAllBytes(_path);
@@ -570,6 +605,7 @@ public sealed class LootEditSession
         }
         catch (Exception ex)
         {
+            _writeError = ex;
             return Fail($"Not added: {ex.Message}");
         }
     }

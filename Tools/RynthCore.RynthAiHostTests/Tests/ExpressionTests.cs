@@ -407,6 +407,13 @@ internal static class ExpressionTests
         Is(e, "listsort[listcreate[10,9,100], `$1 - $2`]", "[9,10,100]");  // comparator
         Is(e, "listfilter[$l, ``]", "[]");
 
+        // The inner expression can quote text with escaped backticks (CQ_DragonIsle_Water.met:
+        // listfilter[...,`chatbox[\`/t \`+wobjectgetname[$1]+\`, xp\`]`] sent "0Name`").
+        e.Evaluate("setvar[names, listcreate[Lotus,Oak]]");
+        Is(e, @"listmap[$names, `\`/t \`+$1+\`, xp\``]", "[/t Lotus\\, xp,/t Oak\\, xp]");
+        Is(e, @"listfilter[$names, `$1==\`Oak\``]", "[Oak]");
+        Is(e, @"listmap[$names, `\`a\\\\b\``]", "[a\\\\b,a\\\\b]");
+
         // The loop variables are put back afterwards.
         e.Evaluate("setvar[1, mine]");
         e.Evaluate("listmap[$l, `$1`]");

@@ -23,7 +23,7 @@ namespace RynthCore.Plugin.RynthNet;
 
 public sealed partial class RynthNetPlugin : RynthPluginBase
 {
-    public const string PluginVersion = "0.1.0";
+    public const string PluginVersion = "0.1.1";
     internal static readonly IntPtr NamePointer = Marshal.StringToHGlobalAnsi("RynthNet");
     internal static readonly IntPtr VersionPointer = Marshal.StringToHGlobalAnsi(PluginVersion);
 

@@ -137,7 +137,12 @@ internal static unsafe class FakeHost
     private static IntPtr GetAccountName() => Ansi("testaccount");
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static IntPtr GetPluginInterface(IntPtr plugin, IntPtr iface, uint version) => IntPtr.Zero;
+    private static IntPtr GetPluginInterface(IntPtr plugin, IntPtr iface, uint version)
+    {
+        // RynthAi's combat hook when a test turned it on (FakeCombat); nothing else is served.
+        string p = Marshal.PtrToStringAnsi(plugin) ?? string.Empty, i = Marshal.PtrToStringAnsi(iface) ?? string.Empty;
+        return p == "RynthAi" && i == RynthCore.Plugin.Shared.RynthAiCombatApiV1.InterfaceName && version == 1 ? FakeCombat.Table() : IntPtr.Zero;
+    }
 
     // ── Objects ─────────────────────────────────────────────────────────────
 

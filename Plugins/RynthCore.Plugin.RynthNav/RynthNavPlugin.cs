@@ -28,6 +28,9 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
     internal const string PluginVersion = "0.6.6";
     internal static readonly IntPtr VersionPointer = Marshal.StringToHGlobalAnsi(PluginVersion);
 
+    /// <summary>Lets PluginExports log through this plugin's host (the base Log is protected).</summary>
+    internal void LogFromExport(string message) => Log(message);
+
     // Where the tiles, portals.tsv, locations.json and the player's atlas.txt/recalls.txt live.
     // From RYNTHNAV_NAVDATA, else "navDataDir" in %APPDATA%\RynthCore\rynthnav.json, else the
     // default (the folder the release zip and the launcher's tile updater fill). See NavDataConfig.

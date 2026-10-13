@@ -36,15 +36,34 @@ public static unsafe class PluginExports
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginShutdown", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void Shutdown()
     {
-        Runtime.Shutdown();
-        PathInterface.Release();
+        // An exception escaping an UnmanagedCallersOnly export fail-fasts the client under NativeAOT.
+        // Guard each step so one failure cannot skip the other.
+        RynthNavPlugin? plugin = Runtime.Plugin;   // Runtime.Shutdown drops it; the log needs its host
+        try { Runtime.Shutdown(); }
+        catch (Exception ex) { LogShutdownError(plugin, "Runtime.Shutdown", ex); }
+        try { PathInterface.Release(); }
+        catch (Exception ex) { LogShutdownError(plugin, "PathInterface.Release", ex); }
+    }
+
+    private static void LogShutdownError(RynthNavPlugin? plugin, string step, Exception ex)
+    {
+        try { plugin?.LogFromExport($"[RynthNav] Shutdown: {step} failed: {ex.GetType().Name}: {ex.Message}"); }
+        catch { /* never throw out of a native export */ }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginName", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetName() => RynthNavPlugin.NamePointer;
+    public static IntPtr GetName()
+    {
+        try { return RynthNavPlugin.NamePointer; }   // a static initializer that throws surfaces here (TypeInitializationException)
+        catch { return IntPtr.Zero; }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginVersion", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetVersion() => RynthNavPlugin.VersionPointer;
+    public static IntPtr GetVersion()
+    {
+        try { return RynthNavPlugin.VersionPointer; }
+        catch { return IntPtr.Zero; }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnLoginComplete", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnLoginComplete() => Runtime.OnLoginComplete();

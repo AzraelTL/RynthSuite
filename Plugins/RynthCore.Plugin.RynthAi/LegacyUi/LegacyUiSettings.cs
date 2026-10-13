@@ -13,6 +13,8 @@ public static class DashWindows
     public static bool ShowWeapons;
     public static bool ShowLua;
     public static bool ShowDungeonMap;
+    /// <summary>ILT Hub window (persisted in ilt-hub.json, not in the combat profile).</summary>
+    public static bool ShowIltHub;
 }
 
 public sealed class LegacyUiSettings
@@ -53,6 +55,20 @@ public sealed class LegacyUiSettings
     public bool  NavRecoveryEnabled = true;
     public float NavOffTrackYards = 170f;        // off track beyond this (never below 160: metas pull the bot up to ~159 yd away)
     public int   NavMaxDetourAttempts = 3;       // detours per waypoint before falling back to the escape ladder alone
+    // Dungeon patrol (/ra dunnav-patrol, Settings > Navigation > Dungeon Patrol; DungeonPatrolOptions).
+    // The defaults are the patrol as it was before these settings (2026-10-12). A running patrol
+    // is rebuilt when one changes (RynthAiCommands.TickDunPatrolReroute).
+    public int   DunPatrolCoverage;              // PatrolCoverage: 0 whole dungeon, 1 loops only, 2 everything
+    public int   DunPatrolSkipDeadEnds = 10;     // whole dungeon: dead-end areas of up to this many cells are skipped (0 = none)
+    public bool  DunPatrolAvoidFloors = true;    // lava/acid floor cells (HazardTextures.txt) kept out of the patrol
+    public float DunPatrolWallDistance = 1.0f;   // metres every patrol point keeps from walls where there is room
+    public float DunPatrolLookInSize = 10.0f;    // rooms this big (m) the patrol only skirts get a walk to their middle
+    // On: macro start, loading a Circular or Linear route, and nav taking over again after a
+    // pause that moved the character (combat, looting, buffing, doors) all head for the closest
+    // waypoint on the route. Off: a pause carries on to the waypoint it was heading for, a macro
+    // start keeps the last waypoint, and a loaded route starts at its first point. Hazard escapes
+    // and corpse runs always rejoin at the closest waypoint.
+    public bool  NavResumeNearest = true;
     public float T2Speed = 1.0f;
     public float T2DistanceTo = 0.5f;
     public float T2ReissueMs = 2000f;
@@ -69,6 +85,14 @@ public sealed class LegacyUiSettings
     public int LootProfileIdx;
     public int MetaProfileIdx = 1;
 
+    /// <summary>Buff profile buffing uses (BuffProfiles\*.json); empty = the built-in buff list.
+    /// Chosen under Loaded Files (Buffs) or with "Use for buffing" in the Spells window.</summary>
+    public string CurrentBuffProfilePath = string.Empty;
+    /// <summary>Index into the Buffs file list (0 = "Built-in").</summary>
+    public int BuffProfileIdx;
+    /// <summary>The Spells window (/ra spells) is open.</summary>
+    public bool ShowSpellsWindow;
+
     public bool EnableAutostack = true;
     public bool EnableAutocram = true;
     // VTank's ReadUnknownScrolls (default on): loot scrolls of spells the character doesn't
@@ -77,8 +101,15 @@ public sealed class LegacyUiSettings
     public bool ReadUnknownScrolls = true;
     public bool EnableCombineSalvage = true;
     public bool CombineBagsDuringSalvage = true;
+    // Salvage (and combine bags) by sending the 0x027D salvage request straight to the server, no
+    // salvage panel on screen (engine API v82 SalvageDirect; default on, the panel when unsupported).
+    public bool SalvageWithoutPanel = true;
 
     public bool ShowTargetStaminaMana;
+
+    /// <summary>Mag-style item info (/ra iteminfo): on-select, per-field visibility, chat type, prefix.
+    /// Edited in the "RynthAi Item Info" window.</summary>
+    public RynthCore.Plugin.RynthAi.ItemInfo.MagItemInfoSettings ItemInfoSettings = new();
 
     public bool EnableMissileCrafting = true;
     public int MissileCraftAmmoThreshold = 1000;
@@ -127,6 +158,12 @@ public sealed class LegacyUiSettings
     public int StaminaToHealthAt = 30;
     public int StaminaToHealthMinStamina = 20;
     public bool StopMacroOnDeath = false;
+    // Recall On Death (RynthAiPlugin.DeathRecall.cs): after a death while the macro ran, once
+    // respawned: 0 off, 1 cast DeathRecallSpellId, 2 use the inventory item named DeathRecallItem
+    // (exact name, else the first containing it). Travel Back To My Corpse starts after it.
+    public int DeathRecallMode = 0;
+    public int DeathRecallSpellId = 48;          // Primary Portal Recall
+    public string DeathRecallItem = string.Empty;
     public bool StopMacroOnNoComponents = false;
     public bool StopLootingWhenPackFull = true;
     public bool StopMacroWhenPackFull = false;
@@ -182,6 +219,8 @@ public sealed class LegacyUiSettings
     public const float FollowNavMinLowest = 0.5f, FollowNavMinHighest = 20f;
     public static float ClampFollowNavMin(float yards) =>
         float.IsNaN(yards) ? 1.5f : Math.Clamp(yards, FollowNavMinLowest, FollowNavMinHighest);
+    /// <summary>Marker colours, waypoint HUD / labels, breadcrumb trail and recording options.</summary>
+    public NavOverlaySettings NavOverlay = new();
     public float NavRingThickness = 6.0f;
     public float NavLineThickness = 6.0f;
     public float NavHeightOffset = 0.05f;
@@ -228,12 +267,9 @@ public sealed class LegacyUiSettings
     /// on the way as usual, recover the corpse, then carry on. Off by default.
     /// </summary>
     public bool TravelToOwnCorpse;
-    /// <summary>
-    /// Selecting an item prints its details to chat (/ra iteminfo, Mag-Tools style),
-    /// identifying it first when needed. Items RynthAi selects itself are skipped. On by default.
-    /// </summary>
-    public bool ItemInfoOnSelect = true;
     public bool LootOnlyRareCorpses;
+    /// <summary>Also pick up loose ground items that match the loot profile, within the corpse max range.</summary>
+    public bool EnableGroundLoot;
     public bool PeaceModeWhenIdle = true;
     public bool RebuffWhenIdle;
     /// <summary>
@@ -259,6 +295,23 @@ public sealed class LegacyUiSettings
     /// as on for good (the behaviour before 2026-10-05).
     /// </summary>
     public bool CastBuffsOverItemBuffs = true;
+    /// <summary>
+    /// In a buff pass, send the next buff as soon as the server answers the last one with
+    /// UseDone(0), without waiting for the client to finish the cast's recoil animation
+    /// (Combat/BuffCastChain.cs). Every other gate stays, and a refusal turns it off for the
+    /// rest of the pass. On by default; off = every buff waits for the animation (the
+    /// behaviour without the chain). A profile saved before this setting existed loads it as on.
+    /// </summary>
+    public bool FastBuffChain = true;
+    /// <summary>
+    /// Leave out the weapon enchantments this character has no use for: Blood Drinker / Heart Seeker /
+    /// Swift Killer without a melee or missile weapon (listed or in hand), Spirit Drinker / Hermetic
+    /// Link without a wand (listed, in hand, or the pack wand buffing would wield), Defender without
+    /// either. Also reports, once per run, what was left out. On by default; a profile saved before
+    /// this setting existed loads it as on. Off = the weapon enchantments are cast regardless of
+    /// listed weapons. A mastery for an untrained skill is never cast, whatever this says.
+    /// </summary>
+    public bool SkipUnusableBuffs = true;
     /// <summary>
     /// Buff base names the player unticked in Buffing settings (the Protections and Banes grid,
     /// e.g. "Fire Protection Self", "Flame Bane"): left out of the buff list, so never cast and
@@ -297,6 +350,15 @@ public sealed class LegacyUiSettings
     /// </summary>
     public bool YieldToVTank = true;
 
+    /// <summary>
+    /// Server Features (Settings > Misc): world names that turn on the ILT Hub, the Skills
+    /// panel's Progression planners and the attribute raiser ('*' wildcard, case-insensitive).
+    /// See IltHub/ServerFeatureGate. A profile saved before this existed loads the defaults.
+    /// </summary>
+    public List<string> FeatureServerNames { get; set; } = new(IltHub.ServerFeatureGate.DefaultServerNames);
+    /// <summary>Manual override: treat the current world as feature-enabled whatever its name.</summary>
+    public bool ForceServerFeatures;
+
     public int BlacklistAttempts = 3;
     public int BlacklistTimeoutSec = 30;
     /// <summary>
@@ -331,6 +393,30 @@ public sealed class LegacyUiSettings
     public int T11ItemAugsOverride = -1;
 
     public int SpellCastIntervalMs = 400;
+
+    /// <summary>
+    /// Stuck-cast breaker (Plugins/Shared/ActionPacer.cs): the longest a cast may stay unanswered
+    /// (ms from the send; no result, no UseDone) before it is broken with a jump (a Peace mode
+    /// request when the engine can't jump). It fires sooner, about 2 s past the spell's normal
+    /// cycle, when that is shorter. Nothing is cast meanwhile once the server says 'too busy'.
+    /// 0 = no breaker.
+    /// </summary>
+    public int StuckCastBreakMs = 8000;
+
+    /// <summary>
+    /// Recovery vitals (Heal Self, Stamina to Health, Revitalize, Stamina to Mana) refused for
+    /// "not enough mana" are tried again after this many ms, for a better Mana Conversion roll
+    /// (ACE rolls the cost on every attempt and a refusal costs nothing). Clamped to 200..5000;
+    /// at most 5 tries a second and 20 refusals in a row, then the old 15 s family rest.
+    /// </summary>
+    public int RecoveryRetryMs = 200;
+
+    /// <summary>
+    /// HP failsafe: at or under Emergency Heal At with heals failing for a while, the stuck-cast
+    /// breaker runs and the heal is tried again; when that fails too, recall to the lifestone.
+    /// Off: the breaker still runs, no recall.
+    /// </summary>
+    public bool HpFailsafeRecall = true;
 
     /// <summary>
     /// Minimum delay between offensive (war/void) COMBAT spell casts, in ms.
@@ -484,6 +570,8 @@ public sealed class LegacyUiSettings
 
     public List<MonsterRule> MonsterRules { get; set; } = new();
     public List<ItemRule> ItemRules { get; set; } = new();
+    /// <summary>Loose ammo the monster rules can prefer. Edited by the local monsters window.</summary>
+    public List<AmmoRule> AmmoRules { get; set; } = new();
     public List<ConsumableRule> ConsumableRules { get; set; } = new();
     public List<BuffRule> BuffRules { get; set; } = new();
     public List<MetaRule> MetaRules { get; set; } = new();
@@ -691,6 +779,8 @@ public sealed class MonsterRule
     /// 2 Shield, 3 Offhand weapon, 4 None (OffhandRules.Rule*); any other value is a listed
     /// item to wield there (the old per-rule picker).</summary>
     public int OffhandId { get; set; }
+    /// <summary>Optional loose ammo stack id for missile combat while this rule matches (0 = auto).</summary>
+    public int PreferredAmmoItemId { get; set; }
     public string PetDamage { get; set; } = "PAuto";
     /// <summary>Debuffs the player typed in (Damage panel), comma separated: a spell's base
     /// name ("Corrosion Vulnerability Other") casts its best known tier; a full name casts as is.</summary>
@@ -706,6 +796,11 @@ public sealed class BuffRule
 
 public sealed class ItemRule
 {
+    /// <summary>Action string for a listed weapon (VirindiTank import and the ILT gear importer).</summary>
+    public const string WeaponAction = "Weapon";
+    /// <summary>Action string for a listed shield.</summary>
+    public const string ShieldAction = "Shield";
+
     public int Id { get; set; }
     public string Name { get; set; } = string.Empty;
     public string Action { get; set; } = "Loot";
@@ -715,6 +810,18 @@ public sealed class ItemRule
     /// (not known, or an entry from before sources were kept).</summary>
     public string ElementSource { get; set; } = "";
     public bool KeepBuffed { get; set; } = true;
+
+    /// <summary>True when this row is a shield (off hand), not a main-hand weapon.</summary>
+    public bool IsShield() => string.Equals(Action, ShieldAction, StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>Loose ammo the monster rules can prefer (bow, crossbow, atlatl, or Auto).</summary>
+public sealed class AmmoRule
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    /// <summary>Bow, Crossbow, Atlatl, or Auto (match any launcher).</summary>
+    public string Category { get; set; } = "Auto";
 }
 
 /// <summary>JSON wire-format types used by the engine-side Avalonia MonstersPanel.</summary>
@@ -787,6 +894,20 @@ public sealed class NavBridgePayload
     public int               ActiveNavIndex   { get; set; }
     public List<string>      NavFiles         { get; set; } = new();
     public List<NavBridgePoint> Points        { get; set; } = new();
+    /// <summary>Map editing commands understood (NavMapEdit.Version): addPointAt, movePointTo,
+    /// setActive. The engine's Dungeon Map only offers editing when this is 1 or more.</summary>
+    public int               MapEdit          { get; set; }
+    /// <summary>NavOverlaySettings.TrackBreadcrumbs (Nav panel "Breadcrumbs" toggle).</summary>
+    public bool              TrackBreadcrumbs { get; set; }
+    /// <summary>NavOverlaySettings.ShowRouteMarkers (Nav panel "Route overlay" toggle).</summary>
+    public bool              ShowRouteOverlay { get; set; }
+    /// <summary>Route recording is on (/ra navrec).</summary>
+    public bool              IsRecording      { get; set; }
+    /// <summary>Breadcrumb trail since the last teleport: point count and walked yards.</summary>
+    public int               TrailPoints      { get; set; }
+    public double            TrailYards       { get; set; }
+    /// <summary>Result of the last route edit ("Route reversed."), empty once it is a few seconds old.</summary>
+    public string            EditStatus       { get; set; } = string.Empty;
 }
 
 /// <summary>One-shot command sent from the Avalonia NavPanel to the plugin.</summary>
@@ -800,6 +921,15 @@ public sealed class NavCommand
     public int    InsertAt  { get; set; } = -1;
     public string NavName   { get; set; } = string.Empty;
     public string Text      { get; set; } = string.Empty;   // addChat: the command or text
+    public double NS        { get; set; }                   // addPointAt / movePointTo (nav coords)
+    public double EW        { get; set; }
+    public double Z         { get; set; }                   // nav Z (world Z / 240)
+    public bool   On        { get; set; }                   // setBreadcrumbs / setRouteOverlay / setRecording
+    public List<int> Indices { get; set; } = new();         // movePoints / duplicatePoints / deletePoints
+    public int    Delta     { get; set; }                   // movePoints: -1 up, +1 down
+    public double Seconds   { get; set; }                   // addPause
+    public double Yards     { get; set; }                   // simplifyRoute tolerance
+    public bool   Reverse   { get; set; }                   // trailToRoute: backtrack (walk the trail in reverse)
 }
 
 /// <summary>Bridge payload for the engine-side Avalonia SettingsPanel.</summary>
@@ -824,8 +954,20 @@ public sealed class SettingsBridgePayload
     public bool PeaceModeWhenIdle { get; set; }
     public bool StartMacroOnLogin { get; set; }
     public bool PatrolOnLogin { get; set; }
+    // Dungeon patrol. Nullable: an engine that predates them doesn't send them, and its save
+    // must leave them alone.
+    public int? DunPatrolCoverage { get; set; }
+    public int? DunPatrolSkipDeadEnds { get; set; }
+    public bool? DunPatrolAvoidFloors { get; set; }
+    public float? DunPatrolWallDistance { get; set; }
+    public float? DunPatrolLookInSize { get; set; }
     // Absent from an older engine's payload: must not read as off.
     public bool YieldToVTank { get; set; } = true;
+    // Server Features: the list travels as one comma-separated string (the engine's text row).
+    public string FeatureServerNames { get; set; } = string.Join(", ", IltHub.ServerFeatureGate.DefaultServerNames);
+    public bool ForceServerFeatures { get; set; }
+    // Read-only status line for Settings > Misc (ignored when the engine sends it back).
+    public string ServerFeaturesStatus { get; set; } = string.Empty;
     public bool EnableRaycasting { get; set; }
     public bool UseArcs { get; set; }
     public float BowArcVelocity { get; set; }
@@ -856,6 +998,10 @@ public sealed class SettingsBridgePayload
     public int StaminaToHealthMinStamina { get; set; } = 20;
     public bool StopMacroOnDeath { get; set; }
     public bool StopMacroOnNoComponents { get; set; }
+    // Absent from an older engine: null keeps the plugin's values.
+    public int? DeathRecallMode { get; set; }
+    public int? DeathRecallSpellId { get; set; }
+    public string? DeathRecallItem { get; set; }
     public bool StopLootingWhenPackFull { get; set; }
     public bool StopMacroWhenPackFull { get; set; }
     public int RestamAt { get; set; }
@@ -921,6 +1067,7 @@ public sealed class SettingsBridgePayload
     // Absent from an older engine: -1 / null keep the plugin's value.
     public int NavLabelMode { get; set; } = -1;
     public bool? NavGuideLine { get; set; }
+    public bool? NavResumeNearest { get; set; }
     public bool OpenDoors { get; set; }
     public float OpenDoorRange { get; set; }
     public bool AutoUnlockDoors { get; set; }
@@ -949,6 +1096,7 @@ public sealed class SettingsBridgePayload
     // Nullable: an engine that predates the setting doesn't send it, and a save from its
     // Settings face must leave the setting alone rather than force it either way.
     public bool? CastBuffsOverItemBuffs { get; set; }
+    public bool? SkipUnusableBuffs { get; set; }
     // Null (absent) likewise leaves the unticked prots/banes alone; an empty list ticks them all.
     public List<string>? DisabledBuffs { get; set; }
     public int BuffMinSkillLevelTier1 { get; set; }
@@ -978,11 +1126,13 @@ public sealed class SettingsBridgePayload
     public bool? LootOwnCorpse { get; set; }
     public bool? EscapeHazards { get; set; }
     public bool? TravelToOwnCorpse { get; set; }
+    // Item info: describe an item in chat when it is selected (ItemInfoSettings.OnSelect).
     public bool? ItemInfoOnSelect { get; set; }
     public bool EnableAutostack { get; set; }
     public bool ReadUnknownScrolls { get; set; } = true;   // absent from an older engine: keep the default
     public bool EnableCombineSalvage { get; set; }
     public bool CombineBagsDuringSalvage { get; set; }
+    public bool? SalvageWithoutPanel { get; set; }   // absent from an older engine: unchanged
     public int LootInterItemDelayMs { get; set; }
     public int LootContentSettleMs { get; set; }
     public int LootEmptyCorpseMs { get; set; }
@@ -1012,6 +1162,19 @@ public sealed class SettingsBridgePayload
     // The off hand (only when the sender includes them; today's engine Settings face doesn't).
     public string? OffhandDefault { get; set; }
     public bool? PreferDualWield { get; set; }
+
+    // Ground loot (GroundLootController; also /ra groundloot on|off).
+    public bool EnableGroundLoot { get; set; }
+
+    // Diagnostics. Stored per PC in Logs\Diagnostics\diagnostics.json (RynthLog), not in
+    // the character profile; applied only when a value differs, so a save of other
+    // settings doesn't rewrite that file.
+    public bool DiagDebugToChat { get; set; }
+    public bool DiagFileLogAll { get; set; } = true;
+    /// <summary>Every trace category as "Name=Level" joined by ','; Level 0 = Off, 1 = Trace, 2 = Info.</summary>
+    public string DiagCategories { get; set; } = string.Empty;
+    /// <summary>Read-only: the diagnostics folder, shown under the switches.</summary>
+    public string DiagFolder { get; set; } = string.Empty;
 }
 
 public enum MetaConditionType

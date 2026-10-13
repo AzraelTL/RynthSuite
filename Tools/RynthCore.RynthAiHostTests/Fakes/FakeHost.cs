@@ -85,11 +85,19 @@ internal static unsafe class FakeHost
     public static readonly List<bool> AutoRunCalls = new();
     public static bool AutoRun;
     public static int Jumps;
+    /// <summary>Runs inside CastSpell, after the cast is recorded (a UseDone that lands during the send).</summary>
+    public static Action? AfterCastSpell;
     /// <summary>Opt-in: wires TapJump (the keyboard jump, 0xF61B); calls land in <see cref="TapJumps"/>.</summary>
     public static bool TapJumpCalls;
     public static int TapJumps;
+    /// <summary>TapJump returns 0 (the client refused the jump); the call still counts in TapJumps.</summary>
+    public static bool TapJumpRefuse;
     public static int Turns;
     public static readonly List<(uint Target, int SpellId)> Casts = new();
+    /// <summary>True: CastSpell returns false (the client refused it; nothing is recorded in <see cref="Casts"/>).</summary>
+    public static bool CastRefused;
+    /// <summary>CastSpell calls refused while <see cref="CastRefused"/> was set.</summary>
+    public static int CastsRefused;
     /// <summary>Opt-in: wires GiveObjectTo (AC's give action); every call lands in <see cref="Gives"/>.</summary>
     public static bool GiveCalls;
     /// <summary>Every GiveObjectTo (item, target, amount; 0 = the whole object), in order.</summary>
@@ -111,14 +119,25 @@ internal static unsafe class FakeHost
     /// <summary>Every UseObject (a wield, a use) and RequestId (an identify), in order.</summary>
     public static readonly List<uint> Uses = new();
     public static readonly List<uint> IdRequests = new();
+    /// <summary>Opt-in (set before Create): QueryHealth (counted in <see cref="HealthQueries"/>) and GetLastIdTime (answering <see cref="IdTimes"/>, 0 = never).</summary>
+    public static bool TargetCalls;
+    public static readonly List<uint> HealthQueries = new();
+    public static readonly Dictionary<uint, long> IdTimes = new();
     /// <summary>Every MoveItemInternal (an item into a pack), in order (opt-in with <see cref="WeaponCalls"/>).</summary>
     public static readonly List<(uint Id, uint Pack, int Amount)> Moves = new();
     /// <summary>Objects the fake says have appraisal data (HasAppraisalData).</summary>
     public static readonly HashSet<uint> Appraised = new();
+    /// <summary>False = RequestId refuses (as the engine does around a teleport or a death): returns 0
+    /// and is counted in <see cref="RefusedIdRequests"/>, not in <see cref="IdRequests"/>.</summary>
+    public static bool RequestIdAccepts = true;
+    public static int RefusedIdRequests;
     /// <summary>Opt-in (set before Create): UseObject, RequestId, HasAppraisalData and
     /// GetCurrentCombatMode (answering <see cref="CombatModeValue"/>). Tests written without
     /// them keep seeing those calls as absent.</summary>
     public static bool WeaponCalls;
+    /// <summary>Opt-in GetContainerContents answering from <see cref="Containers"/> (item -> container),
+    /// in insertion order. Off by default: see the class note.</summary>
+    public static bool ContentsCalls;
     /// <summary>The engine's VTank signal (API v74 GetVTankState flags: 1 = watching, 2 = running);
     /// -1 = not installed (an engine before v74). Opt-in: set before Create().</summary>
     public static int VTankFlags = -1;
@@ -135,11 +154,22 @@ internal static unsafe class FakeHost
     public static void UseDone(uint error) { UseDoneSeq++; LastUseDoneError = error; }
     /// <summary>1 while a cast gesture animates (GetCastBusyState), else 0.</summary>
     public static int CastBusy;
+    /// <summary>Opt-in (set before Create): GetLastWeenieError, answering the fields below.</summary>
+    public static bool WeenieErrorCalls;
+    public static int WeenieErrSeq;
+    public static uint WeenieErrCode, WeenieErrEvent, WeenieErrObject;
+    /// <summary>The server refused something: 0x028A WeenieError, or 0x00A0 InventoryServerSaveFailed (obj = the item).</summary>
+    public static void WeenieError(uint code, uint evt = 0x028A, uint obj = 0)
+    { WeenieErrSeq++; WeenieErrCode = code; WeenieErrEvent = evt; WeenieErrObject = obj; }
     public static int VTankSeq;
     public static int CombatModeValue = 1;
     /// <summary>Opt-in (set before Create): ChangeCombatMode, recorded in <see cref="CombatModeRequests"/>.</summary>
     public static bool CombatModeCalls;
     public static readonly List<int> CombatModeRequests = new();
+    /// <summary>True: ChangeCombatMode returns 0 (the engine refused, e.g. around a teleport) and records nothing in <see cref="CombatModeRequests"/>.</summary>
+    public static bool CombatModeRefuse;
+    /// <summary>ChangeCombatMode calls refused while <see cref="CombatModeRefuse"/> was set.</summary>
+    public static int CombatModeRefusals;
     /// <summary>Opt-in (set before Create): WieldItem (a wield into a named slot, API v70+). The
     /// host then reports API version 73, so only tests that ask for it see the newer calls.</summary>
     public static bool WieldCalls;
@@ -161,6 +191,14 @@ internal static unsafe class FakeHost
     public static Action<List<uint>>? OnSalvageExecute;
     /// <summary>Item id -> wielded location: GetObjectWielderInfo says the player wields it there.</summary>
     public static readonly Dictionary<uint, uint> Wielded = new();
+    /// <summary>Opt-in (set before Create): SalvageDirect (API v82, salvage without the panel).</summary>
+    public static bool SalvageDirectCalls;
+    /// <summary>Every SalvageDirect (UST, ids), in order (opt-in with <see cref="SalvageDirectCalls"/>).</summary>
+    public static readonly List<(uint Tool, List<uint> Ids)> SalvageDirects = new();
+    /// <summary>What SalvageDirect answers; null = the count of ids (sent). -1 = sender not bound.</summary>
+    public static int? SalvageDirectAnswer;
+    /// <summary>Called on a sent SalvageDirect with (UST, ids) (the test plays the server here).</summary>
+    public static Action<uint, List<uint>>? OnSalvageDirect;
     private static readonly List<uint> _panelItems = new();
     /// <summary>Opt-in (set before Create): CloseContainer (API v76; the host then reports at
     /// least v76) and GetGroundContainerId (answering <see cref="GroundContainer"/>).</summary>
@@ -208,22 +246,25 @@ internal static unsafe class FakeHost
         ServerTime = 0; Vitae = 1.0f; Portaling = false; PlayerPose = default; HasPose = true;
         Vitals = default; BaseVitals = default; WorldName = ""; AccountName = "";
         HeadingDeg = 0; Wcids.Clear(); Spellbook.Clear(); PlayerIdValue = 0;
-        Logs.Clear(); Chat.Clear(); ChatCommands.Clear();
-        AutoRunCalls.Clear(); AutoRun = false; Jumps = 0; TapJumpCalls = false; TapJumps = 0; Turns = 0; Casts.Clear(); StopCalls = false; Stops = 0; SetMotionCalls = false; MotionCalls.Clear(); Sent.Clear(); GiveCalls = false; Gives.Clear(); GiveLands = true;
-        Uses.Clear(); IdRequests.Clear(); Moves.Clear(); Appraised.Clear(); WeaponCalls = false; CombatModeValue = 1;
+        Logs.Clear(); Chat.Clear(); ChatCommands.Clear(); AfterCastSpell = null;
+        AutoRunCalls.Clear(); AutoRun = false; Jumps = 0; TapJumpCalls = false; TapJumps = 0; TapJumpRefuse = false; Turns = 0; Casts.Clear(); CastRefused = false; CastsRefused = 0; StopCalls = false; Stops = 0; SetMotionCalls = false; MotionCalls.Clear(); Sent.Clear(); GiveCalls = false; Gives.Clear(); GiveLands = true;
+        Uses.Clear(); IdRequests.Clear(); TargetCalls = false; HealthQueries.Clear(); IdTimes.Clear(); Moves.Clear(); Appraised.Clear(); WeaponCalls = false; ContentsCalls = false; CombatModeValue = 1;
+        RequestIdAccepts = true; RefusedIdRequests = 0;
         VTankFlags = -1; VTankSeq = 0; LogCostMicros = 0;
         ServerGates = false; UseDoneSeq = 0; CastBusy = 0; LastUseDoneError = 0; LastUseDoneCalls = false;
+        WeenieErrorCalls = false; WeenieErrSeq = 0; WeenieErrCode = WeenieErrEvent = WeenieErrObject = 0;
         // Spell mana costs "unknown" (no reserve beyond Get Mana At, no cost gate), so a portal.dat on
         // the PC doesn't change results; the mana reserve tests set their own costs.
         RynthCore.Plugin.RynthAi.BuffManager.ManaCostOverride = _ => 0;
         WieldCalls = false; Wields.Clear();
         SalvageCalls = false; ExternalMoves.Clear(); SalvageAdds.Clear(); SalvageExecutes.Clear();
         RefuseSalvageAdd.Clear(); OnSalvageExecute = null; Wielded.Clear(); _panelItems.Clear();
+        SalvageDirectCalls = false; SalvageDirects.Clear(); SalvageDirectAnswer = null; OnSalvageDirect = null;
         CloseContainerCalls = false; Closes.Clear(); GroundContainer = 0;
         SelectedItem = 0;
         UseOnCalls = false; UsesOn.Clear();
         PluginCommandCalls = false; PluginCommandDelivered = true; PluginCommands.Clear();
-        CombatModeCalls = false; CombatModeRequests.Clear();
+        CombatModeCalls = false; CombatModeRequests.Clear(); CombatModeRefuse = false; CombatModeRefusals = 0;
         BusyCalls = false; ForceResets = 0; BusyStateValue = 0;
     }
 
@@ -259,6 +300,8 @@ internal static unsafe class FakeHost
             api.GetPlayerIdFn       = (IntPtr)(delegate* unmanaged[Cdecl]<uint>)&GetPlayerId;
         if (Containers.Count > 0 || Wielders.Count > 0)
             api.GetObjectOwnershipInfoFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint*, uint*, uint*, int>)&GetObjectOwnershipInfo;
+        if (ContentsCalls)
+            api.GetContainerContentsFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint*, int, int>)&GetContainerContents;
         if (Bitfields.Count > 0)
             api.GetObjectBitfieldFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint>)&GetObjectBitfield;
         if (InstanceIds.Count > 0)
@@ -290,6 +333,11 @@ internal static unsafe class FakeHost
             api.GetCurrentCombatModeFn = (IntPtr)(delegate* unmanaged[Cdecl]<int>)&GetCurrentCombatMode;
             api.MoveItemInternalFn     = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint, int, int, int>)&MoveItemInternal;
         }
+        if (TargetCalls)
+        {
+            api.QueryHealthFn   = (IntPtr)(delegate* unmanaged[Cdecl]<uint, int>)&QueryHealth;
+            api.GetLastIdTimeFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, long>)&GetLastIdTime;
+        }
         if (SalvageCalls)
         {
             api.UseObjectFn            = (IntPtr)(delegate* unmanaged[Cdecl]<uint, int>)&UseObject;
@@ -298,6 +346,11 @@ internal static unsafe class FakeHost
             api.SalvagePanelAddItemFn  = (IntPtr)(delegate* unmanaged[Cdecl]<uint, int>)&SalvagePanelAddItem;
             api.SalvagePanelExecuteFn  = (IntPtr)(delegate* unmanaged[Cdecl]<int>)&SalvagePanelExecute;
             api.GetObjectWielderInfoFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint*, uint*, int>)&GetObjectWielderInfo;
+        }
+        if (SalvageDirectCalls)
+        {
+            api.Version = Math.Max(api.Version, 82u);
+            api.SalvageDirectFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint*, int, int>)&SalvageDirect;
         }
         if (CombatModeCalls)
             api.ChangeCombatModeFn  = (IntPtr)(delegate* unmanaged[Cdecl]<int, int>)&ChangeCombatMode;
@@ -351,6 +404,8 @@ internal static unsafe class FakeHost
             if (LastUseDoneCalls)
                 api.GetLastUseDoneFn = (IntPtr)(delegate* unmanaged[Cdecl]<int*, uint*, int>)&GetLastUseDone;
         }
+        if (WeenieErrorCalls)
+            api.GetLastWeenieErrorFn = (IntPtr)(delegate* unmanaged[Cdecl]<int*, uint*, uint*, uint*, int>)&GetLastWeenieError;
         if (VTankFlags >= 0)
         {
             api.Version = Math.Max(api.Version, 74u);
@@ -427,6 +482,13 @@ internal static unsafe class FakeHost
     private static int GetCastBusyState() => CastBusy;
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetLastWeenieError(int* seq, uint* error, uint* eventType, uint* objectId)
+    {
+        *seq = WeenieErrSeq; *error = WeenieErrCode; *eventType = WeenieErrEvent; *objectId = WeenieErrObject;
+        return 1;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int GetLastUseDone(int* seq, uint* error)
     {
         *seq = UseDoneSeq;
@@ -476,6 +538,15 @@ internal static unsafe class FakeHost
         *wielder = w;
         *location = 0;
         return 1;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetContainerContents(uint container, uint* output, int max)
+    {
+        int n = 0;
+        foreach (var kv in Containers)
+            if (kv.Value == container && n < max) output[n++] = kv.Key;
+        return n;
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -651,10 +722,10 @@ internal static unsafe class FakeHost
     private static int JumpNonAutonomous(float extent) { Jumps++; return 1; }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static int TapJump() { TapJumps++; return 1; }
+    private static int TapJump() { TapJumps++; return TapJumpRefuse ? 0 : 1; }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static int CastSpell(uint target, int spellId) { Casts.Add((target, spellId)); Sent.Add($"cast {spellId}"); return 1; }
+    private static int CastSpell(uint target, int spellId) { if (CastRefused) { CastsRefused++; return 0; } Casts.Add((target, spellId)); Sent.Add($"cast {spellId}"); AfterCastSpell?.Invoke(); return 1; }
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int StopCompletely() { Stops++; Sent.Add("stop"); return 1; }
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -672,7 +743,7 @@ internal static unsafe class FakeHost
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int GetCurrentCombatMode() => CombatModeValue;
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static int ChangeCombatMode(int mode) { CombatModeRequests.Add(mode); return 1; }
+    private static int ChangeCombatMode(int mode) { if (CombatModeRefuse) { CombatModeRefusals++; return 0; } CombatModeRequests.Add(mode); return 1; }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int UseObject(uint id) { Uses.Add(id); return 1; }
@@ -715,6 +786,17 @@ internal static unsafe class FakeHost
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int SalvageDirect(uint tool, uint* ids, int count)
+    {
+        var list = new List<uint>();
+        for (int i = 0; i < count; i++) list.Add(ids[i]);
+        SalvageDirects.Add((tool, list));
+        int answer = SalvageDirectAnswer ?? count;
+        if (answer > 0) OnSalvageDirect?.Invoke(tool, list);
+        return answer;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int GetObjectWielderInfo(uint id, uint* wielder, uint* location)
     {
         if (!Wielded.TryGetValue(id, out uint loc)) return 0;
@@ -724,7 +806,18 @@ internal static unsafe class FakeHost
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static int RequestId(uint id) { IdRequests.Add(id); return 1; }
+    private static int RequestId(uint id)
+    {
+        if (!RequestIdAccepts) { RefusedIdRequests++; return 0; }
+        IdRequests.Add(id);
+        return 1;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int QueryHealth(uint id) { HealthQueries.Add(id); return 1; }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static long GetLastIdTime(uint id) => IdTimes.TryGetValue(id, out long t) ? t : 0L;
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int HasAppraisalData(uint id) => Appraised.Contains(id) ? 1 : 0;

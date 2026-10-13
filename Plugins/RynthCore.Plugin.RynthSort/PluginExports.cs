@@ -27,7 +27,7 @@ public static unsafe class PluginExports
     public static IntPtr GetName() => LiteralPointer("RynthSort"u8);
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginVersion", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetVersion() => LiteralPointer("0.3.0"u8);
+    public static IntPtr GetVersion() => LiteralPointer("0.3.1"u8);
 
     private static IntPtr LiteralPointer(ReadOnlySpan<byte> literal)
     {
@@ -50,6 +50,21 @@ public static unsafe class PluginExports
     // A vendor window (for engines without vendor info, API v67, these are the only signal).
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnVendorOpen", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnVendorOpen(uint vendorId) => Runtime.OnVendorOpen(vendorId);
+
+    // The engine's RynthAi dashboard toggle: polls the auto-sort state (-1 not logged in,
+    // 0 off, 1 on; twice a second, any thread) and sends "on quiet" / "off quiet" (UTF-8,
+    // without "/rsort"; queued, runs on the tick).
+    [UnmanagedCallersOnly(EntryPoint = "RynthSortAutoState", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int AutoState()
+    {
+        try { return Runtime.Plugin?.AutoState ?? -1; } catch { return -1; }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "RynthSortCommand", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void Command(IntPtr utf8)
+    {
+        try { if (utf8 != IntPtr.Zero) Runtime.Plugin?.EnqueueCommand(Marshal.PtrToStringUTF8(utf8)); } catch { }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnVendorClose", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnVendorClose(uint vendorId) => Runtime.OnVendorClose(vendorId);

@@ -91,6 +91,26 @@ internal sealed class PetManager
     internal static Func<long> Clock { get; set; } = static () => Environment.TickCount64;
     private static long NowMs => Clock();
 
+    /// <summary>
+    /// Optional ILT Hub hook: when it returns true an EMPTY essence is used anyway, because
+    /// the server's Summon Essence Refill Charm refills it from banked pyreals on use.
+    /// Null (default) keeps the retail behaviour (spirit refill or park).
+    /// </summary>
+    public Func<bool>? AllowSummonOnEmpty { get; set; }
+
+    /// <summary>
+    /// Optional ILT Hub hook: while it returns true no combat summon is started (e.g. the
+    /// healing-pet helper has its heal pet out). Null (default) never holds.
+    /// </summary>
+    public Func<bool>? HoldSummons { get; set; }
+
+    /// <summary>
+    /// Optional ILT Hub hook, called when a pet already holds the slot and monsters are near.
+    /// Returns true after dismissing a non-combat (cosmetic) pet so a combat pet can follow.
+    /// Null (default) leaves whatever pet is out alone.
+    /// </summary>
+    public Func<bool>? YieldPetForCombat { get; set; }
+
     public PetManager(RynthCoreHost host, LegacyUiSettings settings,
                       WorldObjectCache objectCache, CombatManager? combat,
                       CharacterSkills? skills)
@@ -129,7 +149,7 @@ internal sealed class PetManager
             bool spiritGone = _activeSpiritId != 0 && _objectCache[_activeSpiritId] == null;
             if (spiritGone || DeviceHasCharges(_activeDeviceId))
             {
-                _host.Log($"[RynthAi] Pet: refill complete (essence 0x{(uint)_activeDeviceId:X8}).");
+                RynthLog.Write(LogCat.Pets, $"[RynthAi] Pet: refill complete (essence 0x{(uint)_activeDeviceId:X8}).");
                 GoIdle();
             }
         }
@@ -138,7 +158,7 @@ internal sealed class PetManager
         // decrement that never lands), and waiting on it would wedge the subsystem.
         if (_state != PetState.Idle && now - _actionIssuedAt > ActionTimeoutMs)
         {
-            _host.Log($"[RynthAi] Pet: action timeout in {_state} after {now - _actionIssuedAt}ms (essence 0x{(uint)_activeDeviceId:X8}); cooling down.");
+            RynthLog.Write(LogCat.Pets, $"[RynthAi] Pet: action timeout in {_state} after {now - _actionIssuedAt}ms (essence 0x{(uint)_activeDeviceId:X8}); cooling down.");
             if (_activeDeviceId != 0)
                 _deviceCooldownUntil[_activeDeviceId] = now + DeviceFailCooldownMs;
             // A summon that we simply couldn't confirm very likely DID work — assume
@@ -176,6 +196,10 @@ internal sealed class PetManager
             {
                 _host.Log($"[RynthAi] Pet: essence 0x{(uint)_activeDeviceId:X8} reports empty; will refill.");
                 _serverSaidFullUntil.Remove(_activeDeviceId);   // really empty: the read is right again
+                // The server-side pyreal refill didn't happen (charm off / no pyreals):
+                // park the essence so the empty-summon path can't spin on it.
+                if (AllowSummonOnEmpty?.Invoke() == true && _activeDeviceId != 0)
+                    _deviceCooldownUntil[_activeDeviceId] = NowMs + DeviceNoSpiritCooldownMs;
                 GoIdle();
                 return;
             }
@@ -203,7 +227,14 @@ internal sealed class PetManager
     {
         // A pet is already up (just summoned, or detected in the world) — done.
         if (now < _assumePetActiveUntil) return;
-        if (IsPetActive()) return;
+        if (IsPetActive())
+        {
+            // A cosmetic pet in the slot steps aside for the fight; wait for the dismiss to land.
+            if (YieldPetForCombat != null && MonstersNearby() && YieldPetForCombat())
+                _assumePetActiveUntil = now + 3000;
+            return;
+        }
+        if (HoldSummons?.Invoke() == true) return;
 
         // Only summon when mobs are near (the user's trigger).
         if (!MonstersNearby()) return;
@@ -237,7 +268,15 @@ internal sealed class PetManager
                 return;
             }
 
-            // charges == 0 → empty. Auto-refill from an Encapsulated Spirit.
+            // charges == 0 → empty. ILT shards with an active pyreal-refill charm refill
+            // the essence server-side on use, so summon straight away.
+            if (AllowSummonOnEmpty?.Invoke() == true)
+            {
+                IssueSummon(deviceId, charges);
+                return;
+            }
+
+            // Otherwise auto-refill from an Encapsulated Spirit.
             if (_settings.PetAutoRefill)
             {
                 int spiritId = FindEncapsulatedSpirit();
@@ -267,7 +306,7 @@ internal sealed class PetManager
         _activeSpiritId   = 0;
         _preActionCharges = charges;
         _actionIssuedAt   = NowMs;
-        _host.Log($"[RynthAi] Pet: summoning from essence 0x{(uint)deviceId:X8} (charges={charges}).");
+        RynthLog.Write(LogCat.Pets, $"[RynthAi] Pet: summoning from essence 0x{(uint)deviceId:X8} (charges={charges}).");
         _host.UseFor(unchecked((uint)deviceId), "Pet", "summon a pet from the essence");
     }
 

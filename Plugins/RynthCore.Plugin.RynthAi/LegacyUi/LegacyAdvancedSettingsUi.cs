@@ -11,9 +11,16 @@ internal sealed class LegacyAdvancedSettingsUi
 
     // Scratch buffer for the "never attack" name entry box.
     private string _newBlacklistName = "";
+    // Server Features list being edited (committed on Enter / focus loss); null = show the saved list.
+    private string? _serverNamesEdit;
 
     private static readonly string[] AttackHeights = { "Low", "Medium", "High" };
     private static readonly string[] NavLabelModeNames = { "Off", "Numbers", "Numbers and names" };
+    private const string NavResumeNearestTip =
+        "On: starting the macro, loading a Circular or Linear route, and carrying on after a fight, loot, buff or door\n" +
+        "that moved you 10 yd or more all head for the closest waypoint on the route. A waypoint you have already\n" +
+        "walked past is skipped for the one after it, so nav doesn't turn back. Once routes only look ahead.\n" +
+        "Off: nav carries on to the waypoint it was heading for, and a loaded route starts at its first point.";
     private static readonly string[] TargetSelectionNames = { "Lowest health", "Closest", "Farthest", "Least turning" };
     private static readonly string[] LootOwnershipModes = { "My Kills Only", "Fellowship Kills", "All Corpses" };
 
@@ -26,6 +33,15 @@ internal sealed class LegacyAdvancedSettingsUi
 
     private Func<string>? _autoVendorStatus;
     public void SetAutoVendorStatusProvider(Func<string> status) => _autoVendorStatus = status;
+
+    // Buffing page: the Force Buff button's actions and the list of buffs the unusable-buff
+    // filter is leaving out (wired by RynthAiPlugin once the BuffManager exists).
+    private Action? _forceBuff, _cancelBuff;
+    private Func<string>? _buffSkips;
+    public void SetBuffActions(Action? force, Action? cancel, Func<string>? skips)
+    {
+        _forceBuff = force; _cancelBuff = cancel; _buffSkips = skips;
+    }
 
     private Func<string>? _autoTradeStatus;
     public void SetAutoTradeStatusProvider(Func<string> status) => _autoTradeStatus = status;
@@ -66,6 +82,35 @@ internal sealed class LegacyAdvancedSettingsUi
         }
 
         ImGui.End();
+    }
+
+    /// <summary>Settings > Misc "Server Features": the world list and the manual override (ServerFeatureGate).</summary>
+    private void RenderServerFeatures()
+    {
+        ImGui.Text("Server Features (ILT / infinite attributes)");
+        ImGui.TextDisabled(IltHub.ServerFeatureGate.Describe(_settings));
+
+        string text = _serverNamesEdit ?? IltHub.ServerFeatureGate.FormatList(_settings.FeatureServerNames);
+        ImGui.SetNextItemWidth(320);
+        bool enter = ImGui.InputTextWithHint("Servers##featureServers", "InfiniteLeaftide, *Leaftide*", ref text, 512,
+            ImGuiInputTextFlags.EnterReturnsTrue);
+        if (ImGui.IsItemActive() || enter) _serverNamesEdit = text;
+        if ((enter || ImGui.IsItemDeactivatedAfterEdit()) && _serverNamesEdit != null)
+        {
+            _settings.FeatureServerNames = IltHub.ServerFeatureGate.ParseList(_serverNamesEdit);
+            _serverNamesEdit = null;
+        }
+        else if (!ImGui.IsItemActive()) _serverNamesEdit = null;
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Comma-separated world names that turn on the Mini Remote's ILT tabs, the Progression\n" +
+                             "planners and the attribute raiser. * is a wildcard (*Leaftide* matches any\n" +
+                             "name containing Leaftide). Case does not matter.");
+
+        ImGui.Checkbox("Force enable on this server (manual override)", ref _settings.ForceServerFeatures);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Turn the features on for whatever world you are on, even if it is not in the list.\n" +
+                             "Each feature still follows what the server reports (for example /xp off keeps\n" +
+                             "the attribute raiser off).");
     }
 
     private void RenderVendoring()
@@ -278,6 +323,10 @@ internal sealed class LegacyAdvancedSettingsUi
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("When acid or lava hurts you, stop everything (combat, buffs, healing, looting)\nand walk back out the way you came. The spot is remembered so the patrol avoids it.\nTurn off for a character that walks through acid on purpose.");
                 ImGui.Checkbox("Enable Raycasting", ref _settings.EnableRaycasting);
+
+                ImGui.Separator();
+                ImGui.Spacing();
+                RenderServerFeatures();
 
                 ImGui.Separator();
                 ImGui.Spacing();
@@ -508,6 +557,32 @@ internal sealed class LegacyAdvancedSettingsUi
                         "Below 200ms may cause fizzles or dropped casts on laggy servers.");
 
                 ImGui.SetNextItemWidth(180);
+                ImGui.SliderInt("Stuck Cast Break (ms)", ref _settings.StuckCastBreakMs, 0, 20000);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(
+                        "The longest a cast may stay unanswered before it is broken\n" +
+                        "with a jump (the server then fails the cast). It fires sooner,\n" +
+                        "about 2 s past the spell's normal cycle, when that is shorter.\n" +
+                        "After a 'too busy' answer nothing is cast until the server answers.\n" +
+                        "0 = never break.");
+
+                ImGui.SetNextItemWidth(180);
+                ImGui.SliderInt("Recovery Retry (ms)", ref _settings.RecoveryRetryMs, 200, 5000);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(
+                        "Heal Self, Stamina to Health, Revitalize and Stamina to Mana refused\n" +
+                        "for 'not enough mana' are tried again after this long: each try\n" +
+                        "rolls Mana Conversion again, and a refusal costs nothing.\n" +
+                        "At most 5 tries a second, 20 in a row.");
+
+                ImGui.Checkbox("HP Failsafe Recall", ref _settings.HpFailsafeRecall);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(
+                        "At or under Emergency Heal At with heals failing: break the\n" +
+                        "stuck cast with a jump and heal again; if that fails too,\n" +
+                        "recall to the lifestone.");
+
+                ImGui.SetNextItemWidth(180);
                 ImGui.SliderInt("Attack Spell Delay (ms)", ref _settings.AttackSpellIntervalMs, 0, 5000);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip(
@@ -645,6 +720,10 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Separator();
                 ImGui.Text("Getting Back On Route");
 
+                ImGui.Checkbox("Go To Closest Waypoint", ref _settings.NavResumeNearest);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(NavResumeNearestTip);
+
                 ImGui.Checkbox("Find A Way Back When Stuck", ref _settings.NavRecoveryEnabled);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("When a jump doesn't free a stuck character, or navigation wanders far off the route, plan a way back to the route around walls and obstacles (the dungeon map indoors, RynthNav outdoors) and open doors on the way. Off = only the jump and side-step escapes, as before.");
@@ -756,6 +835,35 @@ internal sealed class LegacyAdvancedSettingsUi
                         "For servers with buff augments, where your own cast is stronger or\n" +
                         "lasts longer. On by default: on retail it costs a few extra casts.");
 
+                ImGui.Checkbox("Chain buffs on the server's answer", ref _settings.FastBuffChain);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(
+                        "Send the next buff as soon as the server finishes the last one,\n" +
+                        "without waiting for the cast's recoil animation to end.\n" +
+                        "A refused cast turns it off for the rest of that buff pass.\n" +
+                        "On by default. Off = every buff waits for the animation.");
+                ImGui.Checkbox("Skip buffs this character can't use", ref _settings.SkipUnusableBuffs);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(
+                        "Leave out Blood Drinker / Heart Seeker / Swift Killer when you have no melee or\n" +
+                        "missile weapon (listed or in hand), Spirit Drinker / Hermetic Link when you have no\n" +
+                        "wand, and Defender when you have neither. Masteries for untrained skills are\n" +
+                        "always skipped. On by default. Off = weapon enchantments are cast regardless of\n" +
+                        "listed weapons.");
+                string skipped = _buffSkips?.Invoke() ?? "";
+                if (_settings.SkipUnusableBuffs && skipped.Length > 0)
+                    ImGui.TextWrapped("Skipping: " + skipped);
+
+                ImGui.Spacing();
+                if (ImGui.Button("Force Buff##forceBuff") && _forceBuff != null) _forceBuff();
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(
+                        "Recast every buff now, whatever time is left on it, starting with\n" +
+                        "Creature Enchantment, Focus, Willpower and Life Magic.\n" +
+                        "Same as /ra buff force (and the FR button).");
+                ImGui.SameLine();
+                if (ImGui.Button("Cancel##cancelBuff") && _cancelBuff != null) _cancelBuff();
+
                 ImGui.Spacing();
                 ImGui.Separator();
                 ImGui.Text("Protections and Banes");
@@ -830,9 +938,14 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Checkbox("Recover My Corpse", ref _settings.LootOwnCorpse);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("When your own corpse (\"Corpse of <you>\") is within loot range, open it and take\nevery item on it, whatever the loot profile and Loot From say.");
-                ImGui.Checkbox("Item Info On Select", ref _settings.ItemInfoOnSelect);
+                ImGui.Checkbox("Item Info On Select", ref _settings.ItemInfoSettings.OnSelect);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Selecting an item prints its details to chat (/ra iteminfo).");
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Options##iiOpts"))
+                    _settings.ItemInfoSettings.ShowWindow = !_settings.ItemInfoSettings.ShowWindow;
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Open the RynthAi Item Info window (fields, ratings, click trigger, layout).");
                 ImGui.Checkbox("Travel Back To My Corpse", ref _settings.TravelToOwnCorpse);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("After a death, travel back to where you died with RynthNav (outdoors only),\nfighting on the way, recover the corpse, then carry on. Needs the macro running.");
@@ -847,6 +960,9 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Checkbox("Combine Bags During Salvage", ref _settings.CombineBagsDuringSalvage);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("When salvaging an item, also add any under-full salvage bag of the same material to the salvage panel — the salvage operation merges them into a single bag.");
+                ImGui.Checkbox("Salvage Without The Panel", ref _settings.SalvageWithoutPanel);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Salvage (and combine bags) by sending the salvage request to the server directly: AC's salvage panel never opens. A request that changes nothing is tried once through the panel. Needs an engine with plugin API v82.");
 
                 ImGui.Spacing();
                 ImGui.Separator();

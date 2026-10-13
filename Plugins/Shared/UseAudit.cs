@@ -84,6 +84,7 @@ internal static class UseAudit
             _worldUseSentMs = 0;
             _worldUseSeqAtSend = 0;
             AfterSend = null;
+            WorldUseHold = null;
         }
     }
 
@@ -95,6 +96,16 @@ internal static class UseAudit
         {
             Write(host, objectId, subsystem, $"BLOCKED 0x{objectId:X8} {what} macro=off auto - {why} (with the macro off nothing opens a door or corpse unless you ask)", force: true);
             return false;
+        }
+        if (kind == UseKind.Auto && doorOrCorpse)
+        {
+            string? hold = null;
+            try { hold = WorldUseHold?.Invoke(); } catch { hold = null; }
+            if (!string.IsNullOrEmpty(hold))
+            {
+                Write(host, objectId, subsystem, $"HELD 0x{objectId:X8} {what} auto - {why} ({hold})", force: false);
+                return false;
+            }
         }
         Write(host, objectId, subsystem, $"0x{objectId:X8} {what} macro={MacroText} {KindText(kind)} - {why}", force: false);
         int seqBefore = 0;
@@ -123,6 +134,13 @@ internal static class UseAudit
     /// waits on, Plugins/Shared/ActionPacer.cs). Null in plugins that don't pace. Cleared by Reset.
     /// </summary>
     public static Action<RynthCoreHost, SentUse>? AfterSend;
+
+    /// <summary>
+    /// Asked before an automatic door or corpse use: a reason to hold it back (nothing is sent, the
+    /// call returns false), or null/empty to send. RynthAi holds them while the salvage panel opens
+    /// (the client swallows the use then). A use the player asked for is never held. Cleared by Reset.
+    /// </summary>
+    public static Func<string?>? WorldUseHold;
 
     // ── A door or corpse use the server hasn't answered yet (2026-10-06) ──────────
     // The server walks/turns the character to a used door or corpse, and any movement packet

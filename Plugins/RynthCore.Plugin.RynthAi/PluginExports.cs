@@ -15,7 +15,8 @@ public static unsafe class PluginExports
 
     // Typed interfaces for other plugins (host GetPluginInterface, API v68): "RynthAi.Script" v1
     // for RynthLua, "RynthAi.Status" v1 for RynthNet (the bot state it shares with the other clients),
-    // "RynthAi.Activity" v1 for RynthSort (what the bot is doing, so pack moves stay out of its way).
+    // "RynthAi.Activity" v1 for RynthSort (what the bot is doing, so pack moves stay out of its way),
+    // "RynthAi.Combat" v1 for RynthLua (a script choosing attack and heal spells, Shared/RynthAiCombatApi.cs).
     // Fixed signature: void* (const char* iface, uint version).
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginQueryInterface", CallConvs = new[] { typeof(CallConvCdecl) })]
     private static IntPtr QueryInterface(IntPtr ifaceAnsi, uint version)
@@ -25,7 +26,8 @@ public static unsafe class PluginExports
             string iface = ifaceAnsi == IntPtr.Zero ? "" : Marshal.PtrToStringAnsi(ifaceAnsi) ?? "";
             IntPtr table = ScriptInterface.Query(iface, version);
             if (table == IntPtr.Zero) table = StatusInterface.Query(iface, version);
-            return table != IntPtr.Zero ? table : ActivityInterface.Query(iface, version);
+            if (table == IntPtr.Zero) table = ActivityInterface.Query(iface, version);
+            return table != IntPtr.Zero ? table : CombatHookInterface.Query(iface, version);
         }
         catch
         {
@@ -39,13 +41,31 @@ public static unsafe class PluginExports
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginShutdown", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void Shutdown()
     {
-        Runtime.Shutdown();
-        StatusInterface.Release();
-        ActivityInterface.Release();
-        // The loot editor's state can be a few hundred KB (LootSnobV4): don't leave it behind on a reload.
-        foreach (IntPtr p in new[] { Interlocked.Exchange(ref _lootStatePtr, IntPtr.Zero),
-                     Interlocked.Exchange(ref _lootRulePtr, IntPtr.Zero), Interlocked.Exchange(ref _lootVocabPtr, IntPtr.Zero) })
-            if (p != IntPtr.Zero) Marshal.FreeCoTaskMem(p);
+        // An exception escaping an UnmanagedCallersOnly export fail-fasts the whole client under
+        // NativeAOT. Each step is guarded on its own so one failure cannot skip the rest.
+        RynthAiPlugin? plugin = Runtime.Plugin;   // Runtime.Shutdown drops it; the log needs its host
+        try { Runtime.Shutdown(); }
+        catch (Exception ex) { LogShutdownError(plugin, "Runtime.Shutdown", ex); }
+        try { StatusInterface.Release(); }
+        catch (Exception ex) { LogShutdownError(plugin, "StatusInterface.Release", ex); }
+        try { ActivityInterface.Release(); }
+        catch (Exception ex) { LogShutdownError(plugin, "ActivityInterface.Release", ex); }
+        try { CombatHookInterface.Shutdown(); }   // the hook goes native at once (RynthLua re-claims after a reload)
+        catch (Exception ex) { LogShutdownError(plugin, "CombatHookInterface.Shutdown", ex); }
+        try
+        {
+            // The loot editor's state can be a few hundred KB (LootSnobV4): don't leave it behind on a reload.
+            foreach (IntPtr p in new[] { Interlocked.Exchange(ref _lootStatePtr, IntPtr.Zero),
+                         Interlocked.Exchange(ref _lootRulePtr, IntPtr.Zero), Interlocked.Exchange(ref _lootVocabPtr, IntPtr.Zero) })
+                if (p != IntPtr.Zero) Marshal.FreeCoTaskMem(p);
+        }
+        catch (Exception ex) { LogShutdownError(plugin, "loot buffers", ex); }
+    }
+
+    private static void LogShutdownError(RynthAiPlugin? plugin, string step, Exception ex)
+    {
+        try { plugin?.LogFromExport($"[RynthAi] Shutdown: {step} failed: {ex.GetType().Name}: {ex.Message}"); }
+        catch { /* nothing more to do: never throw out of a native export */ }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnUIInitialized", CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -61,13 +81,76 @@ public static unsafe class PluginExports
     public static void OnSelectedTargetChange(uint currentTargetId, uint previousTargetId) => Runtime.OnSelectedTargetChange(currentTargetId, previousTargetId);
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginName", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetName() => RynthAiPlugin.NamePointer;
+    public static IntPtr GetName()
+    {
+        try { return RynthAiPlugin.NamePointer; }   // a static initializer that throws surfaces here (TypeInitializationException)
+        catch { return IntPtr.Zero; }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginVersion", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetVersion() => RynthAiPlugin.VersionPointer;
+    public static IntPtr GetVersion()
+    {
+        try { return RynthAiPlugin.VersionPointer; }
+        catch { return IntPtr.Zero; }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginTick", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void Tick() => Runtime.OnTick();
+
+    // Local ImGui windows (ILT Hub, HUDs, translator, item info, nav overlay). The engine
+    // calls this when the export exists; the main panels stay on the engine side.
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginRender", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void Render() => Runtime.OnRender();
+
+    /// <summary>Engine calls this instead of RynthPluginRender while its ImGui shell is off.</summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginRenderOverlay", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void RenderOverlay()
+    {
+        try { Runtime.Plugin?.OnRenderOverlay(); }
+        catch { /* an exception crossing UnmanagedCallersOnly would fail-fast the client */ }
+    }
+
+    /// <summary>
+    /// Engine dashboard drawers (RynthCore 2026.10.5.21+): draws the named UTF-8 surface into the
+    /// engine's current ImGui window on the render thread and reports the size it wants.
+    /// Surfaces: "miniremote" (the RynthAi dashboard's Mini Remote drawer), "miniremote-window"
+    /// (the engine's Mini Remote window, which hosts the remote with its Toggles and ILT tabs)
+    /// and "guardian" (RynthCore 2026.10.5.29+: the engine's Guardian ILT panel).
+    /// RynthCore 2026.10.5.30+ adds ":popout" to the name when the panel is popped out into its
+    /// own window, whose ImGui context is not the one in Host.ImGuiContext; the surfaces draw
+    /// in the engine's current context either way (RenderEmbedded*).
+    /// 1 = drawn, 0 = not ready / unknown (nothing drawn).
+    /// </summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginRenderEmbed", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int RenderEmbed(byte* surface, float width, float height, float* wantWidth, float* wantHeight)
+    {
+        try
+        {
+            if (surface == null) return 0;
+            ReadOnlySpan<byte> name = MemoryMarshal.CreateReadOnlySpanFromNullTerminated(surface);
+            if (name.EndsWith(":popout"u8)) name = name[..^":popout"u8.Length];
+            var plugin = Runtime.Plugin;
+            if (plugin == null) return 0;
+            System.Numerics.Vector2 want;
+            if (name.SequenceEqual("guardian"u8))
+            {
+                if (!plugin.RenderEmbeddedGuardian(new System.Numerics.Vector2(width, height), out want)) return 0;
+            }
+            else
+            {
+                bool window = name.SequenceEqual("miniremote-window"u8);
+                if (!window && !name.SequenceEqual("miniremote"u8)) return 0;
+                if (!plugin.RenderEmbeddedMiniRemote(window, out want)) return 0;
+            }
+            if (wantWidth != null) *wantWidth = want.X;
+            if (wantHeight != null) *wantHeight = want.Y;
+            return 1;
+        }
+        catch
+        {
+            return 0;   // an exception crossing UnmanagedCallersOnly would fail-fast the client
+        }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnChatBarEnter", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnChatBarEnter(IntPtr textUtf16, IntPtr eatFlag) => Runtime.OnChatBarEnter(textUtf16, eatFlag);
@@ -604,6 +687,10 @@ public static unsafe class PluginExports
                 case "clearHazardsAll": Runtime.Plugin?.ClearAllDungeonHazards();              break;
                 case "markHazardHere":  Runtime.Plugin?.MarkCurrentCellHazardFromUi();         break;
                 case "unmarkHazardHere":Runtime.Plugin?.UnmarkCurrentCellHazardFromUi();       break;
+                // The Dungeon Map's edits (click to add, drag to move, set next target).
+                case "addPointAt":
+                case "movePointTo":
+                case "setActive":       Runtime.Plugin?.DashboardRenderer?.HandleMapNavCommand(cmd); break;
                 default:                Runtime.Plugin?.DashboardRenderer?.HandleNavCommand(json); break;
             }
         }
@@ -620,6 +707,57 @@ public static unsafe class PluginExports
             string json = Runtime.Plugin?.BuildPatrolInfoJson() ?? "{}";
             IntPtr newPtr = Marshal.StringToHGlobalAnsi(json);
             IntPtr oldPtr = Interlocked.Exchange(ref _patrolInfoPtr, newPtr);
+            if (oldPtr != IntPtr.Zero)
+                Marshal.FreeHGlobal(oldPtr);
+            return newPtr;
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    private static IntPtr _progressionPtr = IntPtr.Zero;
+
+    /// <summary>
+    /// Skills panel Progression tab (ILT augmentations / enlightenment). Same contract as
+    /// RynthPluginGetPatrolInfoJson: one static buffer, valid until the next call; the engine
+    /// polls it from its pump thread only.
+    /// </summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetProgressionJson", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static IntPtr GetProgressionJson()
+    {
+        try
+        {
+            string json = Runtime.Plugin?.BuildProgressionJson() ?? "{\"available\":false}";
+            IntPtr newPtr = Marshal.StringToHGlobalAnsi(json);
+            IntPtr oldPtr = Interlocked.Exchange(ref _progressionPtr, newPtr);
+            if (oldPtr != IntPtr.Zero)
+                Marshal.FreeHGlobal(oldPtr);
+            return newPtr;
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    private static IntPtr _charmsPtr = IntPtr.Zero;
+
+    /// <summary>
+    /// ACECustom registry charms (acquired / active / server state) for engines up to 2026.10.5.35,
+    /// whose Settings panel has a Charms Tracking tab; newer engines leave charms to the Mini
+    /// Remote's Charms tab. Same contract as RynthPluginGetProgressionJson: one static buffer,
+    /// valid until the next call; the engine polls it from its pump thread only.
+    /// </summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetCharmsJson", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static IntPtr GetCharmsJson()
+    {
+        try
+        {
+            string json = Runtime.Plugin?.BuildCharmsJson() ?? "{\"available\":false}";
+            IntPtr newPtr = Marshal.StringToHGlobalAnsi(json);
+            IntPtr oldPtr = Interlocked.Exchange(ref _charmsPtr, newPtr);
             if (oldPtr != IntPtr.Zero)
                 Marshal.FreeHGlobal(oldPtr);
             return newPtr;
@@ -780,6 +918,14 @@ public static unsafe class PluginExports
     public static void AddSelectedConsumable()
     {
         try { Runtime.Plugin?.DashboardRenderer?.AddSelectedConsumable(); }
+        catch { }
+    }
+
+    /// <summary>Items panel "Remove Missing": drops weapons and consumables no longer in the inventory (reports in chat).</summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginCleanItems", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void CleanItems()
+    {
+        try { Runtime.Plugin?.CleanMissingItems(); }
         catch { }
     }
 }

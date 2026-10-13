@@ -154,6 +154,9 @@ internal static class ManaReserveTests
         // and mana regenerates meanwhile with attacks still held.
         var u = new Rig(mana: 50);
         BuffManager.ManaCostOverride = _ => 0;
+        // Mana Conversion untrained: the rest below. Trained, a recovery vital retries in 200 ms
+        // instead (RecoveryRetryTests).
+        FakeHost.Skills[(Player, 16)] = (10, 1);
         Check.True(u.B.CheckVitals(), "50/383 under Get Mana At: Stamina to Mana goes");
         Check.Eq(FakeHost.Casts.Count, 1, "one cast");
         u.B.OnChatWindowText(NotEnoughMana, 0);

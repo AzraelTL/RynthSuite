@@ -22,7 +22,8 @@ public static unsafe class PluginExports
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginShutdown", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void Shutdown()
     {
-        Runtime.Shutdown();
+        try { Runtime.Shutdown(); }
+        catch { }
         try
         {
             // The engine copies the settings string as soon as it gets it, on
@@ -46,10 +47,18 @@ public static unsafe class PluginExports
     // and they stay valid for as long as the module is loaded (the engine
     // copies them right after loading, before Init).
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginName", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetName() => LiteralPointer("RynthVision"u8);
+    public static IntPtr GetName()
+    {
+        try { return LiteralPointer("RynthVision"u8); }
+        catch { return IntPtr.Zero; }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginVersion", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetVersion() => LiteralPointer("0.1.0"u8);
+    public static IntPtr GetVersion()
+    {
+        try { return LiteralPointer("0.1.0"u8); }
+        catch { return IntPtr.Zero; }
+    }
 
     private static IntPtr LiteralPointer(ReadOnlySpan<byte> literal)
     {

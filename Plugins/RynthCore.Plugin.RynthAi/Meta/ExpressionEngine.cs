@@ -1241,12 +1241,30 @@ internal sealed class ExpressionEngine
         finally { _quietUnknownFn--; }
     }
 
+    /// <summary>
+    /// A list function's expression argument: the text inside its backticks, with the two
+    /// escapes a backtick string has ("\`" and "\\") turned back into what they stand for, so
+    /// the inner expression can quote text itself. Without that, listfilter[...,`chatbox[\`/t \`+
+    /// wobjectgetname[$1]+\`, xp\`]`] evaluated "\`/t \`" with the backslashes still in and
+    /// sent "0Name`" as a say (2026-10-13, CQ_DragonIsle_Water.met).
+    /// </summary>
     private static string StripBackticks(string s)
     {
         s = s.Trim();
-        return s.Length >= 2 && s[0] == '`' && s[s.Length - 1] == '`'
-            ? s.Substring(1, s.Length - 2)
-            : s;
+        if (!(s.Length >= 2 && s[0] == '`' && s[s.Length - 1] == '`'))
+            return s;
+        string inner = s.Substring(1, s.Length - 2);
+        if (inner.IndexOf('\\') < 0)
+            return inner;
+        var sb = new System.Text.StringBuilder(inner.Length);
+        for (int i = 0; i < inner.Length; i++)
+        {
+            if (inner[i] == '\\' && i + 1 < inner.Length && inner[i + 1] is '`' or '\\')
+                sb.Append(inner[++i]);
+            else
+                sb.Append(inner[i]);
+        }
+        return sb.ToString();
     }
 
     // ── List function implementations ─────────────────────────────────────────
@@ -1841,9 +1859,12 @@ internal sealed class ExpressionEngine
 
         var items = new List<string>();
         var seen = new System.Collections.Generic.HashSet<int>();
+        // Never the character running the meta: "every player around" (class 24) sending
+        // tells reached the sender too (2026-10-13).
+        int self = unchecked((int)_host.GetPlayerId());
         void Check(WorldObject wo)
         {
-            if (!seen.Add(wo.Id)) return;
+            if (wo.Id == self || !seen.Add(wo.Id)) return;
             if (ResolveEffectiveObjectClass(wo) == targetClass)
                 items.Add(MakeWobjectHandle(unchecked((uint)wo.Id), wo.Name));
         }
@@ -2831,8 +2852,9 @@ internal sealed class ExpressionEngine
         if (_host.HasChangeCombatMode
             && (now - _castStanceLastFlipAt).TotalMilliseconds > CastStanceFlipGateMs)
         {
-            _host.ChangeCombatModeFor(CombatMode.Magic, "Meta", "meta cast: Magic mode", force: true);
-            _castStanceLastFlipAt = now;
+            // Only a request that went out arms the flip throttle: a refusal is asked again next pulse.
+            if (_host.ChangeCombatModeFor(CombatMode.Magic, "Meta", "meta cast: Magic mode", force: true))
+                _castStanceLastFlipAt = now;
         }
         return false;
     }
@@ -3536,6 +3558,7 @@ internal sealed class ExpressionEngine
             ["EnableAutocram"]      = (() => B(s.EnableAutocram),      v => s.EnableAutocram      = ToDouble(v) != 0),
             ["ReadUnknownScrolls"]  = (() => B(s.ReadUnknownScrolls),  v => s.ReadUnknownScrolls  = ToDouble(v) != 0),
             ["EnableCombineSalvage"]= (() => B(s.EnableCombineSalvage),v => s.EnableCombineSalvage= ToDouble(v) != 0),
+            ["SalvageWithoutPanel"] = (() => B(s.SalvageWithoutPanel), v => s.SalvageWithoutPanel = ToDouble(v) != 0),
             ["PeaceModeWhenIdle"]   = (() => B(s.PeaceModeWhenIdle),   v => s.PeaceModeWhenIdle   = ToDouble(v) != 0),
             ["RebuffWhenIdle"]      = (() => B(s.RebuffWhenIdle),      v => s.RebuffWhenIdle      = ToDouble(v) != 0),
             ["UsePotions"] = (() => B(s.UsePotions), v => s.UsePotions = ToDouble(v) != 0),
@@ -3548,12 +3571,15 @@ internal sealed class ExpressionEngine
             ["StaminaToHealthAt"] = (() => s.StaminaToHealthAt.ToString(CultureInfo.InvariantCulture), v => s.StaminaToHealthAt = Math.Clamp((int)ToDouble(v), 0, 100)),
             ["StaminaToHealthMinStamina"] = (() => s.StaminaToHealthMinStamina.ToString(CultureInfo.InvariantCulture), v => s.StaminaToHealthMinStamina = Math.Clamp((int)ToDouble(v), 0, 100)),
             ["StopMacroOnDeath"] = (() => B(s.StopMacroOnDeath), v => s.StopMacroOnDeath = ToDouble(v) != 0),
+            ["DeathRecallMode"] = (() => I(s.DeathRecallMode), v => { if (int.TryParse(v, out int i)) s.DeathRecallMode = Math.Clamp(i, 0, 2); }),
+            ["DeathRecallSpellId"] = (() => I(s.DeathRecallSpellId), v => { if (int.TryParse(v, out int i) && i > 0) s.DeathRecallSpellId = i; }),
+            ["DeathRecallItem"] = (() => s.DeathRecallItem, v => s.DeathRecallItem = v?.Trim() ?? string.Empty),
             ["StopMacroOnNoComponents"] = (() => B(s.StopMacroOnNoComponents), v => s.StopMacroOnNoComponents = ToDouble(v) != 0),
             ["StopLootingWhenPackFull"] = (() => B(s.StopLootingWhenPackFull), v => s.StopLootingWhenPackFull = ToDouble(v) != 0),
             ["LootOwnCorpse"] = (() => B(s.LootOwnCorpse), v => s.LootOwnCorpse = ToDouble(v) != 0),
             ["EscapeHazards"] = (() => B(s.EscapeHazards), v => s.EscapeHazards = ToDouble(v) != 0),
             ["TravelToOwnCorpse"] = (() => B(s.TravelToOwnCorpse), v => s.TravelToOwnCorpse = ToDouble(v) != 0),
-            ["ItemInfoOnSelect"] = (() => B(s.ItemInfoOnSelect), v => s.ItemInfoOnSelect = ToDouble(v) != 0),
+            ["ItemInfoOnSelect"] = (() => B(s.ItemInfoSettings.OnSelect), v => s.ItemInfoSettings.OnSelect = ToDouble(v) != 0),
             ["StopMacroWhenPackFull"] = (() => B(s.StopMacroWhenPackFull), v => s.StopMacroWhenPackFull = ToDouble(v) != 0),
             ["SummonPets"]          = (() => B(s.SummonPets),          v => s.SummonPets          = ToDouble(v) != 0),
             ["MineOnly"]            = (() => B(s.MineOnly),            v => s.MineOnly            = ToDouble(v) != 0),
@@ -3596,6 +3622,8 @@ internal sealed class ExpressionEngine
             ["RebuffSecondsRemaining"] = (() => I(s.RebuffSecondsRemaining), v => { if (int.TryParse(v, out int i)) s.RebuffSecondsRemaining = i; }),
             ["RebuffTopOffSecondsRemaining"] = (() => I(s.RebuffTopOffSecondsRemaining), v => { if (int.TryParse(v, out int i)) s.RebuffTopOffSecondsRemaining = i; }),
             ["CastBuffsOverItemBuffs"]       = (() => B(s.CastBuffsOverItemBuffs),       v => s.CastBuffsOverItemBuffs       = ToDouble(v) != 0),
+            ["FastBuffChain"]                = (() => B(s.FastBuffChain),                v => s.FastBuffChain                = ToDouble(v) != 0),
+            ["SkipUnusableBuffs"]            = (() => B(s.SkipUnusableBuffs),            v => s.SkipUnusableBuffs            = ToDouble(v) != 0),
             // AutoVendor (UB names map here through /ub opt: AutoVendor.Enabled -> AutoVendorEnabled, ...)
             ["AutoVendorEnabled"]          = (() => B(s.AutoVendorEnabled),          v => s.AutoVendorEnabled          = ToDouble(v) != 0),
             ["AutoVendorEnableBuying"]     = (() => B(s.AutoVendorEnableBuying),     v => s.AutoVendorEnableBuying     = ToDouble(v) != 0),
@@ -3631,6 +3659,7 @@ internal sealed class ExpressionEngine
             ["CurrentMetaPath"]     = (() => s.CurrentMetaPath,        v => s.CurrentMetaPath = v),
             ["OpenDoors"]           = (() => B(s.OpenDoors),           v => s.OpenDoors       = ToDouble(v) != 0),
             ["NavRecoveryEnabled"]  = (() => B(s.NavRecoveryEnabled),  v => s.NavRecoveryEnabled = ToDouble(v) != 0),
+            ["NavResumeNearest"]    = (() => B(s.NavResumeNearest),    v => s.NavResumeNearest   = ToDouble(v) != 0),
             ["NavOffTrackYards"]    = (() => F(s.NavOffTrackYards),    v => { if (float.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f)) s.NavOffTrackYards = Math.Clamp(f, 160f, 1000f); }),
             ["NavMaxDetourAttempts"] = (() => I(s.NavMaxDetourAttempts), v => { if (int.TryParse(v, out int i)) s.NavMaxDetourAttempts = Math.Clamp(i, 1, 10); }),
             ["OpenDoorRange"]       = (() => F(s.OpenDoorRange),       v => { if (float.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f)) s.OpenDoorRange = f; }),

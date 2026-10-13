@@ -5,6 +5,7 @@ using System.Linq;
 using System.Numerics;
 using ImGuiNET;
 using RynthCore.Plugin.RynthAi.Meta;
+using RynthCore.Install;
 
 namespace RynthCore.Plugin.RynthAi.LegacyUi;
 
@@ -1238,7 +1239,8 @@ internal sealed class LegacyMetaUi
             }
 
             lock (_settings.MetaRulesLock)
-                AfFileWriter.Save(path, _settings.MetaRules, _settings.EmbeddedNavs);
+                RynthCore.Plugin.RynthAi.Diagnostics.DataWriteGuard.TrySave("the meta", path,
+                    () => AfFileWriter.Save(path, _settings.MetaRules, _settings.EmbeddedNavs));
         }
         catch { }
     }
@@ -1254,10 +1256,18 @@ internal sealed class LegacyMetaUi
                 return;
             }
 
-            Directory.CreateDirectory(MetaFolder);
             string filePath = Path.Combine(MetaFolder, _saveName + ".af");
+            bool saved;
+            string why;
             lock (_settings.MetaRulesLock)
-                AfFileWriter.Save(filePath, _settings.MetaRules, _settings.EmbeddedNavs);
+                saved = RynthCore.Plugin.RynthAi.Diagnostics.DataWriteGuard.TrySave("the meta", filePath,
+                    () => AfFileWriter.Save(filePath, _settings.MetaRules, _settings.EmbeddedNavs), out why);
+            if (!saved)
+            {
+                _statusMessage = $"Couldn't save {filePath}: {why}";
+                _statusTime = DateTime.Now;
+                return;
+            }
 
             _statusMessage = $"Saved to {_saveName}.af";
             _statusTime = DateTime.Now;

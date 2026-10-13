@@ -83,8 +83,9 @@ internal static class AttackLatencyTests
     private static void NewTargetInterval()
     {
         const int Magic = CombatMode.Magic, Melee = CombatMode.Melee, Missile = CombatMode.Missile;
-        Check.Eq(CombatManager.AttackIntervalMs(Melee, 1500, true, true), 1000.0, "melee: 1000 ms, new target or not");
-        Check.Eq(CombatManager.AttackIntervalMs(Missile, 1500, true, true), 1000.0, "missile: 1000 ms");
+        Check.Eq(CombatManager.AttackIntervalMs(Melee, 1500, true, false), 1000.0, "melee, same target: 1000 ms");
+        Check.Eq(CombatManager.AttackIntervalMs(Melee, 1500, true, true), CombatManager.NewTargetPhysicalFloorMs, "melee, new target: the short floor (2026-10-12)");
+        Check.Eq(CombatManager.AttackIntervalMs(Missile, 1500, true, false), 1000.0, "missile, same target: 1000 ms");
         Check.Eq(CombatManager.AttackIntervalMs(Magic, 1500, true, false), 1500.0, "magic, same target: the setting");
         Check.Eq(CombatManager.AttackIntervalMs(Magic, 2500, true, false), 2500.0, "magic, same target: a slower setting is kept");
         Check.Eq(CombatManager.AttackIntervalMs(Magic, 0, true, false), 0.0, "magic, setting 0: no delay of its own (the server gates hold the cast)");

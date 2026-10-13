@@ -27,9 +27,10 @@ namespace RynthCore.RynthAiHostTests.Tests;
 internal static class PatrolDoorwayTests
 {
     // 2026-10-10, 0x6146: hazards cut the loops and the patrol fell back to every dead end. Now,
-    // in that case, only short spurs (closets) go: a junction J with a 1-cell closet, a 3-cell
-    // spur and a 5-cell branch hanging off a loop.
-    private static void TrimShortSpurs()
+    // in that case, only small dead ends (closets) go: a junction J with a 1-cell closet, a 3-cell
+    // spur and a 5-cell branch hanging off a loop. Since 2026-10-13 whole dead-end areas
+    // (TrimDeadEndPockets, PatrolPocketTests): the branch is walked until 3 cells are left.
+    private static void TrimSmallDeadEnds()
     {
         var g = new Dictionary<uint, DungeonNavNode>();
         void Link(uint a, uint b)
@@ -44,12 +45,13 @@ internal static class PatrolDoorwayTests
         Link(0x01, 0x20); Link(0x20, 0x21); Link(0x21, 0x22);            // 3-cell spur
         Link(0x02, 0x30); Link(0x30, 0x31); Link(0x31, 0x32); Link(0x32, 0x33); Link(0x33, 0x34); // 5-cell branch
         var all = new HashSet<uint>(g.Keys);
-        var kept = DungeonPathfinder.TrimShortSpurs(g, all, 0x03, DungeonPathfinder.PatrolMaxSpurCells);
+        var kept = DungeonPathfinder.TrimDeadEndPockets(g, all, 0x03, 3);
         Check.False(kept.Contains(0x10), "the 1-cell closet goes");
         Check.False(kept.Overlaps(new uint[] { 0x20, 0x21, 0x22 }), "the 3-cell spur goes");
-        Check.True(kept.IsSupersetOf(new uint[] { 0x30, 0x31, 0x32, 0x33, 0x34 }), "the 5-cell branch stays whole");
+        Check.True(kept.IsSupersetOf(new uint[] { 0x30, 0x31 }) && !kept.Overlaps(new uint[] { 0x32, 0x33, 0x34 }),
+                   "the 5-cell branch is walked until 3 cells are left");
         Check.True(kept.IsSupersetOf(new uint[] { 1, 2, 3, 4 }), "the loop stays");
-        var keepStart = DungeonPathfinder.TrimShortSpurs(g, all, 0x10, DungeonPathfinder.PatrolMaxSpurCells);
+        var keepStart = DungeonPathfinder.TrimDeadEndPockets(g, all, 0x10, DungeonPathfinder.PatrolMaxDeadEndCells);
         Check.True(keepStart.Contains(0x10), "the start cell is never trimmed");
     }
 
@@ -63,9 +65,10 @@ internal static class PatrolDoorwayTests
         r.Add("dungeon rooms: an L-shaped room's crossing goes round the corner, on the floor", LShapedRoom);
         r.Add("dungeon rooms: a pillar in the way bends the crossing round it", PillarInTheWay);
         r.Add("dungeon patrol: a loop through a big room: no points inside it, every doorway taken", PatrolLoop);
-        r.Add("dungeon patrol: a big dead-end room is looked into, not skirted", PatrolLooksIntoDeadEndRoom);
+        r.Add("dungeon patrol: a big dead-end room is looked into, not skirted (and not when under Walk Into Rooms From)", PatrolLooksIntoDeadEndRoom);
+        r.Add("dungeon patrol settings: Distance From Walls 0.5 / 1 / 1.5 / 2 m kept by every point", PatrolWallDistanceSetting);
         r.Add("dungeon floors: a ceiling (facing down) is not a floor", CeilingIsNotFloor);
-        r.Add("dungeon patrol: spurs of up to 3 cells trimmed, a long branch kept whole", TrimShortSpurs);
+        r.Add("dungeon patrol: dead ends of up to 3 cells trimmed, a longer one walked until 3 are left", TrimSmallDeadEnds);
         r.Add("dungeon clearance: walls, floor edges and slopes too steep to stand on bound it; a face high above doesn't", ClearanceMeasure);
         r.Add("dungeon clearance: a point next to a wall (or past the floor's edge) is pushed out to 1 m", PushedOffWall);
         r.Add("dungeon clearance: a point in a corridor narrower than 2 m ends on its middle line", NarrowCorridorCentred);
@@ -407,6 +410,32 @@ internal static class PatrolDoorwayTests
         var route = DungeonPathfinder.BuildPatrolRoute(d.Graph, west, null, geo);
         bool looked = route.Points.Any(p => X(p) > 10 && X(p) < 20 && Y(p) > 10 && Y(p) < 20);
         Check.True(looked, "the patrol walks into the middle of the dead-end room");
+
+        // Settings "Walk Into Rooms From": the room (3x3 cells, 20 m between its outer cell
+        // centres: spread 28 m) is under 40 m, so it is only looked into from its doorway.
+        var big = DungeonPathfinder.BuildPatrolRoute(d.Graph, west, null, geo, new DungeonPatrolOptions { LookInRoomMeters = 40 });
+        Check.False(big.Points.Any(p => X(p) > 10 && X(p) < 20 && Y(p) > 10 && Y(p) < 20),
+                    "with rooms from 40 m: the 28 m room's middle is not walked to");
+        var at20 = DungeonPathfinder.BuildPatrolRoute(d.Graph, west, null, geo, new DungeonPatrolOptions { LookInRoomMeters = 20 });
+        Check.True(at20.Points.Any(p => X(p) > 10 && X(p) < 20 && Y(p) > 10 && Y(p) < 20), "with rooms from 20 m: it is");
+    }
+
+    // Settings "Distance From Walls": every patrol point keeps the chosen distance where the
+    // corridors (5.3 m wide) and rooms allow it.
+    private static void PatrolWallDistanceSetting()
+    {
+        var (d, _, west, _, _) = LoopDungeon();
+        var geo = d.Geo();
+        foreach (double wall in new[] { 0.5, 1.0, 1.5, 2.0 })
+        {
+            var route = DungeonPathfinder.BuildPatrolRoute(d.Graph, west, null, geo, new DungeonPatrolOptions { WallClearance = wall });
+            Check.True(route.Points.Count > 0, $"{wall} m: a patrol");
+            double least = route.Points.Min(p => Clear(geo, p));
+            Check.True(least >= wall - 0.02, $"{wall} m: every point at least that far from the walls (least {least:F2})");
+        }
+        var near = DungeonPathfinder.BuildPatrolRoute(d.Graph, west, null, geo, new DungeonPatrolOptions { WallClearance = 0.5 });
+        var far  = DungeonPathfinder.BuildPatrolRoute(d.Graph, west, null, geo, new DungeonPatrolOptions { WallClearance = 2.0 });
+        Check.True(far.Points.Min(p => Clear(geo, p)) > near.Points.Min(p => Clear(geo, p)) + 0.5, "2 m keeps points further off the walls than 0.5 m");
     }
 
     private static void CeilingIsNotFloor()

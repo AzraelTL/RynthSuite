@@ -13,6 +13,14 @@ namespace RynthCore.Plugin.RynthAi;
 // ============================================================================
 public sealed partial class RynthAiPlugin
 {
+    /// <summary>
+    /// UseAudit.WorldUseHold: an automatic door or corpse use waits while the salvage panel is
+    /// between the Ust use and the salvage send. A world use in that window is swallowed by the
+    /// client, and the corpse loop then sat waiting for an open that never came.
+    /// </summary>
+    private string? SalvagePanelHold() =>
+        _salvageManager?.PanelPending == true ? "the salvage panel is opening; the use waits for the salvage to go out" : null;
+
     /// <summary>UseAudit.AfterSend: a use or use-on went out - record it as the action the server is answering.</summary>
     private static void RecordUseForPacing(RynthCoreHost host, UseAudit.SentUse use)
     {

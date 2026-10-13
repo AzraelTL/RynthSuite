@@ -15,7 +15,11 @@ public static unsafe class PluginExports
     private static int Init(RynthCoreApiNative* api) => Runtime.Init(api);
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginShutdown", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static void Shutdown() => Runtime.Shutdown();
+    public static void Shutdown()
+    {
+        try { Runtime.Shutdown(); }   // an exception out of a native export fail-fasts the client
+        catch { }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnLoginComplete", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnLoginComplete() => Runtime.OnLoginComplete();
@@ -24,10 +28,18 @@ public static unsafe class PluginExports
     public static void OnLogout() => Runtime.OnLogout();
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginName", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetName() => RynthChatPlugin.NamePointer;
+    public static IntPtr GetName()
+    {
+        try { return RynthChatPlugin.NamePointer; }
+        catch { return IntPtr.Zero; }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginVersion", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetVersion() => RynthChatPlugin.VersionPointer;
+    public static IntPtr GetVersion()
+    {
+        try { return RynthChatPlugin.VersionPointer; }
+        catch { return IntPtr.Zero; }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginTick", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void Tick() => Runtime.OnTick();

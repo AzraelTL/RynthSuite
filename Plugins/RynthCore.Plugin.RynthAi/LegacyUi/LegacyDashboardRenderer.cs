@@ -7,12 +7,13 @@ using System.Numerics;
 using System.Text.Json;
 using RynthCore.PluginSdk;
 using RynthCore.Plugin.RynthAi;
+using RynthCore.Plugin.RynthAi.Diagnostics;
 using RynthCore.Plugin.RynthAi.Meta;
 using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthAi.LegacyUi;
 
-internal sealed class LegacyDashboardRenderer
+internal sealed partial class LegacyDashboardRenderer
 {
     internal static readonly Vector4 ColTeal = new(0.15f, 0.85f, 0.90f, 1.00f);
     internal static readonly Vector4 ColAmber = new(0.91f, 0.70f, 0.20f, 1.00f);
@@ -53,7 +54,8 @@ internal sealed class LegacyDashboardRenderer
     private readonly List<string> _navFiles = new();
     private readonly List<string> _lootFiles = new();
     private readonly List<string> _metaFiles = new();
-    // Guards the four profile-name lists above against the cross-thread race
+    private readonly List<string> _buffFiles = new();
+    // Guards the profile-name lists above against the cross-thread race
     // between BuildSnapshotJson (Avalonia panel poll thread, ~30 Hz) and the
     // Refresh*Files mutators (AC pump thread). Enumerating a List<string> while
     // another thread Clear()s it throws InvalidOperationException; when that
@@ -297,6 +299,7 @@ internal sealed class LegacyDashboardRenderer
 
     public void SetMissileCraftingManager(MissileCraftingManager mgr) => _advancedSettingsUi.SetMissileCraftingManager(mgr);
     public void SetAutoVendorStatusProvider(Func<string> status) => _advancedSettingsUi.SetAutoVendorStatusProvider(status);
+    public void SetBuffActions(Action? force, Action? cancel, Func<string>? skips) => _advancedSettingsUi.SetBuffActions(force, cancel, skips);
     public void SetAutoTradeStatusProvider(Func<string> status) => _advancedSettingsUi.SetAutoTradeStatusProvider(status);
 
     // The open vendor's AutoVendor profile path (null when no vendor is open), for the
@@ -408,8 +411,7 @@ internal sealed class LegacyDashboardRenderer
             {
                 _settings.CurrentRoute = NavRouteParser.Load(_settings.CurrentNavPath);
                 _settings.ActiveNavIndex =
-                    (_settings.CurrentRoute.RouteType == NavRouteType.Follow ||
-                     _settings.CurrentRoute.RouteType == NavRouteType.Once)
+                    NavRouteParser.StartsAtFirstPoint(_settings.CurrentRoute.RouteType, _settings.NavResumeNearest)
                         ? 0
                         : FindNearestWaypoint(_settings.CurrentRoute);
             }
@@ -467,17 +469,37 @@ internal sealed class LegacyDashboardRenderer
     public void SaveSettings()
     {
         if (string.IsNullOrEmpty(_settingsFilePath)) return;
+        string json;
         try
         {
             CaptureTransientUiState();
-            Directory.CreateDirectory(Path.GetDirectoryName(_settingsFilePath)!);
-            string json = JsonSerializer.Serialize(_settings, RynthAiJsonContext.Default.LegacyUiSettings);
-            File.WriteAllText(_settingsFilePath, json);
+            json = JsonSerializer.Serialize(_settings, RynthAiJsonContext.Default.LegacyUiSettings);
+        }
+        catch { return; }
+        if (WriteSettingsFile(_settingsFilePath, json))
+        {
             _lastSavedJson = json;
             WriteActiveProfile(_settings.SelectedProfile);
         }
-        catch { }
     }
+
+    /// <summary>
+    /// Writes a settings profile. A failure (folder not writable, file read-only or in use)
+    /// is reported in chat once per folder and logged (DataWriteGuard); it used to be
+    /// swallowed, so settings that never reached the disk looked saved (2026-10-13).
+    /// </summary>
+    private static bool WriteSettingsFile(string path, string json, out string reason, bool callerShows = false) =>
+        DataWriteGuard.TrySave("the settings profile", path, () =>
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, json);
+        }, out reason, callerShows);
+
+    private static bool WriteSettingsFile(string path, string json) => WriteSettingsFile(path, json, out _);
+
+    /// <summary>After a failed autosave, when CheckAndSave may try again (not every tick).</summary>
+    private long _autosaveRetryAt;
+    internal const long AutosaveRetryMs = 10_000;
 
     public string SaveAsProfile(string name)
     {
@@ -485,10 +507,10 @@ internal sealed class LegacyDashboardRenderer
         try
         {
             CaptureTransientUiState();
-            Directory.CreateDirectory(_charFolder);
             string json = JsonSerializer.Serialize(_settings, RynthAiJsonContext.Default.LegacyUiSettings);
             string path = GetProfileFilePath(name);
-            File.WriteAllText(path, json);
+            if (!WriteSettingsFile(path, json, out string reason, callerShows: true))
+                return $"Couldn't save profile '{name}' to {path}: {reason}";
             _settings.SelectedProfile = name;
             _settingsFilePath = path;
             _lastSavedJson = json;
@@ -521,19 +543,25 @@ internal sealed class LegacyDashboardRenderer
     private void CheckAndSave()
     {
         if (string.IsNullOrEmpty(_settingsFilePath)) return;
+        if (_autosaveRetryAt != 0 && Environment.TickCount64 < _autosaveRetryAt) return;
+        string json;
         try
         {
             CaptureTransientUiState();
-            string json = JsonSerializer.Serialize(_settings, RynthAiJsonContext.Default.LegacyUiSettings);
-            if (json != _lastSavedJson)
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(_settingsFilePath)!);
-                File.WriteAllText(_settingsFilePath, json);
-                _lastSavedJson = json;
-                WriteActiveProfile(_settings.SelectedProfile);
-            }
+            json = JsonSerializer.Serialize(_settings, RynthAiJsonContext.Default.LegacyUiSettings);
         }
-        catch { }
+        catch { return; }
+        if (json == _lastSavedJson) return;
+        if (WriteSettingsFile(_settingsFilePath, json))
+        {
+            _autosaveRetryAt = 0;
+            _lastSavedJson = json;
+            WriteActiveProfile(_settings.SelectedProfile);
+        }
+        else
+        {
+            _autosaveRetryAt = Environment.TickCount64 + AutosaveRetryMs;   // not a failing write every tick
+        }
     }
 
     // ── Profile items from the pack ──────────────────────────────────────────
@@ -597,6 +625,28 @@ internal sealed class LegacyDashboardRenderer
         var (w, c) = _weaponsUi.FillFromPack(cache.GetDirectInventory(forceRefresh: true).ToList(), playerId);
         SaveSettings();
         return $"[RynthAi] Added {w} weapon(s) and {c} consumable(s) from your pack.";
+    }
+
+    /// <summary>
+    /// /ra items clean and the Items panel's Remove Missing button: drops weapons and
+    /// consumables whose item is no longer in the pack (sold, dropped, used up, traded),
+    /// re-pointing an entry at an unlisted item of the same name when there is one.
+    /// Refuses while the inventory is still arriving, so a half-loaded pack can't empty the lists.
+    /// </summary>
+    public string CleanMissingItems(WorldObjectCache? cache, uint playerId)
+    {
+        if (cache == null || playerId == 0) return "[RynthAi] Not logged in.";
+        if (_packSetup != PackSetup.None) return "[RynthAi] Your inventory is still loading - try again in a few seconds.";
+        var inv = cache.GetDirectInventory(forceRefresh: true).ToList();
+        if (inv.Count == 0) return "[RynthAi] Your inventory hasn't loaded yet - nothing was removed.";
+
+        var (removed, relinked) = _weaponsUi.CleanMissing(inv);
+        if (removed.Count == 0 && relinked.Count == 0) return "[RynthAi] Items: everything listed is still in your inventory.";
+        SaveSettings();
+        string msg = $"[RynthAi] Items: removed {removed.Count} no longer in your inventory";
+        if (removed.Count > 0) msg += $" ({string.Join(", ", removed)})";
+        if (relinked.Count > 0) msg += $"; re-pointed {relinked.Count} at another item of the same name ({string.Join(", ", relinked)})";
+        return msg + ".";
     }
 
     // ── Per-server profile folders ───────────────────────────────────────────
@@ -772,9 +822,12 @@ internal sealed class LegacyDashboardRenderer
                 _monsterWatcher.EnableRaisingEvents = false;
             }
 
-            Directory.CreateDirectory(_monstersFolder);
             string json = JsonSerializer.Serialize(_settings.MonsterRules, RynthAiJsonContext.Default.MonsterRuleList);
-            File.WriteAllText(path, json);
+            DataWriteGuard.TrySave("the monster rules", path, () =>
+            {
+                Directory.CreateDirectory(_monstersFolder);
+                File.WriteAllText(path, json);
+            });
 
             if (_monsterWatcher != null)
                 _monsterWatcher.EnableRaisingEvents = wasEnabled;
@@ -950,6 +1003,9 @@ internal sealed class LegacyDashboardRenderer
                 StartMacroOnLogin          = s.StartMacroOnLogin,
                 PatrolOnLogin              = s.PatrolOnLogin,
                 YieldToVTank               = s.YieldToVTank,
+                FeatureServerNames         = IltHub.ServerFeatureGate.FormatList(s.FeatureServerNames),
+                ForceServerFeatures        = s.ForceServerFeatures,
+                ServerFeaturesStatus       = IltHub.ServerFeatureGate.Describe(s),
                 EnableRaycasting           = s.EnableRaycasting,
                 UseArcs                    = s.UseArcs,
                 BowArcVelocity             = s.BowArcVelocity,
@@ -976,6 +1032,9 @@ internal sealed class LegacyDashboardRenderer
                 StaminaToHealthAt          = s.StaminaToHealthAt,
                 StaminaToHealthMinStamina  = s.StaminaToHealthMinStamina,
                 StopMacroOnDeath           = s.StopMacroOnDeath,
+                DeathRecallMode            = s.DeathRecallMode,
+                DeathRecallSpellId         = s.DeathRecallSpellId,
+                DeathRecallItem            = s.DeathRecallItem,
                 StopMacroOnNoComponents    = s.StopMacroOnNoComponents,
                 StopLootingWhenPackFull    = s.StopLootingWhenPackFull,
                 StopMacroWhenPackFull      = s.StopMacroWhenPackFull,
@@ -1033,6 +1092,7 @@ internal sealed class LegacyDashboardRenderer
                 ShowTerrainPassability     = s.ShowTerrainPassability,
                 NavLabelMode               = NavLabelModes.Clamp(s.NavLabelMode),
                 NavGuideLine               = s.NavGuideLine,
+                NavResumeNearest           = s.NavResumeNearest,
                 OpenDoors                  = s.OpenDoors,
                 OpenDoorRange              = s.OpenDoorRange,
                 AutoUnlockDoors            = s.AutoUnlockDoors,
@@ -1046,6 +1106,11 @@ internal sealed class LegacyDashboardRenderer
                 NavTurnRateDegPerSec       = s.NavTurnRateDegPerSec,
                 NavTier1TurnSpeed          = s.NavTier1TurnSpeed,
                 PostPortalDelaySec         = s.PostPortalDelaySec,
+                DunPatrolCoverage          = s.DunPatrolCoverage,
+                DunPatrolSkipDeadEnds      = s.DunPatrolSkipDeadEnds,
+                DunPatrolAvoidFloors       = s.DunPatrolAvoidFloors,
+                DunPatrolWallDistance      = s.DunPatrolWallDistance,
+                DunPatrolLookInSize        = s.DunPatrolLookInSize,
                 T2Speed                    = s.T2Speed,
                 T2WalkWithinYd             = s.T2WalkWithinYd,
                 T2DistanceTo               = s.T2DistanceTo,
@@ -1058,6 +1123,7 @@ internal sealed class LegacyDashboardRenderer
                 RebuffSecondsRemaining     = s.RebuffSecondsRemaining,
                 RebuffTopOffSecondsRemaining = s.RebuffTopOffSecondsRemaining,
                 CastBuffsOverItemBuffs     = s.CastBuffsOverItemBuffs,
+                SkipUnusableBuffs          = s.SkipUnusableBuffs,
                 DisabledBuffs              = new List<string>(s.DisabledBuffs),
                 BuffMinSkillLevelTier1     = s.BuffMinSkillLevelTier1,
                 BuffMinSkillLevelTier2     = s.BuffMinSkillLevelTier2,
@@ -1082,11 +1148,12 @@ internal sealed class LegacyDashboardRenderer
                 LootOwnCorpse              = s.LootOwnCorpse,
                 EscapeHazards              = s.EscapeHazards,
                 TravelToOwnCorpse          = s.TravelToOwnCorpse,
-                ItemInfoOnSelect           = s.ItemInfoOnSelect,
+                ItemInfoOnSelect           = s.ItemInfoSettings.OnSelect,
                 EnableAutostack            = s.EnableAutostack,
                 ReadUnknownScrolls         = s.ReadUnknownScrolls,
                 EnableCombineSalvage       = s.EnableCombineSalvage,
                 CombineBagsDuringSalvage   = s.CombineBagsDuringSalvage,
+                SalvageWithoutPanel        = s.SalvageWithoutPanel,
                 LootInterItemDelayMs       = s.LootInterItemDelayMs,
                 LootContentSettleMs        = s.LootContentSettleMs,
                 LootEmptyCorpseMs          = s.LootEmptyCorpseMs,
@@ -1114,6 +1181,12 @@ internal sealed class LegacyDashboardRenderer
                 AutoVendorTriesTime        = s.AutoVendorTriesTime,
                 OffhandDefault             = s.OffhandDefault,
                 PreferDualWield            = s.PreferDualWield,
+                EnableGroundLoot           = s.EnableGroundLoot,
+                // Diagnostics (per PC, RynthLog)
+                DiagDebugToChat            = RynthLog.DebugToChat,
+                DiagFileLogAll             = RynthLog.FileLogAll,
+                DiagCategories             = RynthLog.FormatCategoryLevels(),
+                DiagFolder                 = RynthLog.Directory,
             };
             return JsonSerializer.Serialize(payload, RynthAiJsonContext.Default.SettingsBridgePayload);
         }
@@ -1162,6 +1235,9 @@ internal sealed class LegacyDashboardRenderer
             s.StartMacroOnLogin          = p.StartMacroOnLogin;
             s.PatrolOnLogin              = p.PatrolOnLogin;
             s.YieldToVTank               = p.YieldToVTank;
+            if (p.FeatureServerNames != null)
+                s.FeatureServerNames     = IltHub.ServerFeatureGate.ParseList(p.FeatureServerNames);
+            s.ForceServerFeatures        = p.ForceServerFeatures;
             s.EnableRaycasting           = p.EnableRaycasting;
             s.UseArcs                    = p.UseArcs;
             s.BowArcVelocity             = p.BowArcVelocity;
@@ -1190,6 +1266,10 @@ internal sealed class LegacyDashboardRenderer
             s.StaminaToHealthAt          = Math.Clamp(p.StaminaToHealthAt, 0, 100);
             s.StaminaToHealthMinStamina  = Math.Clamp(p.StaminaToHealthMinStamina, 0, 100);
             s.StopMacroOnDeath           = p.StopMacroOnDeath;
+            // Absent (older engine) = unchanged.
+            if (p.DeathRecallMode is int recallMode) s.DeathRecallMode = Math.Clamp(recallMode, 0, 2);
+            if (p.DeathRecallSpellId is int recallSpell && recallSpell > 0) s.DeathRecallSpellId = recallSpell;
+            if (p.DeathRecallItem is string recallItem) s.DeathRecallItem = recallItem.Trim();
             s.StopMacroOnNoComponents    = p.StopMacroOnNoComponents;
             s.StopLootingWhenPackFull    = p.StopLootingWhenPackFull;
             s.StopMacroWhenPackFull      = p.StopMacroWhenPackFull;
@@ -1247,6 +1327,7 @@ internal sealed class LegacyDashboardRenderer
             s.ShowTerrainPassability     = p.ShowTerrainPassability;
             if (p.NavLabelMode >= 0) s.NavLabelMode = NavLabelModes.Clamp(p.NavLabelMode);
             if (p.NavGuideLine is bool guideLine) s.NavGuideLine = guideLine;
+            if (p.NavResumeNearest is bool resumeNearest) s.NavResumeNearest = resumeNearest;   // absent = unchanged
             s.OpenDoors                  = p.OpenDoors;
             s.OpenDoorRange              = p.OpenDoorRange;
             s.AutoUnlockDoors            = p.AutoUnlockDoors;
@@ -1260,6 +1341,12 @@ internal sealed class LegacyDashboardRenderer
             s.NavTurnRateDegPerSec       = p.NavTurnRateDegPerSec;
             s.NavTier1TurnSpeed          = p.NavTier1TurnSpeed;
             s.PostPortalDelaySec         = p.PostPortalDelaySec;
+            // Dungeon patrol: absent (an older engine) = unchanged.
+            if (p.DunPatrolCoverage is int patrolCoverage)    s.DunPatrolCoverage     = Math.Clamp(patrolCoverage, 0, 2);
+            if (p.DunPatrolSkipDeadEnds is int patrolSpurs)   s.DunPatrolSkipDeadEnds = Math.Clamp(patrolSpurs, DungeonPatrolOptions.MaxDeadEndCellsMin, DungeonPatrolOptions.MaxDeadEndCellsMax);
+            if (p.DunPatrolAvoidFloors is bool patrolFloors)  s.DunPatrolAvoidFloors  = patrolFloors;
+            if (p.DunPatrolWallDistance is float patrolWalls) s.DunPatrolWallDistance = (float)Math.Clamp(patrolWalls, DungeonPatrolOptions.WallClearanceMin, DungeonPatrolOptions.WallClearanceMax);
+            if (p.DunPatrolLookInSize is float patrolLookIn)  s.DunPatrolLookInSize   = (float)Math.Clamp(patrolLookIn, DungeonPatrolOptions.LookInRoomMin, DungeonPatrolOptions.LookInRoomMax);
             s.T2Speed                    = p.T2Speed;
             s.T2WalkWithinYd             = p.T2WalkWithinYd;
             s.T2DistanceTo               = p.T2DistanceTo;
@@ -1272,6 +1359,7 @@ internal sealed class LegacyDashboardRenderer
             s.RebuffSecondsRemaining     = p.RebuffSecondsRemaining;
             if (p.RebuffTopOffSecondsRemaining > 0) s.RebuffTopOffSecondsRemaining = p.RebuffTopOffSecondsRemaining;
             if (p.CastBuffsOverItemBuffs is bool castOverItems) s.CastBuffsOverItemBuffs = castOverItems;   // absent = unchanged
+            if (p.SkipUnusableBuffs is bool skipUnusable) s.SkipUnusableBuffs = skipUnusable;   // absent = unchanged
             if (p.DisabledBuffs is { } disabledBuffs) s.DisabledBuffs = new List<string>(disabledBuffs);  // absent = unchanged
             s.BuffMinSkillLevelTier1     = p.BuffMinSkillLevelTier1;
             s.BuffMinSkillLevelTier2     = p.BuffMinSkillLevelTier2;
@@ -1293,11 +1381,12 @@ internal sealed class LegacyDashboardRenderer
             if (p.EscapeHazards is bool escape) s.EscapeHazards = escape;                 // absent = unchanged
             if (p.LootOwnCorpse is bool lootOwn) s.LootOwnCorpse = lootOwn;               // absent = unchanged
             if (p.TravelToOwnCorpse is bool travelOwn) s.TravelToOwnCorpse = travelOwn;   // absent = unchanged
-            if (p.ItemInfoOnSelect is bool infoOnSelect) s.ItemInfoOnSelect = infoOnSelect; // absent = unchanged
+            if (p.ItemInfoOnSelect is bool infoOnSelect) s.ItemInfoSettings.OnSelect = infoOnSelect; // absent = unchanged
             s.EnableAutostack            = p.EnableAutostack;
             s.ReadUnknownScrolls         = p.ReadUnknownScrolls;
             s.EnableCombineSalvage       = p.EnableCombineSalvage;
             s.CombineBagsDuringSalvage   = p.CombineBagsDuringSalvage;
+            if (p.SalvageWithoutPanel is bool salvNoPanel) s.SalvageWithoutPanel = salvNoPanel; // absent = unchanged
             s.LootInterItemDelayMs       = p.LootInterItemDelayMs;
             s.LootContentSettleMs        = p.LootContentSettleMs;
             s.LootEmptyCorpseMs          = p.LootEmptyCorpseMs;
@@ -1326,6 +1415,11 @@ internal sealed class LegacyDashboardRenderer
             // Off hand: only fields the sender actually included (the engine face doesn't draw them yet)
             if (p.OffhandDefault is string od && OffhandRules.TryParse(od, out var odMode)) s.OffhandDefault = OffhandRules.SettingValue(odMode);
             if (p.PreferDualWield            is bool pdw)     s.PreferDualWield            = pdw;
+            s.EnableGroundLoot           = p.EnableGroundLoot;
+            // Diagnostics: each setter rewrites diagnostics.json, so only touch what changed.
+            if (p.DiagDebugToChat != RynthLog.DebugToChat) RynthLog.DebugToChat = p.DiagDebugToChat;
+            if (p.DiagFileLogAll  != RynthLog.FileLogAll)  RynthLog.FileLogAll  = p.DiagFileLogAll;
+            RynthLog.ApplyCategoryLevels(p.DiagCategories);
             SaveSettings();
         }
         catch { }
@@ -1498,12 +1592,11 @@ internal sealed class LegacyDashboardRenderer
     {
         string markerPath = GetActiveProfileMarkerPath();
         if (string.IsNullOrEmpty(markerPath)) return;
-        try
+        DataWriteGuard.TrySave("the active-profile marker", markerPath, () =>
         {
             Directory.CreateDirectory(_charFolder);
             File.WriteAllText(markerPath, profileName);
-        }
-        catch { }
+        });
     }
 
     private void SwitchProfile(string newProfile)
@@ -1551,8 +1644,7 @@ internal sealed class LegacyDashboardRenderer
             {
                 _settings.CurrentRoute = NavRouteParser.Load(_settings.CurrentNavPath);
                 _settings.ActiveNavIndex =
-                    (_settings.CurrentRoute.RouteType == NavRouteType.Follow ||
-                     _settings.CurrentRoute.RouteType == NavRouteType.Once)
+                    NavRouteParser.StartsAtFirstPoint(_settings.CurrentRoute.RouteType, _settings.NavResumeNearest)
                         ? 0
                         : FindNearestWaypoint(_settings.CurrentRoute);
             }
@@ -1604,8 +1696,14 @@ internal sealed class LegacyDashboardRenderer
         dst.NavTier1TurnSpeed        = tmp.NavTier1TurnSpeed;
         dst.PostPortalDelaySec       = tmp.PostPortalDelaySec;
         dst.NavRecoveryEnabled       = tmp.NavRecoveryEnabled;
+        dst.NavResumeNearest         = tmp.NavResumeNearest;
         dst.NavOffTrackYards         = Math.Max(160f, tmp.NavOffTrackYards);
         dst.NavMaxDetourAttempts     = Math.Clamp(tmp.NavMaxDetourAttempts, 1, 10);
+        dst.DunPatrolCoverage        = tmp.DunPatrolCoverage;
+        dst.DunPatrolSkipDeadEnds    = tmp.DunPatrolSkipDeadEnds;
+        dst.DunPatrolAvoidFloors     = tmp.DunPatrolAvoidFloors;
+        dst.DunPatrolWallDistance    = tmp.DunPatrolWallDistance;
+        dst.DunPatrolLookInSize      = tmp.DunPatrolLookInSize;
         dst.T2Speed                  = tmp.T2Speed;
         dst.T2DistanceTo             = tmp.T2DistanceTo;
         dst.T2ReissueMs              = tmp.T2ReissueMs;
@@ -1619,12 +1717,22 @@ internal sealed class LegacyDashboardRenderer
         dst.NavProfileIdx            = tmp.NavProfileIdx;
         dst.LootProfileIdx           = tmp.LootProfileIdx;
         dst.MetaProfileIdx           = tmp.MetaProfileIdx;
+        dst.CurrentBuffProfilePath   = tmp.CurrentBuffProfilePath ?? string.Empty;
+        dst.BuffProfileIdx           = tmp.BuffProfileIdx;
+        dst.ShowSpellsWindow         = tmp.ShowSpellsWindow;
         dst.EnableAutostack          = tmp.EnableAutostack;
         dst.EnableAutocram           = tmp.EnableAutocram;
         dst.ReadUnknownScrolls       = tmp.ReadUnknownScrolls;
         dst.EnableCombineSalvage     = tmp.EnableCombineSalvage;
         dst.CombineBagsDuringSalvage = tmp.CombineBagsDuringSalvage;
+        dst.SalvageWithoutPanel      = tmp.SalvageWithoutPanel;
         dst.ShowTargetStaminaMana    = tmp.ShowTargetStaminaMana;
+        // Item info (/ra iteminfo, "Describe items when selected") and the nav overlay are whole
+        // option objects; a hand-edited profile can carry null or out-of-range values.
+        dst.ItemInfoSettings         = tmp.ItemInfoSettings ?? new();
+        dst.ItemInfoSettings.Sanitize();
+        dst.NavOverlay               = tmp.NavOverlay ?? new();
+        dst.NavOverlay.Sanitize();
         dst.EnableMissileCrafting    = tmp.EnableMissileCrafting;
         dst.MissileCraftAmmoThreshold= tmp.MissileCraftAmmoThreshold;
         dst.LootInterItemDelayMs     = tmp.LootInterItemDelayMs;
@@ -1659,6 +1767,9 @@ internal sealed class LegacyDashboardRenderer
         dst.StaminaToHealthAt        = tmp.StaminaToHealthAt;
         dst.StaminaToHealthMinStamina= tmp.StaminaToHealthMinStamina;
         dst.StopMacroOnDeath         = tmp.StopMacroOnDeath;
+        dst.DeathRecallMode          = Math.Clamp(tmp.DeathRecallMode, 0, 2);
+        dst.DeathRecallSpellId       = tmp.DeathRecallSpellId > 0 ? tmp.DeathRecallSpellId : 48;
+        dst.DeathRecallItem          = tmp.DeathRecallItem ?? string.Empty;
         dst.StopMacroOnNoComponents  = tmp.StopMacroOnNoComponents;
         dst.StopLootingWhenPackFull  = tmp.StopLootingWhenPackFull;
         dst.StopMacroWhenPackFull    = tmp.StopMacroWhenPackFull;
@@ -1706,13 +1817,15 @@ internal sealed class LegacyDashboardRenderer
         dst.LootOwnCorpse            = tmp.LootOwnCorpse;
         dst.EscapeHazards            = tmp.EscapeHazards;
         dst.TravelToOwnCorpse        = tmp.TravelToOwnCorpse;
-        dst.ItemInfoOnSelect         = tmp.ItemInfoOnSelect;
         dst.LootOnlyRareCorpses      = tmp.LootOnlyRareCorpses;
+        dst.EnableGroundLoot         = tmp.EnableGroundLoot;
         dst.PeaceModeWhenIdle        = tmp.PeaceModeWhenIdle;
         dst.RebuffWhenIdle           = tmp.RebuffWhenIdle;
         dst.RebuffSecondsRemaining   = tmp.RebuffSecondsRemaining;
         dst.RebuffTopOffSecondsRemaining = tmp.RebuffTopOffSecondsRemaining;
         dst.CastBuffsOverItemBuffs   = tmp.CastBuffsOverItemBuffs;
+        dst.FastBuffChain            = tmp.FastBuffChain;
+        dst.SkipUnusableBuffs        = tmp.SkipUnusableBuffs;
         dst.DisabledBuffs            = tmp.DisabledBuffs;
         dst.BlacklistAttempts             = tmp.BlacklistAttempts;
         dst.BlacklistTimeoutSec           = tmp.BlacklistTimeoutSec;
@@ -1743,6 +1856,7 @@ internal sealed class LegacyDashboardRenderer
         dst.MonsterRules             = tmp.MonsterRules;
         dst.MonsterNameBlacklist     = tmp.MonsterNameBlacklist ?? new();
         dst.ItemRules                = tmp.ItemRules;
+        dst.AmmoRules                = tmp.AmmoRules ?? new();
         dst.ConsumableRules          = tmp.ConsumableRules;
         dst.BuffRules                = tmp.BuffRules;
         dst.MetaRules                = tmp.MetaRules;
@@ -1810,12 +1924,17 @@ internal sealed class LegacyDashboardRenderer
         dst.StartMacroOnLogin        = tmp.StartMacroOnLogin;
         dst.PatrolOnLogin            = tmp.PatrolOnLogin;
         dst.YieldToVTank             = tmp.YieldToVTank;
+        dst.FeatureServerNames       = tmp.FeatureServerNames ?? new(IltHub.ServerFeatureGate.DefaultServerNames);
+        dst.ForceServerFeatures      = tmp.ForceServerFeatures;
         dst.ShowTerrainPassability   = tmp.ShowTerrainPassability;
         dst.NavLabelMode             = NavLabelModes.Clamp(tmp.NavLabelMode);
         dst.NavGuideLine             = tmp.NavGuideLine;
         dst.GiveQueueIntervalMs      = tmp.GiveQueueIntervalMs;
         dst.T11ItemAugsOverride      = tmp.T11ItemAugsOverride;
         dst.SpellCastIntervalMs      = tmp.SpellCastIntervalMs;
+        dst.StuckCastBreakMs         = tmp.StuckCastBreakMs;
+        dst.RecoveryRetryMs          = tmp.RecoveryRetryMs;
+        dst.HpFailsafeRecall         = tmp.HpFailsafeRecall;
         dst.AttackSpellIntervalMs    = tmp.AttackSpellIntervalMs;
         dst.EmbeddedNavs             = tmp.EmbeddedNavs;
         dst.SuppressRetailRadar      = tmp.SuppressRetailRadar;
@@ -1871,7 +1990,8 @@ internal sealed class LegacyDashboardRenderer
         _targetMana = 0;
         _targetMaxMana = 0;
         _targetHealthDisplay = targetId == 0 ? "0" : "--";
-        if (targetId != 0 && _host.HasQueryHealth) _host.QueryHealth(targetId);
+        // No health query here: RynthAiPlugin.OnSelectedTargetChange sends the one guarded
+        // query (creatures only); this ran on every corpse and item the engine selects.
     }
 
     public void OnUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth)
@@ -2095,6 +2215,40 @@ internal sealed class LegacyDashboardRenderer
         RefreshNavFiles();
         RefreshLootFiles();
         RefreshMetaFiles();
+        RefreshBuffProfileFiles();
+    }
+
+    /// <summary>
+    /// Buff profile list for Loaded Files (Buffs): "Built-in" first (buffing's own list), then
+    /// every BuffProfiles\*.json. Re-selects the saved path; a missing file falls back to Built-in.
+    /// Public so the Spells window can refresh it after saving or deleting a profile.
+    /// </summary>
+    public void RefreshBuffProfileFiles()
+    {
+        var list = new List<string> { BuiltInBuffProfileLabel };
+        int idx = 0;
+        foreach (string file in BuffProfileStore.ListFileNames())
+        {
+            list.Add(file);
+            if (Path.Combine(BuffProfileStore.Folder, file).Equals(_settings.CurrentBuffProfilePath, StringComparison.OrdinalIgnoreCase))
+                idx = list.Count - 1;
+        }
+        lock (_profileListsLock) { _buffFiles.Clear(); _buffFiles.AddRange(list); }
+        _settings.BuffProfileIdx = idx;
+    }
+
+    /// <summary>Label of the first Buffs entry: no profile, buffing uses its built-in list.</summary>
+    public const string BuiltInBuffProfileLabel = "Built-in";
+
+    /// <summary>
+    /// Makes <paramref name="path"/> the buff profile buffing uses (empty = built-in list) and saves
+    /// the settings. BuffManager notices the path change on its next tick.
+    /// </summary>
+    public void SetActiveBuffProfile(string path)
+    {
+        _settings.CurrentBuffProfilePath = path ?? string.Empty;
+        RefreshBuffProfileFiles();
+        SaveSettings();
     }
 
     private void RefreshProfilesList()
@@ -2338,10 +2492,10 @@ internal sealed class LegacyDashboardRenderer
             _host.WriteToChat($"[RynthAi] {_settings.CurrentRoute.LoadWarning}", 4);
         }
         // Follow and Once routes start from the top so opening Recall/Portal/Chat
-        // actions always fire. Circular and Linear routes jump in at the nearest point.
+        // actions always fire. Circular and Linear routes jump in at the nearest point
+        // (unless NavResumeNearest is off).
         _settings.ActiveNavIndex =
-            (_settings.CurrentRoute.RouteType == NavRouteType.Follow ||
-             _settings.CurrentRoute.RouteType == NavRouteType.Once)
+            NavRouteParser.StartsAtFirstPoint(_settings.CurrentRoute.RouteType, _settings.NavResumeNearest)
                 ? 0
                 : FindNearestWaypoint(_settings.CurrentRoute);
         SaveSettings();
@@ -2394,6 +2548,13 @@ internal sealed class LegacyDashboardRenderer
                 ActiveNavIndex    = _settings.ActiveNavIndex,
                 NavFiles          = new List<string>(_navFiles),
                 Points            = points,
+                MapEdit           = NavMapEdit.Version,
+                TrackBreadcrumbs  = _settings.NavOverlay.TrackBreadcrumbs,
+                ShowRouteOverlay  = _settings.NavOverlay.ShowRouteMarkers,
+                IsRecording       = _settings.IsRecordingNav,
+                TrailPoints       = NavBreadcrumbs?.Trail.Length ?? 0,
+                TrailYards        = NavBreadcrumbs?.TrailYards ?? 0,
+                EditStatus        = CurrentNavEditStatus(),
             };
             return JsonSerializer.Serialize(payload, RynthAiJsonContext.Default.NavBridgePayload);
         }
@@ -2420,6 +2581,18 @@ internal sealed class LegacyDashboardRenderer
 
                 case "stopNav":
                     _settings.EnableNavigation = false;
+                    SaveSettings();
+                    break;
+
+                case "setBreadcrumbs":
+                    // Nav panel "Breadcrumbs": record (and draw) the walked trail.
+                    _settings.NavOverlay.TrackBreadcrumbs = cmd.On;
+                    SaveSettings();
+                    break;
+
+                case "setRouteOverlay":
+                    // Nav panel "Route overlay": route rings / lines, waypoint labels, guide line.
+                    _settings.NavOverlay.ShowRouteMarkers = cmd.On;
                     SaveSettings();
                     break;
 
@@ -2499,6 +2672,36 @@ internal sealed class LegacyDashboardRenderer
                     int ni = _navFiles.IndexOf(cmd.NavName);
                     if (ni >= 0) { _selectedNavIdx = ni; LoadSelectedNav(); SaveSettings(); }
                     break;
+
+                default:
+                    // Route editor commands (multi-select edits, pause / portal steps, trail -> route).
+                    HandleNavEditCommand(cmd);
+                    break;
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// The Dungeon Map's route edits (addPointAt / movePointTo / setActive, see NavMapEdit),
+    /// dispatched from RynthPluginSendNavCommand. Same thread and save path as HandleNavCommand.
+    /// </summary>
+    public void HandleMapNavCommand(NavCommand cmd)
+    {
+        try
+        {
+            switch (NavMapEdit.Apply(_settings, cmd, out string status))
+            {
+                case NavMapEdit.Result.RouteChanged: _navigationUi.TryAutoSaveNav(); break;
+                case NavMapEdit.Result.ActiveChanged: SaveSettings(); break;
+            }
+            // "setActive" is shared with the Nav panel's route editor (HandleNavEditCommand):
+            // same effect (ActiveNavIndex + settings save), and the result goes to the Nav
+            // panel's status line either way.
+            if (status.Length > 0)
+            {
+                SetNavEditStatus(status);
+                _host.Log($"[RynthAi] Map route edit: {status}");
             }
         }
         catch { }
@@ -2559,18 +2762,23 @@ internal sealed class LegacyDashboardRenderer
         // while a Refresh*Files mutator Clear()s it on the pump thread — that
         // race threw InvalidOperationException and, escaping this snapshot
         // poll's reverse-P/Invoke boundary, fail-fasted the NativeAOT runtime.
-        List<string> profilesCopy, navCopy, lootCopy, metaCopy;
+        List<string> profilesCopy, navCopy, lootCopy, metaCopy, buffCopy;
         lock (_profileListsLock)
         {
             profilesCopy = new List<string>(_profiles);
             navCopy      = new List<string>(_navFiles);
             lootCopy     = new List<string>(_lootFiles);
             metaCopy     = new List<string>(_metaFiles);
+            buffCopy     = new List<string>(_buffFiles);
         }
         AppendStringArray(sb, "profiles", profilesCopy); sb.Append(',');
         AppendStringArray(sb, "navProfiles", navCopy); sb.Append(',');
         AppendStringArray(sb, "lootProfiles", lootCopy); sb.Append(',');
         AppendStringArray(sb, "metaProfiles", metaCopy); sb.Append(',');
+        AppendStringArray(sb, "buffProfiles", buffCopy); sb.Append(',');
+        AppendString(sb, "currentBuffName",
+            string.IsNullOrEmpty(_settings.CurrentBuffProfilePath) ? BuiltInBuffProfileLabel : Path.GetFileNameWithoutExtension(_settings.CurrentBuffProfilePath)); sb.Append(',');
+        AppendInt(sb, "selectedBuffIdx", _settings.BuffProfileIdx); sb.Append(',');
         AppendString(sb, "currentNavName",
             string.IsNullOrEmpty(_settings.CurrentNavPath) ? "None" : Path.GetFileNameWithoutExtension(_settings.CurrentNavPath)); sb.Append(',');
         AppendString(sb, "currentLootName",
@@ -2704,7 +2912,7 @@ internal sealed class LegacyDashboardRenderer
     }
 
     /// <summary>
-    /// Profile kinds: 0 = nav, 1 = loot, 2 = meta, 3 = settings profile.
+    /// Profile kinds: 0 = nav, 1 = loot, 2 = meta, 3 = settings profile, 4 = buff profile.
     /// Index is into the matching list returned in BuildSnapshotJson.
     /// </summary>
     public void SelectProfileAtIndex(int kind, int index)
@@ -2715,7 +2923,7 @@ internal sealed class LegacyDashboardRenderer
         // AddRange() on the pump thread — a torn read or
         // ArgumentOutOfRangeException. Snapshot the one list this call needs
         // under _profileListsLock first, mirroring BuildSnapshotJson.
-        string? navFile = null, lootFile = null, metaFile = null, profileName = null;
+        string? navFile = null, lootFile = null, metaFile = null, profileName = null, buffFile = null;
         lock (_profileListsLock)
         {
             switch (kind)
@@ -2724,6 +2932,7 @@ internal sealed class LegacyDashboardRenderer
                 case 1: if (index >= 0 && index < _lootFiles.Count) lootFile = _lootFiles[index]; break;
                 case 2: if (index >= 0 && index < _metaFiles.Count) metaFile = _metaFiles[index]; break;
                 case 3: if (index >= 0 && index < _profiles.Count) profileName = _profiles[index]; break;
+                case 4: if (index >= 0 && index < _buffFiles.Count) buffFile = _buffFiles[index]; break;
             }
         }
 
@@ -2751,6 +2960,10 @@ internal sealed class LegacyDashboardRenderer
                 break;
             case 3:
                 if (profileName != null) SwitchProfile(profileName);
+                break;
+            case 4:
+                if (buffFile != null)
+                    SetActiveBuffProfile(index == 0 ? string.Empty : Path.Combine(BuffProfileStore.Folder, buffFile));
                 break;
         }
     }
@@ -3039,9 +3252,21 @@ internal sealed class LegacyDashboardRenderer
                 case "save_file":
                     if (!string.IsNullOrEmpty(cmd.Path))
                     {
-                        AfFileWriter.Save(cmd.Path, _settings.MetaRules, _settings.EmbeddedNavs);
-                        _settings.CurrentMetaPath = cmd.Path;
-                        SaveSettings();
+                        string savePath = cmd.Path;
+                        bool saved;
+                        string why;
+                        lock (_settings.MetaRulesLock)
+                            saved = DataWriteGuard.TrySave("the meta", savePath,
+                                () => AfFileWriter.Save(savePath, _settings.MetaRules, _settings.EmbeddedNavs), out why, callerShows: true);
+                        if (saved)
+                        {
+                            _settings.CurrentMetaPath = savePath;
+                            SaveSettings();
+                        }
+                        else
+                        {
+                            ReportMetaApply(false, $"Meta not saved to {savePath}: {why}");
+                        }
                     }
                     break;
 
@@ -3167,7 +3392,7 @@ internal sealed class LegacyDashboardRenderer
                 _host.WriteToChat($"[RynthAi] Converted .met → {System.IO.Path.GetFileName(path)} for editing (original .met left untouched).", 1);
             }
             lock (_settings.MetaRulesLock)
-                AfFileWriter.Save(path, _settings.MetaRules, _settings.EmbeddedNavs);
+                DataWriteGuard.TrySave("the meta", path, () => AfFileWriter.Save(path, _settings.MetaRules, _settings.EmbeddedNavs));
         }
         catch { }
     }

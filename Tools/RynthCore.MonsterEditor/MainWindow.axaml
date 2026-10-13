@@ -169,14 +169,19 @@
                 </DataGridTemplateColumn>
 
                 <!-- Priority -->
-                <DataGridTemplateColumn Header="P" Width="32" MinWidth="30">
+                <DataGridTemplateColumn Width="40" MinWidth="36">
+                    <DataGridTemplateColumn.Header>
+                        <TextBlock Text="P" ToolTip.Tip="Priority: higher is fought first. 0 = IGNORE: never attacked, even if it attacks you, and it does not hold up nav, looting or buffs."/>
+                    </DataGridTemplateColumn.Header>
                     <DataGridTemplateColumn.CellTemplate><DataTemplate>
-                        <TextBlock Text="{Binding Priority}"
+                        <TextBlock Text="{Binding PriorityText}"
                                    HorizontalAlignment="Center"
-                                   VerticalAlignment="Center"/>
+                                   VerticalAlignment="Center"
+                                   ToolTip.Tip="Priority: higher is fought first. 0 = IGNORE: never attacked, even if it attacks you, and it does not hold up nav, looting or buffs."/>
                     </DataTemplate></DataGridTemplateColumn.CellTemplate>
                     <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
-                        <TextBox Text="{Binding Priority, Mode=TwoWay}" Padding="3,1"/>
+                        <TextBox Text="{Binding Priority, Mode=TwoWay}" Padding="3,1"
+                                 ToolTip.Tip="Priority: higher is fought first. 0 = IGNORE: never attacked, even if it attacks you, and it does not hold up nav, looting or buffs."/>
                     </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
                 </DataGridTemplateColumn>
 

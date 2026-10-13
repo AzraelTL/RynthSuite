@@ -21,6 +21,7 @@ internal static class CombatStallWatchdogTests
         r.Add("stall: a swing after a step is a recovery", Recovery);
         r.Add("stall: a tick gap starts the count over", TickGapResets);
         r.Add("stall: ineligible never acts", Ineligible);
+        r.Add("stall: Unfire takes a step back - the same step is due again next tick, not 3 s later", UnfireRetries);
     }
 
     /// <summary>Ticks every 500 ms from <paramref name="fromMs"/> to <paramref name="toMs"/>
@@ -94,5 +95,28 @@ internal static class CombatStallWatchdogTests
             if (w.Tick(T0.AddMilliseconds(t), eligible: false, NoEvidence, out _) != Act.None) acted++;
         Check.Eq(acted, 0, "no action in a minute of ineligible ticks");
         Check.Eq(w.Episodes, 0, "no episodes");
+    }
+
+    private static void UnfireRetries()
+    {
+        var w = new CombatStallWatchdog();
+        Check.Eq(RunUntilAction(w, 0, 20_000, NoEvidence), (Act.Reissue, 6000), "step 1");
+        Check.Eq(RunUntilAction(w, 6500, 20_000, NoEvidence), (Act.Reselect, 9000), "step 2");
+        Check.Eq(RunUntilAction(w, 9500, 20_000, NoEvidence), (Act.ToggleMode, 12000), "step 3 fires");
+
+        w.Unfire();   // the engine refused the toggle
+        Check.Eq(w.CurrentStep, 2, "Unfire: back at step 2");
+        Check.Eq(RunUntilAction(w, 12_500, 20_000, NoEvidence), (Act.ToggleMode, 12_500), "the toggle is due again on the very next tick");
+        Check.Eq(RunUntilAction(w, 13_000, 20_000, NoEvidence), (Act.Rewield, 15_500), "an accepted toggle then spaces step 4 a full 3 s after it");
+
+        // Unfire at step 1 gives the episode back too.
+        var v = new CombatStallWatchdog();
+        Check.Eq(RunUntilAction(v, 0, 10_000, NoEvidence), (Act.Reissue, 6000), "step 1");
+        Check.Eq(v.Episodes, 1, "one episode");
+        v.Unfire();
+        Check.Eq(v.CurrentStep, 0, "back to no step");
+        Check.Eq(v.Episodes, 0, "and the episode is not counted until a step really goes out");
+        Check.Eq(RunUntilAction(v, 6500, 10_000, NoEvidence), (Act.Reissue, 6500), "step 1 again next tick");
+        Check.Eq(v.Episodes, 1, "one episode");
     }
 }

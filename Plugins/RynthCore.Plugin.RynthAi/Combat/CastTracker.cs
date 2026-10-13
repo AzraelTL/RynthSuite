@@ -38,6 +38,9 @@ internal sealed class CastTracker
         public bool Done;         // its result line, or UseDone(0) after its incantation
         public bool Nudged;       // the one movement nudge for this held cast has gone out
         public bool StuckLogged;
+        // The script combat hook chose this cast (a heal): no early nudge, HeldAfterIncantMs only.
+        // A Vitality Siphon's result can come 2.75 s after its incantation (2026-10-10 log).
+        public bool Script;
         public bool HasIncantation => IncantAt != DateTime.MinValue;
     }
 

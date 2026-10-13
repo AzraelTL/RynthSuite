@@ -31,6 +31,7 @@ public sealed partial class RynthAiPlugin
             Log("[RynthAi] Death detected (health 0).");
             try { RecordDeathSpot(); }   // where the corpse will be (RynthAiPlugin.OwnCorpse.cs)
             catch (Exception ex) { Log($"[RynthAi] Death spot not recorded: {ex.Message}"); }
+            ArmDeathRecall(s);           // before Stop Macro On Death: it reads whether the macro ran
             if (s.StopMacroOnDeath && s.IsMacroRunning)
             {
                 HandleMacroRunCommand("stop", Array.Empty<string>());
@@ -55,6 +56,16 @@ public sealed partial class RynthAiPlugin
     /// reloaded the world) came with the bot still casting and dequipping through
     /// the death. Reads the vitals every tick (the regular poll is every 30).
     /// </summary>
+    private bool _wasPortalingForPacer;
+
+    /// <summary>Portal space starts: the server dropped what was open (no breaker on a teleport's gap).</summary>
+    private void NotePortalForPacer()
+    {
+        bool portaling = Host.HasIsPortaling && Host.IsPortaling();
+        if (portaling && !_wasPortalingForPacer) RynthCore.Plugin.Shared.ActionPacer.Forget("portal space");
+        _wasPortalingForPacer = portaling;
+    }
+
     private bool HoldForDeath()
     {
         long now = Environment.TickCount64;
@@ -82,12 +93,18 @@ public sealed partial class RynthAiPlugin
                 Log("[RynthAi] Died — holding all actions until respawned and out of portal space.");
                 _combatManager?.ReleaseHeldTurn();
                 _navigationEngine?.Stop();
+                RynthCore.Plugin.Shared.ActionPacer.Forget("death");   // the server dropped whatever was open
+                _buffManager?.CancelPendingRecall("death");                // no /lifestone or macro restart after the respawn
             }
             else
             {
                 Log("[RynthAi] Respawned — resuming.");
-                try { OnRespawnedForOwnCorpse(); }   // Travel Back To My Corpse
-                catch (Exception ex) { Log($"[RynthAi] Own corpse travel not started: {ex.Message}"); }
+                try
+                {
+                    // Recall On Death first; the corpse trip then starts from where it lands (EndDeathRecall).
+                    if (!StartDeathRecall()) OnRespawnedForOwnCorpse();   // Travel Back To My Corpse
+                }
+                catch (Exception ex) { Log($"[RynthAi] Death recall / own corpse travel not started: {ex.Message}"); }
             }
         }
         return hold;

@@ -140,6 +140,14 @@ public sealed class NavRouteParser
     public static bool IsPlainWaypoint(NavPointType t) => t is NavPointType.Point or NavPointType.Checkpoint;
 
     /// <summary>
+    /// Whether a freshly loaded route starts at [0] rather than at its nearest waypoint.
+    /// Follow and Once routes always do, so their opening Recall/Portal/Chat steps fire;
+    /// with <c>NavResumeNearest</c> off every route does.
+    /// </summary>
+    public static bool StartsAtFirstPoint(NavRouteType type, bool resumeNearest)
+        => !resumeNearest || type is NavRouteType.Follow or NavRouteType.Once;
+
+    /// <summary>
     /// Follow-type nav files (route type 3) name a character to follow instead of
     /// listing points: "uTank2 NAV 1.2", 3, name, id. Empty for other routes.
     /// </summary>
@@ -277,6 +285,17 @@ public sealed class NavRouteParser
     public void Save(string filePath)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(filePath) ?? ".");
+        // A .nav marked read-only can't be overwritten: clear that first (no dependencies here:
+        // this file is linked into RynthNav and test tools; RynthAi reports failures itself).
+        try
+        {
+            if (File.Exists(filePath))
+            {
+                FileAttributes attrs = File.GetAttributes(filePath);
+                if ((attrs & FileAttributes.ReadOnly) != 0) File.SetAttributes(filePath, attrs & ~FileAttributes.ReadOnly);
+            }
+        }
+        catch { /* the write below fails and the caller reports why */ }
 
         using var writer = new StreamWriter(filePath, false);
         WriteTo(writer);

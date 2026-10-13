@@ -4,18 +4,21 @@ using System.IO;
 using System.Reflection;
 using System.Text.Json;
 using RynthCore.Plugin.RynthAi;
+using RynthCore.Plugin.RynthAi.ItemInfo;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.RynthAiTests.Harness;
 
 namespace RynthCore.RynthAiHostTests.Tests;
 
-// Loading a profile (login, profile switch) runs LegacyDashboardRenderer.CopySettings, which
-// copies the loaded file into the live settings one field at a time. A field with no copy line
-// keeps its in-memory default, and the next autosave writes that default over the profile.
-// PetAutoRefill, MonsterNameBlacklist and the radar placement were dropped that way.
+// 2026-10-08: "Describe items when selected" and the Item Info options did not stay with the
+// character's profile. They were written to the profile file, but LegacyDashboardRenderer.
+// CopySettings (used by every login and profile switch) copies the loaded profile field by
+// field and had no line for ItemInfoSettings, so the in-memory defaults stayed and the next
+// autosave wrote them over the file. NavOverlay, PetAutoRefill, EnableGroundLoot,
+// MonsterNameBlacklist, AmmoRules and the radar placement were dropped the same way.
 //  - every serialized LegacyUiSettings member set to a non-default value comes through
 //    CopySettings (catches any field added later without a copy line);
-//  - a profile written to disk and loaded back serializes unchanged.
+//  - the item info options survive a save / load through a profile file on disk.
 internal static class ProfileLoadTests
 {
     private const BindingFlags Any = BindingFlags.Static | BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
@@ -23,7 +26,8 @@ internal static class ProfileLoadTests
     public static void Register(Runner r)
     {
         r.Add("profile: every saved setting survives loading (CopySettings lists each serialized field)", EverySavedFieldIsCopied);
-        r.Add("profile: settings survive a save and a reload through the profile file", SettingsSurviveReload);
+        r.Add("profile: Describe Items and the Item Info options survive a save and a reload", ItemInfoSurvivesReload);
+        r.Add("profile: a profile with null item info / nav overlay loads defaults, not null", NullNestedOptionsLoadDefaults);
     }
 
     /// <summary>LegacyDashboardRenderer.CopySettings(src, dst): what LoadSettings / SwitchProfile run.</summary>
@@ -36,17 +40,16 @@ internal static class ProfileLoadTests
         mutated = null;
         if (name == nameof(LegacyUiSettings.OffhandDefault)) { mutated = "Shield"; return true; }   // must parse as an OffhandMode
         if (name == nameof(LegacyUiSettings.NavLabelMode))   { mutated = 1; return true; }          // NavLabelModes.Clamp: 0..2
-        Type t = Nullable.GetUnderlyingType(type) ?? type;
-        if (t == typeof(bool))   { mutated = !((bool?)value ?? false); return true; }
-        if (t == typeof(int))    { mutated = ((int?)value ?? 0) + 3; return true; }   // +3: MovementMode 1/2 map back to 0
-        if (t == typeof(long))   { mutated = ((long?)value ?? 0) + 3; return true; }
-        if (t == typeof(uint))   { mutated = ((uint?)value ?? 0) + 3; return true; }
-        if (t == typeof(float))  { mutated = ((float?)value ?? 0f) + 3f; return true; }
-        if (t == typeof(double)) { mutated = ((double?)value ?? 0.0) + 3.0; return true; }
-        if (t == typeof(string)) { mutated = (string?)value + "x"; return true; }
-        if (t.IsEnum)
+        if (type == typeof(bool))   { mutated = !(bool)value!; return true; }
+        if (type == typeof(int))    { mutated = (int)value! + 3; return true; }   // +3: MovementMode 1/2 map back to 0
+        if (type == typeof(long))   { mutated = (long)value! + 3; return true; }
+        if (type == typeof(uint))   { mutated = (uint)value! + 3; return true; }
+        if (type == typeof(float))  { mutated = (float)value! + 3f; return true; }
+        if (type == typeof(double)) { mutated = (double)value! + 3.0; return true; }
+        if (type == typeof(string)) { mutated = (string?)value + "x"; return true; }
+        if (type.IsEnum)
         {
-            foreach (object v in Enum.GetValues(t))
+            foreach (object v in Enum.GetValues(type))
                 if (!v.Equals(value)) { mutated = v; return true; }
         }
         return false;
@@ -101,14 +104,22 @@ internal static class ProfileLoadTests
         Check.Eq(missing.Count, 0, "members CopySettings leaves at their default: " + string.Join(", ", missing));
     }
 
-    private static void SettingsSurviveReload()
+    private static void ItemInfoSurvivesReload()
     {
+        // What the Item Info window / the engine checkbox change, then autosave writes.
         var saved = new LegacyUiSettings();
-        saved.ItemInfoOnSelect = !saved.ItemInfoOnSelect;
-        saved.PetAutoRefill = !saved.PetAutoRefill;
+        MagItemInfoSettings s = saved.ItemInfoSettings;
+        s.OnSelect = true;
+        s.ClickTrigger = MagItemInfoSettings.ClickRight;
+        s.OnSelectArmor = false;
+        s.SetHidden(MagItemInfoField.Spells, true);
+        s.SetRatingHidden(2, true);
+        s.Layout = MagItemInfoSettings.LayoutOneLine;
+        s.ChatType = 7;
+        s.Prefix = "[ii] ";
+        saved.EnableGroundLoot = true;
+        saved.PetAutoRefill = false;
         saved.MonsterNameBlacklist.Add("Drudge Skulker");
-        saved.RadarPosX = 120f;
-        saved.RadarSizeY = 300f;
 
         string path = Path.Combine(Program.TempRoot, "profile-load", "Default.json");
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -119,15 +130,43 @@ internal static class ProfileLoadTests
         var live = new LegacyUiSettings();
         CopySettings(loaded, live);
 
-        Check.Eq(live.ItemInfoOnSelect, saved.ItemInfoOnSelect, "describe items when selected");
-        Check.Eq(live.PetAutoRefill, saved.PetAutoRefill, "pet auto refill");
+        MagItemInfoSettings l = live.ItemInfoSettings;
+        Check.True(l.OnSelect, "Describe items when selected stays on");
+        Check.Eq(l.ClickTrigger, MagItemInfoSettings.ClickRight, "click trigger");
+        Check.False(l.OnSelectArmor, "armor filter off");
+        Check.True(l.IsHidden(MagItemInfoField.Spells), "hidden field");
+        Check.True(l.IsRatingHidden(2), "hidden rating");
+        Check.Eq(l.Layout, MagItemInfoSettings.LayoutOneLine, "layout");
+        Check.Eq(l.ChatType, 7, "chat type");
+        Check.Eq(l.Prefix, "[ii] ", "prefix");
+        Check.True(live.EnableGroundLoot, "ground loot");
+        Check.False(live.PetAutoRefill, "pet auto refill");
         Check.True(live.MonsterNameBlacklist.Contains("Drudge Skulker"), "monster blacklist");
-        Check.Eq(live.RadarPosX, 120f, "radar position");
-        Check.Eq(live.RadarSizeY, 300f, "radar size");
 
         // Unchanged JSON means the autosave right after login has nothing to write over the file.
         Check.Eq(JsonSerializer.Serialize(live, RynthAiJsonContext.Default.LegacyUiSettings),
                  JsonSerializer.Serialize(saved, RynthAiJsonContext.Default.LegacyUiSettings),
                  "the reloaded profile saves back unchanged (autosave writes nothing different)");
+    }
+
+    private static void NullNestedOptionsLoadDefaults()
+    {
+        string json = JsonSerializer.Serialize(new LegacyUiSettings(), RynthAiJsonContext.Default.LegacyUiSettings);
+        var doc = JsonSerializer.Deserialize(json, RynthAiJsonContext.Default.LegacyUiSettings)!;
+        doc.ItemInfoSettings = null!;
+        doc.NavOverlay = null!;
+        var live = new LegacyUiSettings();
+        live.ItemInfoSettings.Prefix = new string('p', 40);   // replaced by the loaded (default) object
+        CopySettings(doc, live);
+        Check.NotNull(live.ItemInfoSettings, "item info is never null after a load");
+        Check.NotNull(live.NavOverlay, "nav overlay is never null after a load");
+        Check.Eq(live.ItemInfoSettings.Prefix, new MagItemInfoSettings().Prefix, "item info falls back to defaults");
+
+        // An over-long hand-edited prefix is trimmed on load (Sanitize).
+        var edited = new LegacyUiSettings();
+        edited.ItemInfoSettings.Prefix = new string('p', 40);
+        var live2 = new LegacyUiSettings();
+        CopySettings(edited, live2);
+        Check.Eq(live2.ItemInfoSettings.Prefix.Length, 32, "prefix trimmed to 32");
     }
 }

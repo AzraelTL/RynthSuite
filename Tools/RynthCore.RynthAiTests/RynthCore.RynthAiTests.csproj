@@ -26,6 +26,7 @@
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\CreatureData\CreatureWeakness.cs" Link="Linked\CreatureWeakness.cs" />
     <!-- Learned per-monster damage (System only), for the Aelrynth difficulty-tier tests. -->
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\CreatureData\MonsterDamageStore.cs" Link="Linked\MonsterDamageStore.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\CreatureData\PlayerWeenies.cs" Link="Linked\PlayerWeenies.cs" />
   </ItemGroup>
 
   <ItemGroup>

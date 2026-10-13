@@ -94,6 +94,24 @@ public static class SpellDatabase
         return $"Unknown Spell ({spellId})";
     }
 
+    /// <summary>Spell family and difficulty (power). False when the spell isn't in SpellData.txt.</summary>
+    public static bool TryGetSpellMeta(int spellId, out int family, out int difficulty)
+    {
+        if (_spellMeta.TryGetValue(spellId, out var meta))
+        {
+            family = meta.Category;
+            difficulty = meta.Power;
+            return true;
+        }
+        family = 0;
+        difficulty = 0;
+        return false;
+    }
+
+    /// <summary>True when the spell id is in the embedded table or the built-in recall list.</summary>
+    public static bool HasSpell(int spellId) =>
+        _spellNames.ContainsKey(spellId) || _builtinSpells.ContainsKey(spellId);
+
     public static string GetSpellNameOrId(int spellId)
     {
         if (_spellNames.TryGetValue(spellId, out string? name)) return name;

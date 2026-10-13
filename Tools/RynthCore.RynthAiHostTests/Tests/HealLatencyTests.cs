@@ -184,6 +184,9 @@ internal static class HealLatencyTests
     {
         var r = new Rig(healthPct: 40, manaPct: 2);
         r.S.GetManaAt = 50; r.S.TopOffMana = 50;
+        // Mana Conversion untrained: the rests below. Trained, a recovery vital retries in 200 ms
+        // instead (RecoveryRetryTests).
+        FakeHost.Skills[(Player, 16)] = (10, 1);
         Check.True(r.B.CheckVitals(), "40% health: Heal Self is cast");
         Check.Eq(HealSelfCasts(), 1, "one Heal Self");
         r.B.OnChatWindowText("You don't have enough Mana to cast this spell.", 0);

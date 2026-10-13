@@ -36,6 +36,7 @@ internal static class Program
         ExpressionEngine.ItemGiverDir = Path.Combine(TempRoot, "ItemGiver");
         // The dungeon map bake writes floor plans under C:\Games\RynthSuite\RynthAi\Maps.
         RynthCore.Plugin.RynthAi.Maps.DungeonMapBake.CacheDir = Path.Combine(TempRoot, "Maps");
+        RynthCore.Plugin.RynthAi.IltHub.IltAugCosts.FilePath = Path.Combine(TempRoot, "ilt-aug-costs.json");
         // A sighted lava/acid hotspot is persisted under C:\Games\RynthSuite\RynthAi\DungeonHazards.
         LiveHazardFolder = RynthCore.Plugin.RynthAi.DungeonHazardStore.Folder;
         RynthCore.Plugin.RynthAi.DungeonHazardStore.Folder = Path.Combine(TempRoot, "DungeonHazards");
@@ -45,11 +46,14 @@ internal static class Program
 
         // Spell names (item spells, spell expiry by name) come from the plugin's embedded table.
         SpellDatabase.Load();
+        // ACECustom spell catalog (Spells window, buff profiles), also embedded in the plugin.
+        SpellCatalog.EnsureLoaded(Console.WriteLine);
 
         var runner = new Runner();
         NativeLootTests.Register(runner);
         VTankLootTests.Register(runner);
         T11LootTests.Register(runner);
+        MagItemDescriberTests.Register(runner);
         ExpressionTests.Register(runner);
         MetaTests.Register(runner);
         NoKillTests.Register(runner);
@@ -57,7 +61,10 @@ internal static class Program
         NavEngineTests.Register(runner);
         NavReachTests.Register(runner);
         PatrolDoorwayTests.Register(runner);
+        PatrolSettingsTests.Register(runner);
+        PatrolPocketTests.Register(runner);
         BuffTests.Register(runner);
+        SpellCatalogTests.Register(runner);
         CombatMathTests.Register(runner);
         WeaponTests.Register(runner);
         RadarSnapshotTests.Register(runner);
@@ -67,6 +74,7 @@ internal static class Program
         FloodPerfTests.Register(runner);
         LootSalvageTests.Register(runner);
         LootCorpseTests.Register(runner);
+        ChestLootTests.Register(runner);
         OwnCorpseTests.Register(runner);
         UseRefusalTests.Register(runner);
         CorpseKillerTests.Register(runner);
@@ -77,6 +85,7 @@ internal static class Program
         BlastTests.Register(runner);
         ArcWhenClearTests.Register(runner);
         WallTests.Register(runner);
+        CombatHookTests.Register(runner);
         UseAtLoginTests.Register(runner);
         LearnSpellsTests.Register(runner);
         AttackLatencyTests.Register(runner);
@@ -87,8 +96,8 @@ internal static class Program
         MonsterEditorTests.Register(runner);
         InstallPathsTests.Register(runner);
         PetRefillTests.Register(runner);
+        IgnoreMonsterTests.Register(runner);
         WorldCacheTypedTests.Register(runner);
-        ItemInfoTests.Register(runner);
         NavOverlayTests.Register(runner);
         ActionPacingTests.Register(runner);
         HazardEscapeTests.Register(runner);
@@ -99,6 +108,26 @@ internal static class Program
         CastNoDamageTests.Register(runner);
         ManaReserveTests.Register(runner);
         DamageRowsTests.Register(runner);
+        NavMapEditTests.Register(runner);
+        LootSpeedTests.Register(runner);
+        MeleeStallTests.Register(runner);
+        AttributeRaiserTests.Register(runner);
+        SigilChainTests.Register(runner);
+        ServerMenuTests.Register(runner);
+        ItemsCleanTests.Register(runner);
+        DeathRecallTests.Register(runner);
+        BankCommandTests.Register(runner);
+        InventoryAttributeFilterTests.Register(runner);
+        StuckCastTests.Register(runner);
+        PacerEdgeTests.Register(runner);
+        RecoveryRetryTests.Register(runner);
+        HpFailsafeTests.Register(runner);
+        PluginFixTests.Register(runner);
+        BuffChainTests.Register(runner);
+        LootPacingTests.Register(runner);
+        CorpseCloseTests.Register(runner);
+        VTankHotkeyTests.Register(runner);
+        SaveFailureTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }
