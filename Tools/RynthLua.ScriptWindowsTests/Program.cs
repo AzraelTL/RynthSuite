@@ -111,6 +111,7 @@ namespace RynthLua.ScriptWindowsTests
             Run("Lua: SetNextWindow* by ImGuiCond", LuaWindowCalls);
             Run("Lua: errors (unsupported, refused, outside a pass)", LuaErrors);
             Run("Lua: metrics and CalcTextSize", LuaMetrics);
+            Run("Lua: clipboard", LuaClipboard);
             Run("Lua: the design doc's §1.4 examples", LuaDocExamples);
             Run("Lua: the Examples folder's window scripts", ExampleScripts);
             Run("Lua: Vector2 / Vector4 / colours", LuaVectors);
@@ -1197,6 +1198,27 @@ namespace RynthLua.ScriptWindowsTests
             for (int i = 1; i <= outT.Length; i++)
                 Check(outT.Get(i).String == "ok", "outside a pass: " + outT.Get(i).String);
             Check(t.G("lh").Number == 14, "GetTextLineHeight works outside a pass");
+        }
+
+        private static void LuaClipboard()
+        {
+            string clip = "";
+            WinClipboard.SetOverride = text => { clip = text; return true; };
+            WinClipboard.GetOverride = () => clip;
+            try
+            {
+                LuaHud t = LuaHudWith("ImGui = require('imgui')");
+                Check(t.Eval("ImGui.SetClipboardText('Damage Rating: 12')").CastToBool(), "SetClipboardText works outside a pass and returns true");
+                Check(clip == "Damage Rating: 12", "the text reaches the clipboard: " + clip);
+                Check(t.Eval("ImGui.GetClipboardText()").String == "Damage Rating: 12", "GetClipboardText reads it back");
+                t.Eval("ImGui:SetClipboardText(0x8000ABCD)");
+                Check(clip == "2147527629", "a number is copied as tostring shows it: " + clip);
+                t.Eval("ImGui.SetClipboardText(nil)");
+                Check(clip == "", "nil copies empty text");
+                WinClipboard.SetOverride = _ => false;
+                Check(!t.Eval("ImGui.SetClipboardText('x')").CastToBool(), "a busy clipboard returns false");
+            }
+            finally { WinClipboard.SetOverride = null; WinClipboard.GetOverride = null; }
         }
 
         private static unsafe void LuaMetrics()

@@ -2900,6 +2900,15 @@ function ImGui.GetStyle() end
 ---@return Vector2
 function ImGui.CalcTextSize(text, hideTextAfterDoubleHash, wrapWidth) end
 
+---Any time. Puts text on the Windows clipboard; false when another program kept it busy.
+---@param text any
+---@return boolean ok
+function ImGui.SetClipboardText(text) end
+
+---Any time. The clipboard's text, "" when it holds none.
+---@return string
+function ImGui.GetClipboardText() end
+
 ------------------------------------------------------------------------------
 -- ImGui enums (globals). Plain two-way tables like the other enums:
 -- ImGuiCond.FirstUseEver == 4 and ImGuiWindowFlags[43] == "NoDecoration".
