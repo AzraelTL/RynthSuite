@@ -6144,8 +6144,10 @@ public partial class CombatManager : IDisposable
         foreach (var wo in _worldFilter.GetLandscape())
         {
             if (wo.ObjectClass != AcObjectClass.Monster) continue;
-            float hp = _worldFilter.GetHealthRatio(wo.Id);
-            if (hp == 0f || hp < 0f) continue;
+            // Only a known-dead monster is skipped. An unknown health (-1) is a living monster we
+            // haven't selected: ACE sends health only for the selected target, so skipping those
+            // left the count at about 1 and a ring was never due (2026-10-14).
+            if (_worldFilter.GetHealthRatio(wo.Id) == 0f || _recentlyKilled.ContainsKey(wo.Id)) continue;
             if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable((uint)wo.Id)) continue;
             if (_worldFilter.Distance(pid, wo.Id) <= rangeYards)
                 count++;
