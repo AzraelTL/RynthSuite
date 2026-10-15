@@ -1021,9 +1021,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         ["NavStopTurnAngle"] = (1, 90), ["NavResumeTurnAngle"] = (1, 45), ["NavDeadZone"] = (0.5, 20), ["NavSweepMult"] = (0.5, 10),
         ["NavLookaheadYards"] = (0, 30), ["NavShortcutYards"] = (0, 10), ["NavTurnRateDegPerSec"] = (30, 720), ["NavTier1TurnSpeed"] = (0.5, 15), ["PostPortalDelaySec"] = (0, 30),
         ["NavOffTrackYards"] = (160, 1000), ["NavMaxDetourAttempts"] = (1, 10),
-        ["DunPatrolCoverage"] = (0, 2), ["DunPatrolSkipDeadEnds"] = (DungeonPatrolOptions.MaxDeadEndCellsMin, DungeonPatrolOptions.MaxDeadEndCellsMax),
+        ["DunPatrolCoverage"] = (0, (int)PatrolCoverage.Sweep), ["DunPatrolSkipDeadEnds"] = (DungeonPatrolOptions.MaxDeadEndCellsMin, DungeonPatrolOptions.MaxDeadEndCellsMax),
         ["DunPatrolWallDistance"] = (DungeonPatrolOptions.WallClearanceMin, DungeonPatrolOptions.WallClearanceMax),
         ["DunPatrolLookInSize"] = (DungeonPatrolOptions.LookInRoomMin, DungeonPatrolOptions.LookInRoomMax),
+        ["DunPatrolSightYd"] = (DungeonPatrolOptions.SightMin, DungeonPatrolOptions.SightMax),
         ["T2Speed"] = (0.1, 5), ["T2WalkWithinYd"] = (1, 50), ["T2DistanceTo"] = (0.1, 10), ["T2ReissueMs"] = (100, 10000),
         ["T2MaxRangeYd"] = (50, 2000), ["T2MaxLandblocks"] = (1, 20),
         ["RebuffSecondsRemaining"] = (30, 1800), ["RebuffTopOffSecondsRemaining"] = (30, 3600),
@@ -1621,7 +1622,11 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                         _vitals.MaxMana = maxMp;
                     }
                 }
-                if (_dashboard?.Settings is { } safetySettings) CheckPlayerDeath(safetySettings);
+                if (_dashboard?.Settings is { } safetySettings)
+                {
+                    CheckPlayerDeath(safetySettings);
+                    CheckLowComponents(safetySettings);
+                }
                 // Dead or on the way back from a death: do nothing (HoldForDeath). The
                 // finally below still submits the nav markers.
                 RynthCore.Plugin.Shared.ActionPacer.NoteFrame();

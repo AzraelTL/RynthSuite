@@ -28,7 +28,7 @@ internal static class ManaReserveTests
         r.Add("mana reserve: under 1.5x Stamina to Mana's cost, Stamina to Mana is chosen over an attack", ReserveChoosesStaminaToMana);
         r.Add("mana reserve: under Stamina to Mana's cost, no attack spam and no 15 s park on 'not enough Mana'", StarvedNoSpamNoPark);
         r.Add("mana reserve: as mana regenerates, the level it can pay for goes, then attacks resume", RecoversAsManaRegenerates);
-        r.Add("mana reserve: stamina too low for Stamina to Mana - stamina is refilled first", StaminaFirst);
+        r.Add("mana reserve: stamina too low for Stamina to Mana (under Re-stam At, at least 15%) - stamina is refilled first", StaminaFirst);
         r.Add("mana reserve: combat holds an attack it can't pay for, and casts once mana is back", CombatHoldsCast);
         r.Add("mana reserve: a melee fighter's attacks aren't held; Get Mana At off means no reserve", MeleeAndOff);
         r.Add("mana reserve: the dat's BaseMana is read (when this PC has a portal.dat)", DatBaseMana);
@@ -212,6 +212,18 @@ internal static class ManaReserveTests
         off.S.RestamAt = 0;
         Check.True(off.B.CheckVitals(), "Re-stam At 0: still refilled for Stamina to Mana");
         Check.Eq(FamilyOfCast(0), Family("Revitalize Self I"), "Revitalize");
+
+        // 2026-10-14: the floor is Re-stam At (when over 15): at 25% stamina with Re-stam At 30,
+        // stamina is refilled before Stamina to Mana (each one cost Drakkon 110-126 stamina).
+        var floor = new Rig(mana: 50, stamina: 96);   // 25%
+        floor.S.RestamAt = 30;
+        Check.Eq(floor.B.StaminaToManaFloorPct(), 30, "the floor is Re-stam At");
+        Check.True(floor.B.CheckVitals(), "vitals act");
+        Check.Eq(FamilyOfCast(0), Family("Revitalize Self I"), $"25% under Re-stam At 30: stamina first ({NameOf(FakeHost.Casts[0].SpellId)})");
+        var over = new Rig(mana: 50, stamina: 134);   // 35%
+        over.S.RestamAt = 30;
+        Check.True(over.B.CheckVitals(), "vitals act");
+        Check.Eq(FamilyOfCast(0), Family("Stamina to Mana Self I"), $"35%: Stamina to Mana ({NameOf(FakeHost.Casts[0].SpellId)})");
     }
 
     private static void CombatHoldsCast()
@@ -262,11 +274,14 @@ internal static class ManaReserveTests
 
     private static void MeleeAndOff()
     {
-        // A melee fighter (no combat manager: the stance decides) at low mana: no reserve, no hold.
+        // A melee fighter (no combat manager: the stance decides) at low mana: no hold of the fight.
         var melee = new Rig(mana: 1, combatMode: CombatMode.Melee);
         Check.False(melee.B.WantsManaNow(), "melee: vitals don't hold the fight for mana");
-        melee.V.CurrentMana = 85;   // 22%: over Get Mana At 20%, under a caster's reserve (90)
-        Check.False(melee.B.ManaUnderLine(true, out int line), $"melee: only Get Mana At ({line})");
+        // But the reserve is its refill line too (2026-10-14: a melee character's buffs spent mana under
+        // Stamina to Mana's cost and nothing could refill it).
+        melee.V.CurrentMana = 85;   // 22%: over Get Mana At 20%, under the reserve (90)
+        Check.True(melee.B.ManaUnderLine(true, out int line), $"melee: under the reserve ({line})");
+        Check.Eq(line, 90, "the line is the reserve");
 
         // Get Mana At 0 (mana recharge off in combat): no reserve, nothing held.
         var off = new Rig(mana: 100, getManaAt: 0);

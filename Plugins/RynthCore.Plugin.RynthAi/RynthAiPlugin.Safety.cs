@@ -62,7 +62,11 @@ public sealed partial class RynthAiPlugin
     private void NotePortalForPacer()
     {
         bool portaling = Host.HasIsPortaling && Host.IsPortaling();
-        if (portaling && !_wasPortalingForPacer) RynthCore.Plugin.Shared.ActionPacer.Forget("portal space");
+        if (portaling && !_wasPortalingForPacer)
+        {
+            RynthCore.Plugin.Shared.ActionPacer.Forget("portal space");
+            _buffManager?.ForgetPendingWield("portal space");
+        }
         _wasPortalingForPacer = portaling;
     }
 
@@ -95,6 +99,7 @@ public sealed partial class RynthAiPlugin
                 _navigationEngine?.Stop();
                 RynthCore.Plugin.Shared.ActionPacer.Forget("death");   // the server dropped whatever was open
                 _buffManager?.CancelPendingRecall("death");                // no /lifestone or macro restart after the respawn
+                _buffManager?.ForgetPendingWield("death");                 // a swap the death cut short is not a failed swap
             }
             else
             {

@@ -76,6 +76,8 @@ internal static class PatrolDoorwayTests
         r.Add("dungeon doorways: in a short chamfered bend (crypt corner) the points come off the bend's outer wall", ChamferedBend);
         r.Add("dungeon patrol: a dead end's look-in point comes out of the end cap onto the floor", DeadEndLookInOnFloor);
         r.Add("dungeon legs: a leg cutting an inside corner gets a corner put in", LegAroundInsideCorner);
+        r.Add("dungeon patrol (sweep): a pillar hall is walked in lanes, every cell within sight of the route; far fewer points than Whole dungeon", SweepPillarHall);
+        r.Add("dungeon patrol (sweep): a wall blocks sight, so two corridors side by side are both walked", SweepWallBlocksSight);
     }
 
     // ── Fixture builder ──────────────────────────────────────────────────────
@@ -142,6 +144,93 @@ internal static class PatrolDoorwayTests
         new V3((float)x0, (float)y0, 0f), new V3((float)x1, (float)y1, 0f),
         new V3((float)x1, (float)y1, 3f), new V3((float)x0, (float)y0, 3f),
     };
+
+    // A 10 x 10 hall of 5 m cells joined by 3 m openings (doorways, so 100 rooms): to the patrol,
+    // what the 0x00AE pillar hall is (2026-10-14).
+    private static (Dungeon D, uint[,] Cells) PillarHall(int n = 10, double size = 5)
+    {
+        var d = new Dungeon();
+        var c = new uint[n, n];
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j < n; j++)
+                c[i, j] = d.Cell(i * size, j * size, (i + 1) * size, (j + 1) * size);
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j < n; j++)
+            {
+                double x0 = i * size, y0 = j * size;
+                if (i + 1 < n) d.OpenX(c[i, j], c[i + 1, j], x0 + size, y0 + 1, y0 + 4);
+                if (j + 1 < n) d.OpenY(c[i, j], c[i, j + 1], y0 + size, x0 + 1, x0 + 4);
+            }
+        return (d, c);
+    }
+
+    private static void SweepPillarHall()
+    {
+        var (d, c) = PillarHall();
+        var geo = d.Geo();
+        var whole = DungeonPathfinder.BuildPatrolRoute(d.Graph, c[0, 0], null, geo);
+        var sweep = DungeonPathfinder.BuildPatrolRoute(d.Graph, c[0, 0], null, geo,
+            new DungeonPatrolOptions { Coverage = PatrolCoverage.Sweep, SightMeters = 15 });
+        Check.True(sweep.Points.Count > 0 && sweep.Points.Count * 2 < whole.Points.Count,
+            $"sweep {sweep.Points.Count} points, whole dungeon {whole.Points.Count}");
+        Check.Eq(DungeonPathfinder.LastSweepSeen, DungeonPathfinder.LastSweepCells, "every cell is seen by a stop");
+        Check.True(DungeonPathfinder.LastSweepStops > 1 && DungeonPathfinder.LastSweepStops < 40, $"{DungeonPathfinder.LastSweepStops} stops for 100 cells");
+        // Every cell's middle within the sight distance of the route (its points or the legs between them).
+        double worst = 0;
+        foreach (var node in d.Graph.Values)
+        {
+            double cx = DungeonGeometry.NavToWorld(node.EW), cy = DungeonGeometry.NavToWorld(node.NS), best = double.MaxValue;
+            for (int i = 0; i < sweep.Points.Count; i++)
+            {
+                var a = sweep.Points[i]; var b = sweep.Points[(i + 1) % sweep.Points.Count];
+                best = Math.Min(best, SegDist(cx, cy, X(a), Y(a), X(b), Y(b)));
+            }
+            worst = Math.Max(worst, best);
+        }
+        // The route goes through a stop's doorways, not its exact middle: within half a cell of the sight.
+        Check.True(worst <= 15.0 + 2.5, $"the farthest cell is {worst:F1} m from the route (sight 15, cells 5 m)");
+        int stops15 = DungeonPathfinder.LastSweepStops;
+        DungeonPathfinder.BuildPatrolRoute(d.Graph, c[0, 0], null, geo,
+            new DungeonPatrolOptions { Coverage = PatrolCoverage.Sweep, SightMeters = 30 });
+        Check.True(DungeonPathfinder.LastSweepStops < stops15, $"a longer sight, fewer stops ({DungeonPathfinder.LastSweepStops} vs {stops15})");
+    }
+
+    private static void SweepWallBlocksSight()
+    {
+        // Two corridors of 8 cells (y 0..5 and 5..10), joined only at their two ends, a wall all along
+        // between them. Without the wall one corridor's walk would see the other at 15 m.
+        var d = new Dungeon();
+        var a = new uint[8]; var b = new uint[8];
+        for (int i = 0; i < 8; i++) { a[i] = d.Cell(i * 5, 0, i * 5 + 5, 5); b[i] = d.Cell(i * 5, 5, i * 5 + 5, 10); }
+        for (int i = 0; i + 1 < 8; i++) { d.OpenX(a[i], a[i + 1], i * 5 + 5, 1, 4); d.OpenX(b[i], b[i + 1], i * 5 + 5, 6, 9); }
+        d.OpenY(a[0], b[0], 5, 1, 4);
+        d.OpenY(a[7], b[7], 5, 36, 39);
+        for (int i = 1; i < 7; i++) { d.Wall(a[i], i * 5, 5, i * 5 + 5, 5); d.Wall(b[i], i * 5, 5, i * 5 + 5, 5); }
+        var geo = d.Geo();
+        var sweep = DungeonPathfinder.BuildPatrolRoute(d.Graph, a[0], null, geo,
+            new DungeonPatrolOptions { Coverage = PatrolCoverage.Sweep, SightMeters = 15 });
+        Check.Eq(DungeonPathfinder.LastSweepSeen, DungeonPathfinder.LastSweepCells, "every cell seen");
+        // A leg along each corridor through its middle (x 20).
+        bool Leg(Func<double, bool> side)
+        {
+            for (int i = 0; i < sweep.Points.Count; i++)
+            {
+                var p = sweep.Points[i]; var q = sweep.Points[(i + 1) % sweep.Points.Count];
+                if (Math.Min(X(p), X(q)) < 20 && Math.Max(X(p), X(q)) > 20 && side(Y(p)) && side(Y(q))) return true;
+            }
+            return false;
+        }
+        bool south = Leg(y => y < 5), north = Leg(y => y > 5);
+        Check.True(south && north, "both corridors walked in the middle: " + string.Join(" ", sweep.Points.Select(p => $"({X(p):F0},{Y(p):F0})")));
+    }
+
+    private static double SegDist(double px, double py, double ax, double ay, double bx, double by)
+    {
+        double dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+        double t = l2 < 1e-9 ? 0 : Math.Clamp(((px - ax) * dx + (py - ay) * dy) / l2, 0, 1);
+        double qx = ax + dx * t - px, qy = ay + dy * t - py;
+        return Math.Sqrt(qx * qx + qy * qy);
+    }
 
     private static double X(NavPoint p) => DungeonGeometry.NavToWorld(p.EW);
     private static double Y(NavPoint p) => DungeonGeometry.NavToWorld(p.NS);
@@ -554,8 +643,13 @@ internal static class PatrolDoorwayTests
         var (d, west, corner, north) = ChamferDungeon();
         var geo = d.Geo();
         var pts = Path(d, geo, -8, 1.67, 5, 15, west, corner, north);
-        var inBend = pts.Where(p => X(p) > 0 && Y(p) < 6.67).ToList();
-        Check.True(inBend.Count >= 1, $"points in the bend ({inBend.Count})");
+        // The bend is walked through: a point at or past the west opening and one at or before the
+        // north one. Since 2026-10-14 the two openings (at right angles) are one run: their centres,
+        // and the leg between cuts the chamfer (the checks below keep it on the floor and off the walls).
+        string path = string.Join(" ", pts.Select(p => $"({X(p):F2},{Y(p):F2})"));
+        Check.True(pts.Any(p => X(p) >= -0.01 && Y(p) < 6.67) && pts.Any(p => X(p) > 0 && Y(p) <= 6.68),
+            "the path goes through the bend: " + path);
+        Check.True(pts.Count <= 5, "no doubling back in the bend: " + path);
         foreach (var p in pts)
             Check.True(Clear(geo, p) >= 0.98, $"({X(p):F2}, {Y(p):F2}) is 1 m from every wall ({Clear(geo, p):F2})");
         // Before: the exit point on the west opening's centre line, 1 m in: 0.47 m from the outer wall.

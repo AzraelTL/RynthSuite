@@ -1032,6 +1032,9 @@ internal sealed partial class LegacyDashboardRenderer
                 DeathRecallSpellId         = s.DeathRecallSpellId,
                 DeathRecallItem            = s.DeathRecallItem,
                 StopMacroOnNoComponents    = s.StopMacroOnNoComponents,
+                LowCompsRecall             = s.LowCompsRecall,
+                LowCompsTaperMin           = s.LowCompsTaperMin,
+                LowCompsScarabMin          = s.LowCompsScarabMin,
                 StopLootingWhenPackFull    = s.StopLootingWhenPackFull,
                 StopMacroWhenPackFull      = s.StopMacroWhenPackFull,
                 RestamAt                   = s.RestamAt,
@@ -1107,6 +1110,7 @@ internal sealed partial class LegacyDashboardRenderer
                 DunPatrolAvoidFloors       = s.DunPatrolAvoidFloors,
                 DunPatrolWallDistance      = s.DunPatrolWallDistance,
                 DunPatrolLookInSize        = s.DunPatrolLookInSize,
+                DunPatrolSightYd           = s.DunPatrolSightYd,
                 T2Speed                    = s.T2Speed,
                 T2WalkWithinYd             = s.T2WalkWithinYd,
                 T2DistanceTo               = s.T2DistanceTo,
@@ -1264,6 +1268,9 @@ internal sealed partial class LegacyDashboardRenderer
             if (p.DeathRecallSpellId is int recallSpell && recallSpell > 0) s.DeathRecallSpellId = recallSpell;
             if (p.DeathRecallItem is string recallItem) s.DeathRecallItem = recallItem.Trim();
             s.StopMacroOnNoComponents    = p.StopMacroOnNoComponents;
+            if (p.LowCompsRecall is bool lowComps) s.LowCompsRecall = lowComps;
+            if (p.LowCompsTaperMin is int taperMin) s.LowCompsTaperMin = Math.Clamp(taperMin, 0, 1000);
+            if (p.LowCompsScarabMin is int scarabMin) s.LowCompsScarabMin = Math.Clamp(scarabMin, 0, 100);
             s.StopLootingWhenPackFull    = p.StopLootingWhenPackFull;
             s.StopMacroWhenPackFull      = p.StopMacroWhenPackFull;
             s.RestamAt                   = p.RestamAt;
@@ -1335,11 +1342,12 @@ internal sealed partial class LegacyDashboardRenderer
             s.NavTier1TurnSpeed          = p.NavTier1TurnSpeed;
             s.PostPortalDelaySec         = p.PostPortalDelaySec;
             // Dungeon patrol: absent (an older engine) = unchanged.
-            if (p.DunPatrolCoverage is int patrolCoverage)    s.DunPatrolCoverage     = Math.Clamp(patrolCoverage, 0, 2);
+            if (p.DunPatrolCoverage is int patrolCoverage)    s.DunPatrolCoverage     = Math.Clamp(patrolCoverage, 0, (int)PatrolCoverage.Sweep);
             if (p.DunPatrolSkipDeadEnds is int patrolSpurs)   s.DunPatrolSkipDeadEnds = Math.Clamp(patrolSpurs, DungeonPatrolOptions.MaxDeadEndCellsMin, DungeonPatrolOptions.MaxDeadEndCellsMax);
             if (p.DunPatrolAvoidFloors is bool patrolFloors)  s.DunPatrolAvoidFloors  = patrolFloors;
             if (p.DunPatrolWallDistance is float patrolWalls) s.DunPatrolWallDistance = (float)Math.Clamp(patrolWalls, DungeonPatrolOptions.WallClearanceMin, DungeonPatrolOptions.WallClearanceMax);
             if (p.DunPatrolLookInSize is float patrolLookIn)  s.DunPatrolLookInSize   = (float)Math.Clamp(patrolLookIn, DungeonPatrolOptions.LookInRoomMin, DungeonPatrolOptions.LookInRoomMax);
+            if (p.DunPatrolSightYd is float patrolSight)      s.DunPatrolSightYd      = (float)Math.Clamp(patrolSight, DungeonPatrolOptions.SightMin, DungeonPatrolOptions.SightMax);
             s.T2Speed                    = p.T2Speed;
             s.T2WalkWithinYd             = p.T2WalkWithinYd;
             s.T2DistanceTo               = p.T2DistanceTo;
@@ -1697,6 +1705,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.DunPatrolAvoidFloors     = tmp.DunPatrolAvoidFloors;
         dst.DunPatrolWallDistance    = tmp.DunPatrolWallDistance;
         dst.DunPatrolLookInSize      = tmp.DunPatrolLookInSize;
+        dst.DunPatrolSightYd         = tmp.DunPatrolSightYd;
         dst.T2Speed                  = tmp.T2Speed;
         dst.T2DistanceTo             = tmp.T2DistanceTo;
         dst.T2ReissueMs              = tmp.T2ReissueMs;
@@ -1764,6 +1773,9 @@ internal sealed partial class LegacyDashboardRenderer
         dst.DeathRecallSpellId       = tmp.DeathRecallSpellId > 0 ? tmp.DeathRecallSpellId : 48;
         dst.DeathRecallItem          = tmp.DeathRecallItem ?? string.Empty;
         dst.StopMacroOnNoComponents  = tmp.StopMacroOnNoComponents;
+        dst.LowCompsRecall           = tmp.LowCompsRecall;
+        dst.LowCompsTaperMin         = Math.Clamp(tmp.LowCompsTaperMin, 0, 1000);
+        dst.LowCompsScarabMin        = Math.Clamp(tmp.LowCompsScarabMin, 0, 100);
         dst.StopLootingWhenPackFull  = tmp.StopLootingWhenPackFull;
         dst.StopMacroWhenPackFull    = tmp.StopMacroWhenPackFull;
         dst.RestamAt                 = tmp.RestamAt;

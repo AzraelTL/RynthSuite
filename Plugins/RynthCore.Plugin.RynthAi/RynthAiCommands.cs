@@ -2813,11 +2813,12 @@ public sealed partial class RynthAiPlugin
     /// <summary>The Dungeon Patrol settings (Settings > Navigation) as patrol options, in range.</summary>
     internal static DungeonPatrolOptions PatrolOptionsFrom(LegacyUiSettings s) => new DungeonPatrolOptions
     {
-        Coverage          = (PatrolCoverage)Math.Clamp(s.DunPatrolCoverage, 0, 2),
+        Coverage          = (PatrolCoverage)Math.Clamp(s.DunPatrolCoverage, 0, (int)PatrolCoverage.Sweep),
         MaxDeadEndCells      = s.DunPatrolSkipDeadEnds,
         AvoidHazardFloors = s.DunPatrolAvoidFloors,
         WallClearance     = s.DunPatrolWallDistance,
         LookInRoomMeters  = s.DunPatrolLookInSize,
+        SightMeters       = s.DunPatrolSightYd,
     }.Clamped();
 
     /// <summary>

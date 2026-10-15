@@ -3076,8 +3076,12 @@ public partial class CombatManager : IDisposable
         // on its own timers, a swing can't land inside a use's server turn because the use above holds
         // every attack until it is answered, and waiting for each swing animation would cost DPS. A
         // stance change still waits (ChangeCombatModeFor), and so does everything in peace/magic.
+        // The movement settle is for casts (a cast beside a stop or a turn was held 40.8 s by the server):
+        // only in Magic mode. From peace the next step is a stance change or a wield, and waiting out the
+        // nav stop first cost every fight's first swing up to 0.6 s (2026-10-14).
         bool attackRepeat = CurrentCombatMode == CombatMode.Melee || CurrentCombatMode == CombatMode.Missile;
-        if (!ActionPacer.MayStart(_host, "Combat", HealNeed.None, out _, animationGate: !attackRepeat, settleGate: !attackRepeat, attackRepeat: attackRepeat))
+        if (!ActionPacer.MayStart(_host, "Combat", HealNeed.None, out _, animationGate: !attackRepeat,
+                settleGate: CurrentCombatMode == CombatMode.Magic, attackRepeat: attackRepeat))
         {
             LastCombatSkipReason = "server-answering"; // D4 record-only
             _tickWait = CombatLatencyTracker.Wait.Busy;
@@ -4234,6 +4238,8 @@ public partial class CombatManager : IDisposable
     }
 
     private (int TargetId, MonsterRule? Rule, List<ItemRule> List, int Count, int Hand, DateTime At, WeaponPlan Plan)? _planCache;
+    // Listed weapons found not to be ours (logged once each).
+    private readonly HashSet<int> _notCarriedNoted = new();
     private const double PlanCacheMs = 250;
 
     private WeaponPlan ComputePlan(WorldObject target, MonsterRule? rule)
@@ -4380,6 +4386,14 @@ public partial class CombatManager : IDisposable
             if (r.Id == 0) continue;
             var wo = _worldFilter[r.Id];
             if (wo == null) continue;
+            // Sold, dropped or traded: still known to the client, but not ours to wield (a sold
+            // Flaming Greataxe was tried three times, the character standing in the fight, 2026-10-14).
+            if (r.Id != inHand && _worldFilter.PlayerHas(r.Id) == false)
+            {
+                if (_notCarriedNoted.Add(r.Id))
+                    _host.Log($"[EquipDiag] listed weapon 0x{(uint)r.Id:X8} '{wo.Name}' isn't in your pack (sold, dropped or traded?): skipped");
+                continue;
+            }
             if (!admitCasters && !IsUsableCombatWeapon(r.Id)) { (leftOut ??= new List<int>()).Add(r.Id); continue; }
             if (list.Any(c => c.Id == r.Id)) continue;
             if (wo.ObjectClass == AcObjectClass.MissileWeapon && IsAmmoItem(wo)) continue;   // listed arrows are the ammo choice, never a weapon to wield

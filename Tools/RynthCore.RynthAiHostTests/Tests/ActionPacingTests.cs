@@ -53,6 +53,7 @@ internal static class ActionPacingTests
         r.Add("pacing (stop burst): a stop for our own autorun goes through however long ago it was turned on", OldAutorunStopGoesThrough);
         r.Add("pacing: no answer - each kind's time limit lets the next action go, logged, and nothing is force-cleared", TimeLimits);
         r.Add("pacing: heals (a plain heal waits for a corpse use's answer, 300 ms at Emergency, one behind a cast's result, 300 ms after the stance reads)", HealRules);
+        r.Add("pacing: the first swing goes 300 ms after the client reads Melee, not the full stance settle; a use still waits for it", FirstSwingAfterStance);
         r.Add("pacing (vitals): Drakkon 07:03 - a cast whose result is in waits for its UseDone: one cast, not a too-busy flood", CastWaitsForUseDone);
         r.Add("refusal: a refused mode change begins no paced action, and the next one is not held by it", RefusedBeginsNothing);
         r.Add("refusal: the engine refusing for 5 s burns nothing; a streak past 30 s counts as a failure again, with one log line each end", RefusalStreakFailsOpen);
@@ -350,6 +351,25 @@ internal static class ActionPacingTests
         _t += 1;
         Check.True(ActionPacer.MayStart(host, "Buff", HealNeed.Emergency, out _), "300 ms after the read: the heal goes");
         Check.False(ActionPacer.MayStart(host, "Buff", HealNeed.None, out _), "a buff waits for the full 800 ms settle");
+    });
+
+    // 2026-10-14: every fight's first swing came 0.8 s after the stance change (ModeSettleMs).
+    private static void FirstSwingAfterStance() => Paced(() =>
+    {
+        var host = World(combatMode: 1);
+        host.ChangeCombatModeFor(CombatMode.Melee, "Combat", "target: Melee mode");
+        _t += 60;
+        Check.False(ActionPacer.MayStart(host, "Combat", HealNeed.None, out _, attackRepeat: true), "the client hasn't read Melee: no swing");
+        FakeHost.CombatModeValue = 2;
+        Check.False(ActionPacer.MayStart(host, "Combat", HealNeed.None, out _, attackRepeat: true), "Melee just read: not yet");
+        _t += 299;
+        Check.False(ActionPacer.MayStart(host, "Combat", HealNeed.None, out _, attackRepeat: true), "299 ms after the read: not yet");
+        _t += 1;
+        Check.True(ActionPacer.MayStart(host, "Combat", HealNeed.None, out _, animationGate: false, settleGate: false, attackRepeat: true),
+            "300 ms after the read: the swing goes");
+        Check.False(ActionPacer.MayStart(host, "Loot", HealNeed.None, out _), "a use still waits for the full 800 ms settle");
+        _t += 500;
+        Check.True(ActionPacer.MayStart(host, "Loot", HealNeed.None, out _), "settled: the use goes");
     });
 
     // ── BuffManager ──────────────────────────────────────────────────────────────

@@ -388,7 +388,7 @@ public partial class BuffManager : IDisposable
     private bool FightsWithMagic() => _combatManager?.FightsWithMagic ?? CurrentCombatMode == CombatMode.Magic;
 
     /// <summary>Mana is under the line vitals refill at: the % line (Get Mana At in combat, Top Off
-    /// Mana idle; 0 = off) or, for a caster, the reserve. <paramref name="line"/>: the line in points.</summary>
+    /// Mana idle; 0 = off) or the reserve. <paramref name="line"/>: the line in points.</summary>
     internal bool ManaUnderLine(bool inCombat, out int line)
     {
         line = 0;
@@ -397,12 +397,12 @@ public partial class BuffManager : IDisposable
         if (pctLine <= 0 || max <= 0) return false;
         line = (int)Math.Ceiling(max * pctLine / 100.0);
         bool under = _vitals.ManaPct < pctLine;
-        if (FightsWithMagic())
-        {
-            int reserve = ManaReserve();
-            if (reserve > line) line = reserve;
-            if (reserve > 0 && _vitals.CurrentMana < reserve) under = true;
-        }
+        // Every character, not only casters (2026-10-14): a melee character's buff chain spends mana
+        // too (Drakkon: 4% after a run of auras, under Stamina to Mana's own cost, so nothing could
+        // refill it and buffing sat waiting for regeneration).
+        int reserve = ManaReserve();
+        if (reserve > line) line = reserve;
+        if (reserve > 0 && _vitals.CurrentMana < reserve) under = true;
         return under;
     }
 
@@ -421,9 +421,16 @@ public partial class BuffManager : IDisposable
     /// <summary>Stamina lets Stamina to Mana go: over 15%, or a stamina kit or listed stamina potion
     /// can bring it there. Not Revitalize: it costs mana itself, and trading mana for stamina and
     /// back while attacks wait could keep a caster from attacking for minutes.</summary>
-    private bool StaminaAllowsStaminaToMana() => _vitals.StaminaPct > 15
+    private bool StaminaAllowsStaminaToMana() => _vitals.StaminaPct > StaminaToManaFloorPct()
         || BestPackStaminaKit() != null
         || (_settings.UsePotions && HasListedPotion("StaminaPotion", "Stamina"));
+
+    /// <summary>
+    /// Stamina to Mana goes only over this stamina %: Re-stam At (when on), at least 15. Under it,
+    /// stamina is refilled first (kit, potion, Revitalize). Was a flat 15%: each Stamina to Mana took
+    /// 110-126 stamina and Drakkon's stamina was run nearly out before anything refilled it (2026-10-14).
+    /// </summary>
+    internal int StaminaToManaFloorPct() => Math.Max(15, _settings.RestamAt);
 
     /// <summary>
     /// Mana can't pay for Stamina to Mana: under the cost of its lowest known level when costs are
@@ -598,8 +605,18 @@ public partial class BuffManager : IDisposable
     // DoHandleActionGetAndWieldItem: "the client handles dequipping a lot of conflicting items
     // automatically"). Drakkon's axe -> wand took 4.2 s with the pack move first (1.2 s for it,
     // then the swap gate's flat 3 s). The pack move stays as the fallback: once a use hasn't
-    // got the wand into the hand in WieldResolveTimeoutMs, this session moves the weapon first.
-    private bool _directWandSwapFailed;
+    // got the wand into the hand in WieldResolveTimeoutMs, the weapon goes into a pack first.
+    // Not for the rest of the session on one miss (2026-10-14): a swap the server never finished
+    // because Drakkon died (13:40) set it, and every later heal from melee took the pack route, the
+    // move plus the swap gate's flat 3 s, 4+ s with nothing healing; he died twice more. Now one miss
+    // sends the next swap through the pack and the one after tries the use again; two misses in a
+    // row keep the pack route. A swap a death or a portal cut short counts for nothing
+    // (ForgetPendingWield).
+    private int _directSwapMisses;      // direct swaps in a row that didn't get the wand into the hand
+    private bool _packFirstNext;        // the next swap goes through the pack (one miss)
+    private bool _pendingWieldDirect;   // the wand's use in flight was a direct swap (a weapon in hand)
+    internal const int DirectSwapMissesToStick = 2;
+    private bool PackFirst => _packFirstNext || _directSwapMisses >= DirectSwapMissesToStick;
     // The swap gate's claim count when the wand's use went out: a later claim means another swap
     // (combat putting the axe back, 12:39 on 10-06) changed the hands, so the result says nothing.
     private long _pendingWieldClaim;
@@ -1539,7 +1556,7 @@ public partial class BuffManager : IDisposable
             // Mana under Get Mana At left buffing waiting on natural regen - one buff every 1-2
             // minutes (tester, 10-01: 85 minutes of "buffing waits", Stamina to Mana never cast).
             // A low stamina is topped up first (kit, Revitalize, potion) so Stamina to Mana can run.
-            if (_vitals.StaminaPct > 15 && AttemptVitalCast("Stamina to Mana Self"))
+            if (_vitals.StaminaPct > StaminaToManaFloorPct() && AttemptVitalCast("Stamina to Mana Self"))
             {
                 _isRechargingMana = true;
                 return;
@@ -1830,14 +1847,14 @@ public partial class BuffManager : IDisposable
         if (manaLow)
         {
             _vitalWhy = "";
-            if ((curStamPct > 15 && AttemptVitalCast("Stamina to Mana Self")) || AttemptPotion("ManaPotion"))
+            if ((curStamPct > StaminaToManaFloorPct() && AttemptVitalCast("Stamina to Mana Self")) || AttemptPotion("ManaPotion"))
             {
                 _isRechargingMana = true;
                 return true;
             }
-            // Stamina too low for Stamina to Mana: a stamina kit, Revitalize or a potion first,
-            // whatever Re-stam At says (it may be under 15 or off).
-            if (curStamPct <= 15 && TopStaminaToManaId() != 0
+            // Stamina too low for Stamina to Mana (StaminaToManaFloorPct: Re-stam At, at least 15): a
+            // stamina kit, Revitalize or a potion first.
+            if (curStamPct <= StaminaToManaFloorPct() && TopStaminaToManaId() != 0
                 && (AttemptStaminaKitUse() || AttemptVitalCast("Revitalize Self") || AttemptPotion("StaminaPotion", "Stamina")))
             {
                 _isRechargingStamina = true;
@@ -1924,8 +1941,12 @@ public partial class BuffManager : IDisposable
         bool stamToHealth = StaminaToHealthAllowed(_settings, curHealthPct, curStamPct);
         if (!emergencyKit && !stamToHealth) return false;
 
-        // 1. Out of Magic mode a kit first (no wand swap at critical health).
-        if (CurrentCombatMode != CombatMode.Magic && AttemptHealthKitUse()) return true;
+        // 1. Out of Magic mode a kit first (no wand swap at critical health), then a health
+        //    potion: Heal Self from melee is a wand swap, the Magic stance and the cast, 4-5 s
+        //    with nothing healing. Drakkon, 2026-10-14: 69% to 15% in 0.2 s among Depraved
+        //    Shadows, the kit at 3%, and the swap was still unanswered when he died 3.2 s later;
+        //    the potion came after Heal Self in the chain, so it was never reached.
+        if (CurrentCombatMode != CombatMode.Magic && (AttemptHealthKitUse() || AttemptPotion("HealthPotion"))) return true;
         // 2. Stamina to Health Self, by its own line and stamina floor.
         if (stamToHealth && AttemptVitalCast("Stamina to Health Self")) return true;
         // 3. Not handled: the normal Heal At chain (kit, Heal Self, potion) gets its turn.
@@ -2431,6 +2452,8 @@ public partial class BuffManager : IDisposable
         ("Lesser Stamina Kit", 100), ("Eternal Stamina Kit", 100),
     };
     private DateTime _lastKitChanceLog = DateTime.MinValue;
+    /// <summary>Kit Min Success % with a melee or missile weapon out, when Kit Min Success is higher.</summary>
+    internal const int WeaponOutKitMinPct = 30;
 
     /// <summary>
     /// True when a kit may be used: KitMinSuccessPct is 0, or the kit's chance of working on
@@ -2440,6 +2463,11 @@ public partial class BuffManager : IDisposable
     private bool KitChanceOk(int kitId, string kitName, uint missing, bool willBePeace)
     {
         int minPct = _settings.KitMinSuccessPct;
+        // A weapon out: the spell is a wand swap, the Magic stance and the cast first (4 s and more
+        // from melee), so a kit gets a lower bar. Drakkon, 2026-10-14 13:50: a 51% kit was skipped
+        // for Heal Self from melee and he died before the cast went out.
+        if (CurrentCombatMode == CombatMode.Melee || CurrentCombatMode == CombatMode.Missile)
+            minPct = Math.Min(minPct, WeaponOutKitMinPct);
         if (minPct <= 0 || _charSkills == null) return true;
 
         int boost = 0;
@@ -4886,13 +4914,16 @@ public partial class BuffManager : IDisposable
                     _pendingWieldId = 0;   // another swap since ours: not a failed wield
                     return false;
                 }
-                int stillInHand = _directWandSwapFailed ? 0 : FindWieldedNonWandWeapon(wandId);
+                int stillInHand = _pendingWieldDirect ? FindWieldedNonWandWeapon(wandId) : 0;
                 if (stillInHand != 0 && IsWieldedLive(stillInHand))
                 {
-                    _directWandSwapFailed = true;
+                    _directSwapMisses++;
+                    _packFirstNext = true;
                     _pendingWieldId = 0;
                     _host.Log($"[WieldGate] using the wand didn't put 0x{(uint)stillInHand:X8} away in {WieldResolveTimeoutMs:0} ms; " +
-                              "from now on the weapon goes into a pack first");
+                              (_directSwapMisses >= DirectSwapMissesToStick
+                                  ? $"{_directSwapMisses} in a row: from now on the weapon goes into a pack first"
+                                  : "the next swap puts the weapon into a pack first, then the use is tried again"));
                     return false;
                 }
                 _host.Log($"[WieldGate] UseObject(0x{(uint)_pendingWieldId:X8}) not confirmed in " +
@@ -4932,7 +4963,7 @@ public partial class BuffManager : IDisposable
             // non-wand weapon into a capacity-verified open pack FIRST (AutoCram pattern,
             // AV-safe), then UseObject(wand) once the hand is free. Fully bounded.
             int bowId = FindWieldedNonWandWeapon(wandId);
-            if (bowId != 0 && (_directWandSwapFailed || !IsWieldedLive(bowId)))   // else the use swaps (see _directWandSwapFailed)
+            if (bowId != 0 && (PackFirst || !IsWieldedLive(bowId)))   // else the use swaps (see _directSwapMisses)
             {
                 if (_bowDequipPendingId == bowId
                     && (now - _bowDequipAt).TotalMilliseconds < WieldResolveTimeoutMs
@@ -4965,7 +4996,8 @@ public partial class BuffManager : IDisposable
                 _bowDequipPendingId = 0; // bow confirmed unwielded — fall through to wield the wand
             }
 
-            _host.UseFor((uint)wandId, "Buff", bowId != 0 && !_directWandSwapFailed ? "buffing: switch to the wand" : "buffing: wield the wand");
+            _pendingWieldDirect = bowId != 0 && !PackFirst;
+            _host.UseFor((uint)wandId, "Buff", _pendingWieldDirect ? "buffing: switch to the wand" : "buffing: wield the wand");
             NoteStanceRequest();
             _pendingWieldClaim = _weaponSwapGate?.Claims ?? 0;
             _pendingWieldId = wandId;
@@ -4979,6 +5011,8 @@ public partial class BuffManager : IDisposable
         {
             _pendingWieldId = 0;
             _wieldCooldownUntil = DateTime.MinValue;
+            if (_pendingWieldDirect) _directSwapMisses = 0;   // the use swapped: back to direct swaps
+            _packFirstNext = false;                           // a pack-route swap done: the next one tries the use
         }
 
         // Deadlock episode tracking: wand wielded but mode refuses to flip.

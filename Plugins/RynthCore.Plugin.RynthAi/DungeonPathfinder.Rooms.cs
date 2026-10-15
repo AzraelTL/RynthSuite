@@ -569,6 +569,8 @@ internal static partial class DungeonPathfinder
     // short for an exit point and the next approach point (DoorwayStandoffs[0] each) without
     // doubling back.
     private const double RunGapMeters = 8.0;
+    // cos(~93 degrees): openings at right angles (a staircase) still continue a run.
+    private const double RightAngleSlack = 0.05;
 
     private static bool Continues(DungeonGeometry geo, Step a, Step b)
     {
@@ -578,9 +580,13 @@ internal static partial class DungeonPathfinder
         if (dx * dx + dy * dy >= RunGapMeters * RunGapMeters || Math.Abs(da.Z - db.Z) >= 2.0) return false;
         // A run goes on: through the next opening no more than 90 degrees off the last. Turning
         // back (in at one opening, out at another beside it) is a visit to the room between.
+        // 90 degrees exactly counts (2026-10-14): a diagonal corridor is a staircase of square
+        // cells whose openings face north, east, north, east...; each failed the old "> 0" by a
+        // hair, got its own approach and exit point 4 m out along its facing, and the patrol
+        // walked the staircase (zig-zag) instead of the corridor's centre line.
         var (ax, ay) = da.NormalFrom(a.From);
         var (bx, by) = db.NormalFrom(b.From);
-        return ax * bx + ay * by > 0.0;
+        return ax * bx + ay * by > -RightAngleSlack;
     }
 
     // The approach point before steps[i], the exit point after steps[j], and the opening centres

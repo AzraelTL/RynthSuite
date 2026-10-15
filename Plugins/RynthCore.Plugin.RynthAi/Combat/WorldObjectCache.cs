@@ -704,6 +704,21 @@ public class WorldObjectCache
     private enum Holder { Unknown, Player, OtherWielder, OtherContainer, Nobody }
 
     /// <summary>
+    /// The player has <paramref name="id"/> (wielded, main pack or a side pack): true; someone or
+    /// something else has it, or it lies on the ground: false; null when the engine can't say yet.
+    /// A sold, dropped or traded item stays known to the client for a while (2026-10-14: a sold
+    /// Flaming Greataxe was still tried three times as the listed weapon). Any thread.
+    /// </summary>
+    public bool? PlayerHas(int id)
+    {
+        lock (_gate)
+        {
+            Holder h = WhoHas(id);
+            return h == Holder.Unknown ? null : h == Holder.Player;
+        }
+    }
+
+    /// <summary>
     /// Who has the object: the player (wielded, in the main pack, or in a side pack), another
     /// wielder (other players' and NPCs' gear), another container (a corpse, a chest), or
     /// nobody (it lies on the ground). Unknown when the player isn't known yet or the engine

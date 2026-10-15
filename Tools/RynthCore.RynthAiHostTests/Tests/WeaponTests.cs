@@ -51,6 +51,7 @@ internal static class WeaponTests
         r.Add("refusal: a refused stance change in combat's equip pass sets no backoff and starts no stuck clock", StanceRefusedKeepsBackoff);
         r.Add("weapon choice: an unlisted wand is never picked (Damage tab, learned, pack, name)", UnlistedNeverPicked);
         r.Add("Items list: a listed item no longer carried is reported missing (pack, hand, unknown)", MissingFromPack);
+        r.Add("weapon choice: a listed weapon someone else now has (sold) is skipped, even as this monster's Damage tab pick", SoldWeaponSkipped);
         r.Add("weapon swap: one in flight, confirmed, retry cap, then what's in hand", SwapOneInFlight);
         r.Add("weapon swap: no flip-flop between two weapons", SwapNoFlipFlop);
         r.Add("weapon swap: a new target that wants the weapon just swapped away from gets it at once (Drakkon 2026-10-12)", SwapBackForNewTarget);
@@ -668,6 +669,46 @@ internal static class WeaponTests
             Target = new WorldObject(unchecked((int)Monster), monsterName, AcObjectClass.Monster);
             S.ItemRules = new List<ItemRule> { new() { Id = unchecked((int)ListedWand), Name = "Wand", Element = "Lightning", ElementSource = "properties" } };
         }
+    }
+
+    // 2026-10-14: a sold Flaming Greataxe, still listed and still known to the client, was the weapon
+    // chosen for the monster; three wield tries over 13 s with the character standing in the fight.
+    private static void SoldWeaponSkipped()
+    {
+        const uint Vendor = 0x80099999;
+        FakeHost.Reset();
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Magic;
+        FakeHost.Names[ListedWand] = "Wand"; FakeHost.ItemTypes[ListedWand] = 0x8000;
+        FakeHost.Ints[(ListedWand, 45)] = 0x40;            // Lightning
+        FakeHost.Names[FireWand] = "Fire Wand"; FakeHost.ItemTypes[FireWand] = 0x8000;
+        FakeHost.Ints[(FireWand, 18)] = 0x20;              // Fire
+        FakeHost.Wcids[Monster] = 1535;
+        FakeHost.Containers[ListedWand] = Player;          // ours
+        FakeHost.Containers[FireWand] = Vendor;            // sold: the vendor has it now
+        var host = FakeHost.Create();
+        var cache = FakeHost.MakeCache(host, Player, new[] { ListedWand, FireWand });
+        var s = new LegacyUiSettings();
+        var store = new MonsterDamageStore();
+        var c = new CombatManager(host, s, cache);
+        c.SetPlayerId(Player);
+        c.SetDamageStores(null, store);
+        c.CanCastOverride = e => e != "Nether";
+        s.ItemRules = new List<ItemRule>
+        {
+            new() { Id = unchecked((int)ListedWand), Name = "Wand", Element = "Lightning", ElementSource = "properties" },
+            new() { Id = unchecked((int)FireWand), Name = "Fire Wand", Element = "Fire", ElementSource = "properties" },
+        };
+        store.SetManualWeapon(1535, FireWand);             // the Damage tab's pick for this monster
+        var target = new WorldObject(unchecked((int)Monster), "Ethereal Wisp", AcObjectClass.Monster);
+
+        var plan = c.PlanFor(target, null);
+        Check.Eq(unchecked((uint)plan.WeaponId), ListedWand, "the carried wand, not the sold Damage tab pick");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("isn't in your pack")), "the skip is logged: " + string.Join(" | ", FakeHost.Logs.Take(10)));
+        Check.Eq(c.ListedCandidates().Count, 1, "the sold weapon isn't a candidate at all");
+
+        FakeHost.Containers[FireWand] = Player;            // bought back
+        Check.Eq(c.ListedCandidates().Count, 2, "back in the pack: a candidate again");
     }
 
     private static void MissingFromPack()

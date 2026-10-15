@@ -154,39 +154,47 @@ internal static class PatrolSettingsTests
         var s = new LegacyUiSettings
         {
             DunPatrolCoverage = 7, DunPatrolSkipDeadEnds = 99, DunPatrolAvoidFloors = false,
-            DunPatrolWallDistance = 9f, DunPatrolLookInSize = -4f,
+            DunPatrolWallDistance = 9f, DunPatrolLookInSize = -4f, DunPatrolSightYd = 200f,
         };
         var o = RynthAiPlugin.PatrolOptionsFrom(s);
-        Check.Eq(o.Coverage, PatrolCoverage.Everything, "coverage 7 -> 2 (everything)");
+        Check.Eq(o.Coverage, PatrolCoverage.Sweep, "coverage 7 -> 3 (sweep, the last)");
+        Check.Near(o.SightMeters, 60.0, 1e-9, "sight 200 -> 60 m");
         Check.Eq(o.MaxDeadEndCells, 30, "dead ends 99 -> 30");
         Check.False(o.AvoidHazardFloors, "floors off");
         Check.Near(o.WallClearance, 2.0, 1e-9, "walls 9 -> 2 m");
         Check.Near(o.LookInRoomMeters, 3.0, 1e-9, "look-in -4 -> 3 m");
-        s.DunPatrolCoverage = 1; s.DunPatrolSkipDeadEnds = 5; s.DunPatrolWallDistance = 1.5f; s.DunPatrolLookInSize = 20f;
+        s.DunPatrolCoverage = 1; s.DunPatrolSkipDeadEnds = 5; s.DunPatrolWallDistance = 1.5f; s.DunPatrolLookInSize = 20f; s.DunPatrolSightYd = 25f;
         o = RynthAiPlugin.PatrolOptionsFrom(s);
-        Check.True(o.Coverage == PatrolCoverage.LoopsOnly && o.MaxDeadEndCells == 5 && o.WallClearance == 1.5 && o.LookInRoomMeters == 20,
+        Check.True(o.Coverage == PatrolCoverage.LoopsOnly && o.MaxDeadEndCells == 5 && o.WallClearance == 1.5 && o.LookInRoomMeters == 20 && o.SightMeters == 25,
                    "in-range values pass through: " + o.Describe());
+        s.DunPatrolCoverage = 3;
+        o = RynthAiPlugin.PatrolOptionsFrom(s);
+        Check.True(o.Coverage == PatrolCoverage.Sweep && o.Describe().Contains("sight 25 m"), "sweep, and its sight in the description: " + o.Describe());
     }
 
     private static void EnginePayload()
     {
-        var s = new LegacyUiSettings { DunPatrolCoverage = 1, DunPatrolSkipDeadEnds = 6, DunPatrolAvoidFloors = false, DunPatrolWallDistance = 1.25f, DunPatrolLookInSize = 15f };
+        var s = new LegacyUiSettings { DunPatrolCoverage = 1, DunPatrolSkipDeadEnds = 6, DunPatrolAvoidFloors = false, DunPatrolWallDistance = 1.25f, DunPatrolLookInSize = 15f, DunPatrolSightYd = 30f };
         var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
         typeof(LegacyDashboardRenderer).GetField("_settings", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(dash, s);
         typeof(LegacyDashboardRenderer).GetField("_advancedSettingsUi", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(dash, new LegacyAdvancedSettingsUi(s));
         var sent = JsonSerializer.Deserialize(dash.BuildSettingsJson(), RynthAiJsonContext.Default.SettingsBridgePayload)!;
         Check.True(sent.DunPatrolCoverage == 1 && sent.DunPatrolSkipDeadEnds == 6 && sent.DunPatrolAvoidFloors == false
-                   && sent.DunPatrolWallDistance == 1.25f && sent.DunPatrolLookInSize == 15f, "every patrol setting sent to the engine face");
+                   && sent.DunPatrolWallDistance == 1.25f && sent.DunPatrolLookInSize == 15f && sent.DunPatrolSightYd == 30f, "every patrol setting sent to the engine face");
 
         dash.ApplySettingsJson("{\"PatrolOnLogin\":false}");
         Check.True(s.DunPatrolCoverage == 1 && s.DunPatrolSkipDeadEnds == 6 && !s.DunPatrolAvoidFloors && s.DunPatrolWallDistance == 1.25f
-                   && s.DunPatrolLookInSize == 15f, "a save from an engine without them leaves them alone");
+                   && s.DunPatrolLookInSize == 15f && s.DunPatrolSightYd == 30f, "a save from an engine without them leaves them alone");
+        dash.ApplySettingsJson("{\"DunPatrolCoverage\":3,\"DunPatrolSightYd\":40}");
+        Check.True(s.DunPatrolCoverage == 3 && s.DunPatrolSightYd == 40f, "sweep and its sight applied");
+        dash.ApplySettingsJson("{\"DunPatrolSightYd\":1}");
+        Check.True(s.DunPatrolSightYd == 5f, "sight 1 -> 5 (clamped)");
         dash.ApplySettingsJson("{\"DunPatrolCoverage\":2,\"DunPatrolSkipDeadEnds\":0,\"DunPatrolAvoidFloors\":true,\"DunPatrolWallDistance\":0.75,\"DunPatrolLookInSize\":30}");
         Check.True(s.DunPatrolCoverage == 2 && s.DunPatrolSkipDeadEnds == 0 && s.DunPatrolAvoidFloors && s.DunPatrolWallDistance == 0.75f
                    && s.DunPatrolLookInSize == 30f, "a save with them applies them");
         dash.ApplySettingsJson("{\"DunPatrolCoverage\":9,\"DunPatrolSkipDeadEnds\":40,\"DunPatrolWallDistance\":0.1,\"DunPatrolLookInSize\":100}");
-        Check.True(s.DunPatrolCoverage == 2 && s.DunPatrolSkipDeadEnds == 30 && s.DunPatrolWallDistance == 0.5f && s.DunPatrolLookInSize == 40f,
+        Check.True(s.DunPatrolCoverage == 3 && s.DunPatrolSkipDeadEnds == 30 && s.DunPatrolWallDistance == 0.5f && s.DunPatrolLookInSize == 40f,
                    $"out of range clamped ({s.DunPatrolCoverage}, {s.DunPatrolSkipDeadEnds}, {s.DunPatrolWallDistance}, {s.DunPatrolLookInSize})");
     }
 

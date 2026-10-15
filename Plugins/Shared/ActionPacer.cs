@@ -130,6 +130,13 @@ internal static class ActionPacer
     public const long GestureEmergencyMaxMs = 1500;
     /// <summary>A heal behind a stance change: once the client has read the new mode this long.</summary>
     public const long HealAfterModeReadMs = 300;
+    /// <summary>
+    /// A melee/missile swing behind the stance change into that mode: once the client has read the
+    /// mode this long, not the full ModeSettleMs (2026-10-14: the first swing of every fight came
+    /// 0.8 s after the stance; the settle is there for uses, whose server turn a stance stops, and a
+    /// swing is no use: the server plays it after the stance, as when a player attacks from peace).
+    /// </summary>
+    public const long AttackAfterModeReadMs = 300;
     /// <summary>An engine without UseDone: an action counts as answered after this (no real pacing).</summary>
     public const long NoUseDoneFallbackMs = 600;
 
@@ -383,17 +390,21 @@ internal static class ActionPacer
             return false;
         }
         lock (Gate) _settleLogged.Clear();
-        if (!OutstandingAllows(host, who, heal, out why)) return false;
+        if (!OutstandingAllows(host, who, heal, out why, attackRepeat)) return false;
         if (animationGate && GestureHolds(host, who, heal, out why)) return false;
         return true;
     }
 
-    private static bool OutstandingAllows(RynthCoreHost host, string who, HealNeed heal, out string why)
+    private static bool OutstandingAllows(RynthCoreHost host, string who, HealNeed heal, out string why, bool attack = false)
     {
         why = "";
         PacedAction? a = Current(host);
         if (a == null) return true;
         long age = NowMs() - a.SentMs;
+
+        // The first swing after the change into Melee/Missile mode (see AttackAfterModeReadMs).
+        if (attack && a.Kind == PacedKind.CombatMode && a.ModeSeenMs != 0 && NowMs() - a.ModeSeenMs >= AttackAfterModeReadMs)
+            return true;
 
         if (heal != HealNeed.None)
         {

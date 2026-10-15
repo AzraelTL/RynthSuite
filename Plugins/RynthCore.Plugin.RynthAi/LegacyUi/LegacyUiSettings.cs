@@ -56,11 +56,12 @@ public sealed class LegacyUiSettings
     // Dungeon patrol (/ra dunnav-patrol, Settings > Navigation > Dungeon Patrol; DungeonPatrolOptions).
     // The defaults are the patrol as it was before these settings (2026-10-12). A running patrol
     // is rebuilt when one changes (RynthAiCommands.TickDunPatrolReroute).
-    public int   DunPatrolCoverage;              // PatrolCoverage: 0 whole dungeon, 1 loops only, 2 everything
+    public int   DunPatrolCoverage;              // PatrolCoverage: 0 whole dungeon, 1 loops only, 2 everything, 3 sweep
     public int   DunPatrolSkipDeadEnds = 10;     // whole dungeon: dead-end areas of up to this many cells are skipped (0 = none)
     public bool  DunPatrolAvoidFloors = true;    // lava/acid floor cells (HazardTextures.txt) kept out of the patrol
     public float DunPatrolWallDistance = 1.0f;   // metres every patrol point keeps from walls where there is room
     public float DunPatrolLookInSize = 10.0f;    // rooms this big (m) the patrol only skirts get a walk to their middle
+    public float DunPatrolSightYd = 20.0f;       // sweep: how far a monster notices you, so how far apart the lanes may be
     // On: macro start, loading a Circular or Linear route, and nav taking over again after a
     // pause that moved the character (combat, looting, buffing, doors) all head for the closest
     // waypoint on the route. Off: a pause carries on to the waypoint it was heading for, a macro
@@ -163,6 +164,11 @@ public sealed class LegacyUiSettings
     public int DeathRecallSpellId = 48;          // Primary Portal Recall
     public string DeathRecallItem = string.Empty;
     public bool StopMacroOnNoComponents = false;
+    // Recall When Low On Components (RynthAiPlugin.LowComponents.cs): tapers at or under LowCompsTaperMin,
+    // or a scarab kind (not Diamond) at or under LowCompsScarabMin, stops the macro and recalls home.
+    public bool LowCompsRecall = false;
+    public int LowCompsTaperMin = 10;
+    public int LowCompsScarabMin = 2;
     public bool StopLootingWhenPackFull = true;
     public bool StopMacroWhenPackFull = false;
     public int RestamAt = 30;
@@ -960,6 +966,7 @@ public sealed class SettingsBridgePayload
     public bool? DunPatrolAvoidFloors { get; set; }
     public float? DunPatrolWallDistance { get; set; }
     public float? DunPatrolLookInSize { get; set; }
+    public float? DunPatrolSightYd { get; set; }
     // Absent from an older engine's payload: must not read as off.
     public bool YieldToVTank { get; set; } = true;
     public bool EnableRaycasting { get; set; }
@@ -993,6 +1000,9 @@ public sealed class SettingsBridgePayload
     public bool StopMacroOnDeath { get; set; }
     public bool StopMacroOnNoComponents { get; set; }
     // Absent from an older engine: null keeps the plugin's values.
+    public bool? LowCompsRecall { get; set; }
+    public int? LowCompsTaperMin { get; set; }
+    public int? LowCompsScarabMin { get; set; }
     public int? DeathRecallMode { get; set; }
     public int? DeathRecallSpellId { get; set; }
     public string? DeathRecallItem { get; set; }

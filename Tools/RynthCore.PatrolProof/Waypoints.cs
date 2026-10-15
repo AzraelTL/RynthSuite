@@ -20,7 +20,7 @@ namespace RynthCore.PatrolProof;
 //     summary      summary lines only        tiny   only waypoints in rooms of <= 5 cells
 //   The patrol settings (Settings > Navigation > Dungeon Patrol; DungeonPatrolOptions), default
 //   as in the game:
-//     coverage whole|loops|all    spurs N (0-30: dead-end areas of <= N cells skipped)    floors on|off    walls M (0.5-2)    lookin M (3-40)
+//     coverage whole|loops|all|sweep    sight M (5-60, sweep's sight distance)    spurs N (0-30: dead-end areas of <= N cells skipped)    floors on|off    walls M (0.5-2)    lookin M (3-40)
 //     floors off keeps the surface cells out of the hazards unless hzfile/hz also list them, as
 //     BuildDunPatrol does with the cells in DungeonHazards/<lb>.txt.
 //     modes        for each start, one line per setting variant (coverage modes, dead-end limits,
@@ -51,7 +51,8 @@ internal static class Waypoints
             else if (a == "modes") modes = true;
             else if (a == "pockets") pocketList = true;
             else if (a == "coverage" && i + 1 < args.Length)
-                opt = opt with { Coverage = args[++i] switch { "loops" => PatrolCoverage.LoopsOnly, "all" or "everything" => PatrolCoverage.Everything, _ => PatrolCoverage.WholeDungeon } };
+                opt = opt with { Coverage = args[++i] switch { "loops" => PatrolCoverage.LoopsOnly, "all" or "everything" => PatrolCoverage.Everything, "sweep" => PatrolCoverage.Sweep, _ => PatrolCoverage.WholeDungeon } };
+            else if (a == "sight" && i + 1 < args.Length) opt = opt with { SightMeters = double.Parse(args[++i], inv) };
             else if (a == "spurs" && i + 1 < args.Length) opt = opt with { MaxDeadEndCells = int.Parse(args[++i], inv) };
             else if (a == "floors" && i + 1 < args.Length) opt = opt with { AvoidHazardFloors = args[++i] != "off" };
             else if (a == "walls" && i + 1 < args.Length) opt = opt with { WallClearance = double.Parse(args[++i], inv) };

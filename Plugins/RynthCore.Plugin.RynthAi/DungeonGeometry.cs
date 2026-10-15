@@ -695,6 +695,40 @@ internal sealed class DungeonGeometry
         return hit;
     }
 
+    /// <summary>
+    /// Line of sight between two points on the floor (the Sweep patrol): no wall of the landblock
+    /// reaching into knee-to-head height between them (the same band <see cref="SegmentClear"/>
+    /// uses), whichever cells the walls belong to. Floors aren't looked at: a monster sees across
+    /// a gap.
+    /// </summary>
+    internal bool SightClear(double x0, double y0, double z0, double x1, double y1, double z1)
+        => !WallHit(x0, y0, x1, y1, Math.Min(z0, z1) + WallBandLow, Math.Max(z0, z1) + WallBandHigh, out _);
+
+    /// <summary>A point on the cell's floor: the centre of its biggest floor polygon. False when
+    /// the dats give the cell no floor (then its origin stands in).</summary>
+    internal bool TryCellFloorCentre(uint cell, out double x, out double y, out double z)
+    {
+        x = y = z = 0;
+        if (!_floors.TryGetValue(cell, out var list) || list.Count == 0) return false;
+        double bestArea = -1;
+        foreach (var v in list)
+        {
+            if (v.Length < 3) continue;
+            double area = 0, cx = 0, cy = 0, cz = 0;
+            for (int i = 0; i < v.Length; i++)
+            {
+                var a = v[i]; var b = v[(i + 1) % v.Length];
+                area += a.X * b.Y - b.X * a.Y;
+                cx += a.X; cy += a.Y; cz += a.Z;
+            }
+            area = Math.Abs(area) * 0.5;
+            if (area <= bestArea) continue;
+            bestArea = area;
+            x = cx / v.Length; y = cy / v.Length; z = cz / v.Length;
+        }
+        return bestArea > 0;
+    }
+
     /// <summary>Walls (footprint and height range) within r of (x, y), for offline inspection.</summary>
     internal List<(double X0, double Y0, double X1, double Y1, double ZMin, double ZMax, double Dist)> WallsNear(double x, double y, double r)
     {

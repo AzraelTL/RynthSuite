@@ -228,6 +228,18 @@ public partial class BuffManager
     /// The plugin's death hold (and a 0-health read): a pending recall is dropped and the macro is
     /// left off, so nothing re-sends /lifestone or restarts the macro after the respawn.
     /// </summary>
+    /// <summary>
+    /// A death or a portal dropped whatever the server had open: a wand use in flight is forgotten,
+    /// not judged a failed swap (see _directSwapMisses). RynthAiPlugin calls it with the death hold
+    /// and on entering portal space.
+    /// </summary>
+    internal void ForgetPendingWield(string why)
+    {
+        if (_pendingWieldId == 0) return;
+        _pendingWieldId = 0;
+        _host.Log($"[WieldGate] the wand's use in flight was cut short ({why}): not counted as a failed swap");
+    }
+
     internal void CancelPendingRecall(string why)
     {
         if (!_recallPending) return;

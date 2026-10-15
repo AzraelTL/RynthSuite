@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using RynthCore.Plugin.RynthAi;
 using RynthCore.Plugin.RynthAi.LegacyUi;
@@ -30,6 +31,69 @@ internal static class HpFailsafeTests
         r.Add("hp failsafe: a failed recall does not switch the macro back on past a VTank yield", VTankYieldRespected);
         r.Add("hp failsafe: our name unreadable: the recall line is taken as ours, and that is logged once", RecallNameUnreadable);
         r.Add("vitals (L8):a heal the server leaves unanswered is not re-sent at the 2.5 s give-up after a 'too busy' answer", VitalResendObeysLatch);
+        r.Add("vitals: under Emergency Heal At with a weapon out and no usable kit, a health potion before Heal Self's wand swap", EmergencyPotionBeforeWandSwap);
+        r.Add("low components: tapers at 10, a scarab at 2 (not Diamond), kinds never carried ignored, a kind run out still counts", LowComponentsRule);
+    }
+
+    // Recall When Low On Components (RynthAiPlugin.LowComponents.cs), the rule itself.
+    private static void LowComponentsRule()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            [RynthAiPlugin.TaperKey] = 250, ["Lead Scarab"] = 12, ["Iron Scarab"] = 3,
+        };
+        Check.Null(RynthAiPlugin.LowComponents(counts, seen, 10, 2), "plenty of everything: nothing low");
+        counts[RynthAiPlugin.TaperKey] = 10;
+        Check.Eq(RynthAiPlugin.LowComponents(counts, seen, 10, 2), "tapers 10", "10 tapers: at the line");
+        counts[RynthAiPlugin.TaperKey] = 11;
+        counts["Iron Scarab"] = 2;
+        Check.Eq(RynthAiPlugin.LowComponents(counts, seen, 10, 2), "Iron Scarab 2", "2 Iron Scarabs: low");
+        counts.Remove("Iron Scarab");   // used the last ones: gone from the pack
+        Check.Eq(RynthAiPlugin.LowComponents(counts, seen, 10, 2), "Iron Scarab 0", "run out entirely: still low (seen before)");
+        Check.Null(RynthAiPlugin.LowComponents(counts, seen, 10, 0), "Low Scarabs At 0: scarabs aren't checked");
+
+        var fighter = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        Check.Null(RynthAiPlugin.LowComponents(new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase), fighter, 10, 2),
+            "a character that never carried tapers or scarabs is never low");
+
+        var inv = new[]
+        {
+            new WorldObject(1, "Prismatic Taper"), new WorldObject(2, "Red Taper"),
+            new WorldObject(3, "Diamond Scarab"), new WorldObject(4, "Mana Scarab"), new WorldObject(5, "Scarab Shell Armor"),
+        };
+        var c = RynthAiPlugin.CountComponents(inv);
+        Check.Eq(c.GetValueOrDefault(RynthAiPlugin.TaperKey), 2, "every kind of taper counts together");
+        Check.False(c.ContainsKey("Diamond Scarab"), "Diamond Scarabs never count");
+        Check.Eq(c.GetValueOrDefault("Mana Scarab"), 1, "a Mana Scarab counts");
+        Check.Eq(c.Count, 2, "only tapers and scarabs (not 'Scarab Shell Armor')");
+    }
+
+    // Drakkon, 2026-10-14: 15% health in melee among Depraved Shadows, the kit at 3% (under Kit Min
+    // Success), and the chain went to Heal Self: a wand swap still unanswered when he died 3.2 s later.
+    // The potion came after Heal Self, so it was never reached. Now the emergency step drinks first.
+    private static void EmergencyPotionBeforeWandSwap()
+    {
+        const uint Potion = 0x80001234;
+        try
+        {
+            var r = new Rig(healthPct: 15);
+            FakeHost.CombatModeValue = CombatMode.Melee;
+            FakeHost.Names[Potion] = "Healing Elixir";
+            r.S.UsePotions = true;
+            r.S.ConsumableRules.Add(new ConsumableRule { Id = unchecked((int)Potion), Name = "Healing Elixir", Type = "HealthPotion" });
+            var cache = new WorldObjectCache(r.Host);
+            cache.SetPlayerId(Player);
+            cache.OnCreateObject(Player);
+            _ = cache[unchecked((int)Potion)];
+            cache.Tick();
+            r.B.SetWorldObjectCache(cache);
+
+            r.Run(0, 0.3);
+            Check.True(FakeHost.Uses.Contains(Potion), "the health potion is drunk: " + string.Join(" | ", FakeHost.Logs.Where(l => l.Contains("Vitals")).Take(10)));
+            Check.Eq(FakeHost.Casts.Count, 0, "no Heal Self cast (no wand swap) while the potion goes");
+        }
+        finally { Done(); }
     }
 
     // No re-send into a busy server: a client log re-sent a heal every 2.5 s (the vitals give-up) into a server

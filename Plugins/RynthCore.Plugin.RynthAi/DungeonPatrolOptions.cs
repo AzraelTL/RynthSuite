@@ -19,6 +19,11 @@ internal enum PatrolCoverage
     LoopsOnly = 1,
     /// <summary>Every reachable cell, every dead end included.</summary>
     Everything = 2,
+    /// <summary>The Whole dungeon cells, but walked only close enough that every one is seen: a
+    /// stop within SightMeters, on about the same level, with no wall between (2026-10-14: a pillar
+    /// hall, 0x00AE, is 1,700 cells of corridor pieces, and Whole dungeon walked every lane).
+    /// DungeonPathfinder.Sweep.cs.</summary>
+    Sweep = 3,
 }
 
 internal sealed record DungeonPatrolOptions
@@ -26,6 +31,7 @@ internal sealed record DungeonPatrolOptions
     public const int    MaxDeadEndCellsMin = 0,     MaxDeadEndCellsMax = 30,     MaxDeadEndCellsDefault = 10;
     public const double WallClearanceMin = 0.5,  WallClearanceMax = 2.0,   WallClearanceDefault = 1.0;
     public const double LookInRoomMin = 3.0,     LookInRoomMax = 40.0,     LookInRoomDefault = 10.0;
+    public const double SightMin = 5.0,          SightMax = 60.0,          SightDefault = 20.0;
 
     public static readonly DungeonPatrolOptions Default = new();
 
@@ -51,6 +57,10 @@ internal sealed record DungeonPatrolOptions
     /// skirts or leaves by the doorway it came in by gets a walk to its middle and back.</summary>
     public double LookInRoomMeters { get; init; } = LookInRoomDefault;
 
+    /// <summary>Sweep: how far (metres) a monster notices the character, so how far apart the
+    /// patrol's lanes may be. Settings "Sight Distance (yd)". Unused by the other coverages.</summary>
+    public double SightMeters { get; init; } = SightDefault;
+
     /// <summary>The options with every value in range (a hand-edited profile or a remote setting).</summary>
     public DungeonPatrolOptions Clamped() => this with
     {
@@ -58,12 +68,14 @@ internal sealed record DungeonPatrolOptions
         MaxDeadEndCells     = Math.Clamp(MaxDeadEndCells, MaxDeadEndCellsMin, MaxDeadEndCellsMax),
         WallClearance    = double.IsFinite(WallClearance) ? Math.Clamp(WallClearance, WallClearanceMin, WallClearanceMax) : WallClearanceDefault,
         LookInRoomMeters = double.IsFinite(LookInRoomMeters) ? Math.Clamp(LookInRoomMeters, LookInRoomMin, LookInRoomMax) : LookInRoomDefault,
+        SightMeters      = double.IsFinite(SightMeters) ? Math.Clamp(SightMeters, SightMin, SightMax) : SightDefault,
     };
 
     public static string CoverageName(PatrolCoverage c) => c switch
     {
         PatrolCoverage.LoopsOnly  => "loops only",
         PatrolCoverage.Everything => "everything",
+        PatrolCoverage.Sweep      => "sweep",
         _                         => "whole dungeon",
     };
 
@@ -72,6 +84,7 @@ internal sealed record DungeonPatrolOptions
     {
         var inv = CultureInfo.InvariantCulture;
         string spurs = Coverage == PatrolCoverage.Everything ? "" : $", skip dead ends <= {MaxDeadEndCells}";
+        if (Coverage == PatrolCoverage.Sweep) spurs += $", sight {SightMeters.ToString("0.#", inv)} m";
         return $"coverage {CoverageName(Coverage)}{spurs}, lava/acid floors {(AvoidHazardFloors ? "avoided" : "walked")}, "
              + $"walls {WallClearance.ToString("0.0#", inv)} m, look into rooms >= {LookInRoomMeters.ToString("0.#", inv)} m";
     }

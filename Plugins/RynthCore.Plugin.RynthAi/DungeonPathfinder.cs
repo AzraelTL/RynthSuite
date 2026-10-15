@@ -508,7 +508,8 @@ internal static partial class DungeonPathfinder
         else
         {
             result = TrimDeadEndPockets(graph, reachable, startCell, o.MaxDeadEndCells, rooms, o.LookInRoomMeters);
-            how = (o.Coverage == PatrolCoverage.LoopsOnly ? "loops only, but hazards cut the loops: " : "")
+            how = (o.Coverage == PatrolCoverage.LoopsOnly ? "loops only, but hazards cut the loops: "
+                   : o.Coverage == PatrolCoverage.Sweep ? "sweep, over " : "")
                 + $"all reachable cells but dead-end areas of <= {o.MaxDeadEndCells} cells{(rooms != null ? " (by room)" : "")} ({result.Count} kept)";
         }
         if (PointLog != null)
@@ -806,6 +807,14 @@ internal static partial class DungeonPathfinder
         // Dead ends are judged room by room when the rooms can be made (the room patrol below).
         var rooms = geo != null && geo.DoorwayCount > 0 ? BuildRooms(graph, geo, hazardCells) : null;
         var mainRoute = GetMainRouteNodes(graph, startCell, hazardCells, o, rooms);
+
+        // Sweep (DungeonPathfinder.Sweep.cs): the same cells, walked only near enough to be seen.
+        // Falls through to the room patrol below when it can't build one. No other coverage comes here.
+        if (o.Coverage == PatrolCoverage.Sweep && geo != null && geo.DoorwayCount > 0)
+        {
+            var sweep = BuildSweepPatrol(graph, startCell, mainRoute, hazardCells, geo, o);
+            if (sweep != null && sweep.Points.Count > 0) return sweep;
+        }
 
         // With the dungeon map geometry: the same coverage over rooms instead of cells, rooms
         // crossed directly, doorways taken straight on (DungeonPathfinder.Rooms.cs).
