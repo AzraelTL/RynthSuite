@@ -7,7 +7,8 @@ namespace RynthILT.Tests;
 // Offline tests for the RynthILT plugin: the ACECustom bounty tracker (parsing, merging, the
 // quiet /bounty list read loop on a fake clock, persistence, the bridge JSON) and the ILT Hub
 // (attribute raiser, aug costs, bank commands, sigil chain, and the move out of RynthAi: data
-// migration, the RynthILT.Hub table, verb routing, the object view). Each test prints PASS / FAIL.
+// migration, the RynthILT.Hub table, verb routing, the object view) and its RynthServer.Profile
+// (ILT's tinkering salvage). Each test prints PASS / FAIL.
 //
 // Run: dotnet run -c Release                 (all tests)
 //      dotnet run -c Release -- window       (tests whose name contains "window")
@@ -38,6 +39,16 @@ internal static class Program
         SigilChainTests.Register(runner);
         BankCommandTests.Register(runner);
         MoveTests.Register(runner);
+        ChunkTests.Register(runner);
+        ProfileTests.Register(runner);
+        FeatureCatalogTests.Register(runner);
+        IltSettingsTests.Register(runner);
+        FellowshipCommandTests.Register(runner);
+        AetheriaChunkTests.Register(runner);
+        RingChainTests.Register(runner);
+        // Before DataApiTests: its last test releases the RynthILT.Data table, which the breeding version test queries.
+        BreedingTests.Register(runner);
+        DataApiTests.Register(runner);
         return runner.Run("RynthILT tests", args.Length > 0 ? args[0] : null);
     }
 }

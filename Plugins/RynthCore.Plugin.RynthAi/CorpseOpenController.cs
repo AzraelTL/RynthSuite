@@ -107,6 +107,11 @@ public sealed partial class RynthAiPlugin
     private bool _currentLootItemMovePending;
     private bool _corpseAutorunActive;
     private int _currentLootItemMoveAttempts;
+    // Where the current item's last move went, and whether it already got a second pack.
+    private int _currentLootItemDest;
+    private bool _currentLootItemPackRetried;
+    // Packs the server took none of an item's tries into (Loot/PackRefusals.cs).
+    private readonly RynthCore.Plugin.RynthAi.Loot.PackRefusals _packRefusals = new();
     private long _currentLootItemStillSince;
     private long _currentLootItemLeftAt;
     private bool _currentLootItemSawAnim;
@@ -143,6 +148,26 @@ public sealed partial class RynthAiPlugin
     private void LootDiag(string message)
     {
         Log(message);
+    }
+
+    // The values behind the last [LootSettings] line; a new line goes out only when one changes.
+    private (LootBaseline.Timers Timers, double Max, double Min)? _lootSettingsLogged;
+
+    /// <summary>
+    /// Logs the loot timers against the measured baseline (LootBaseline.cs), each marked "baseline"
+    /// or "custom (baseline N)", so a loot log says which settings it ran with. Runs every loot tick,
+    /// so it compares the raw values and builds the line only on a change.
+    /// </summary>
+    private void NoteLootSettings(LegacyUiSettings settings)
+    {
+        var timers = new LootBaseline.Timers(
+            settings.LootContentSettleMs, settings.LootEmptyCorpseMs, settings.LootAssessWindowMs,
+            settings.LootRetryTimeoutMs, settings.LootOpenRetryMs, settings.LootCorpseTimeoutMs);
+        var current = (timers, settings.CorpseApproachRangeMax, settings.CorpseApproachRangeMin);
+        if (_lootSettingsLogged == current)
+            return;
+        _lootSettingsLogged = current;
+        LootDiag(LootBaseline.Describe(timers, settings.CorpseApproachRangeMax, settings.CorpseApproachRangeMin));
     }
 
     public override void OnBusyCountIncremented()
@@ -579,6 +604,7 @@ public sealed partial class RynthAiPlugin
             ResetCorpseTarget();
             return;
         }
+        NoteLootSettings(settings);
 
         // Wedge halt: AC's item-action state is locked (consecutive open
         // timeouts). Stop firing opens into a dead client until the halt window
@@ -1985,6 +2011,22 @@ public sealed partial class RynthAiPlugin
 
         if (!freeRetry && _currentLootItemMoveAttempts >= 3)
         {
+            // None of the tries landed: the pack they went to is likely full (its contents
+            // unknown to the client). Leave that pack out for a while and give the item one
+            // more round into the next one; with no other pack, the item is left as before.
+            if (_currentLootItemDest != 0)
+            {
+                _packRefusals.Refuse(_currentLootItemDest, now);
+                if (!_currentLootItemPackRetried)
+                {
+                    LootDiag($"[RynthAi] {LootTag}: {(_currentLootItemDest == _playerId ? "the main pack" : $"pack 0x{(uint)_currentLootItemDest:X8}")} took none of {_currentLootItemMoveAttempts} tries for 0x{(uint)_currentLootItemId:X8}; treating it as full for {RynthCore.Plugin.RynthAi.Loot.PackRefusals.HoldMs / 60_000} min and trying another pack.");
+                    _currentLootItemPackRetried = true;
+                    _currentLootItemMoveAttempts = 0;
+                    _currentLootItemStillSince = 0;
+                    _lastLootActionAt = now;
+                    return;
+                }
+            }
             LootDiag($"[RynthAi] {LootTag}: pickup failed for 0x{(uint)_currentLootItemId:X8}; container remained 0x{(uint)_openedContainerId:X8} after {_currentLootItemMoveAttempts} attempt(s).");
             _processedCorpseItems.Add(_currentLootItemId);
             ResetCurrentLootItem();
@@ -2054,7 +2096,9 @@ public sealed partial class RynthAiPlugin
         uint dest;
         LootPickupResult r = ownCorpse
             ? SendOwnCorpsePickup(itemId, out dest)
-            : LootPickup.Send(Host, _objectCache, unchecked((uint)itemId), _playerId, out dest);
+            : LootPickup.Send(Host, _objectCache, unchecked((uint)itemId), _playerId, out dest,
+                              id => _packRefusals.IsRefused(id, CorpseNowMs));
+        if (r == LootPickupResult.Moved) _currentLootItemDest = unchecked((int)dest);
         if (ownCorpse && r == LootPickupResult.NoRoom)
         {
             PauseOwnCorpseNoRoom(corpseId, itemName);
@@ -2093,6 +2137,7 @@ public sealed partial class RynthAiPlugin
             return;
 
         int itemId = _currentLootItemId;
+        if (answered && _currentLootItemDest != 0) _packRefusals.Accepted(_currentLootItemDest);
         _processedCorpseItems.Add(_currentLootItemId);
         LootDiag($"[RynthAi] {LootTag}: pickup confirmed for 0x{(uint)_currentLootItemId:X8}; {reason}" +
                  $" ({now - _currentLootItemMoveRequestedAt} ms after the send{(_currentLootItemPipelined ? ", queued" : "")}).");
@@ -2182,6 +2227,15 @@ public sealed partial class RynthAiPlugin
         // from a body that is about to exist.
         if (_combatEndedAt != 0 && (nowMs - _combatEndedAt) < LootGraceMs)
             return true;
+
+        // Boost Loot Priority: our kill's corpse is still forming. Looting holds the tick (combat
+        // holds its next target) so the corpse is looted before the next fight starts.
+        if (BoostLootAwaitsKillCorpse(settings))
+        {
+            double range = GetCorpseApproachRangeMaxMeters(settings);
+            if (range > 0.25) HasUnlootedCorpsesInRange(range);   // keeps _lootableInRange current
+            return true;
+        }
 
         double maxMeters = GetCorpseApproachRangeMaxMeters(settings);
         if (maxMeters <= 0.25)
@@ -2281,6 +2335,62 @@ public sealed partial class RynthAiPlugin
     private bool IsLootStarvedTurn(bool wantLoot, bool wantCombat)
         => wantLoot && wantCombat && _lootStarved
            && _combatManager?.HasCloseThreat(LootStarveCloseYards) != true;
+
+    // -- Boost Loot Priority: one kill, one loot (2026-10-14) --------------------------------
+    // Combat locked its next target a few ms after each kill, and ACE creates the corpse 1-3 s
+    // later (the death animation), so the arbiter always saw combat engaged and Boost Loot never
+    // won: Kelpie's corpses waited for a lull and were looted two or three at a time. Now our kill
+    // starts a wait of up to BoostLootKillWaitMs for its corpse. While it runs, or while a corpse
+    // is claimed, open or lootable in range, CombatManager locks no new target (HoldNewTarget)
+    // and looting counts as work, so the arbiter gives Looting the tick.
+    internal const long BoostLootKillWaitMs = 4000;
+    private long _boostLootKillAt;   // CorpseNowMs of our last kill whose corpse isn't looted yet; 0 = none
+
+    /// <summary>Our kill (KillerNotification): its corpse is on its way.</summary>
+    private void NoteBoostLootKill() => _boostLootKillAt = CorpseNowMs;
+
+    /// <summary>
+    /// A completed corpse first seen after the kill (or never timed) is the kill's corpse: the
+    /// wait is over, so combat doesn't stand idle for the rest of it.
+    /// </summary>
+    private void EndBoostLootKillWait(int corpseId)
+    {
+        if (_boostLootKillAt == 0) return;
+        if (!_corpseWaitingSince.TryGetValue(corpseId, out long seen) || seen >= _boostLootKillAt)
+            _boostLootKillAt = 0;
+    }
+
+    /// <summary>Boost Loot Priority is on and a corpse could be looted now (not with rare-only looting,
+    /// where most kills leave nothing to wait for).</summary>
+    private bool BoostLootCanRun(LegacyUiSettings settings)
+        => settings.BoostLootPriority && settings.IsMacroRunning && settings.EnableLooting
+           && !settings.LootOnlyRareCorpses
+           && !IsLootingBlockedByPack(settings)
+           && !_useRefusals.HoldsOpens(CorpseNowMs);
+
+    /// <summary>Our last kill was under BoostLootKillWaitMs ago and its corpse isn't looted yet.</summary>
+    private bool BoostLootAwaitsKillCorpse(LegacyUiSettings settings)
+    {
+        if (_boostLootKillAt == 0) return false;
+        if (CorpseNowMs - _boostLootKillAt >= BoostLootKillWaitMs)
+        {
+            _boostLootKillAt = 0;
+            return false;
+        }
+        return BoostLootCanRun(settings);
+    }
+
+    /// <summary>
+    /// CombatManager.HoldNewTarget: with Boost Loot Priority on, no new target while a corpse is
+    /// claimed, open or lootable in range, or our kill's corpse is still forming.
+    /// </summary>
+    private bool BoostLootHoldsNewTarget()
+    {
+        LegacyUiSettings? settings = _dashboard?.Settings;
+        if (settings == null || !BoostLootCanRun(settings)) return false;
+        return _targetCorpseId != 0 || _openedContainerId != 0 || _lootableInRange.Count > 0
+               || BoostLootAwaitsKillCorpse(settings);
+    }
 
     private static bool IsOwnKill(CorpseLootDecision d)
         => !string.IsNullOrWhiteSpace(d.KillerName) && !string.IsNullOrWhiteSpace(d.PlayerName)
@@ -2803,6 +2913,7 @@ public sealed partial class RynthAiPlugin
         }
 
         _completedCorpses[corpseId] = CorpseNowMs;
+        EndBoostLootKillWait(corpseId);
         _corpseCooldownUntil.Remove(corpseId);
         _processedCorpseItems.Clear();
         _corpseItemAttempts.Clear();
@@ -2868,6 +2979,8 @@ public sealed partial class RynthAiPlugin
         _currentLootItemMovePending = false;
         _currentLootItemMoveRequestedAt = 0;
         _currentLootItemMoveAttempts = 0;
+        _currentLootItemDest = 0;
+        _currentLootItemPackRetried = false;
         _currentLootItemStillSince = 0;
         _currentLootItemLeftAt = 0;
         _currentLootItemSawAnim = false;

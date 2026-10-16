@@ -1,4 +1,6 @@
-// IltCharms.cs — The Mini Remote's "Charms" ILT tab: every ACECustom registry charm in one table.
+// IltCharms.cs — The Mini Remote's "Charms" ILT tab: every ACECustom registry charm and the
+// Guardian Hand, with their toggles. Other plugins read the same list and toggle through
+// "RynthILT.Data" (BuildReaderJson / ToggleFromReader).
 // Originally SilentKelpie's ILT Hub (RynthAi IltHub/); moved to RynthILT 2026-10-13.
 //
 // Per charm (IltCharmTracker): acquired ("carried" now, "stored" = carried before and remembered
@@ -14,6 +16,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using ImGuiNET;
+using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthILT.Hub;
 
@@ -68,6 +71,52 @@ internal sealed class IltCharms : IIltFeature
         _lastScan = 0;   // re-read the status soon (the appraisal refresh is throttled per item)
     }
 
+    /// <summary>
+    /// A Toggle from another plugin ("RynthILT.Data" ToggleCharm). Only
+    /// a registry charm or Guardian Hand the player carries is used, so a reader can't make the
+    /// client use anything else. Pump thread. True when it was used.
+    /// </summary>
+    public bool ToggleFromReader(uint id)
+    {
+        if (id == 0 || id > int.MaxValue) return false;
+        var inv = _ctx.Inventory;
+        foreach (var wo in inv.Items())
+        {
+            if (wo.Id != (int)id) continue;
+            if (inv.CharmDefFor(wo) == null && !IsGuardianHand(wo)) return false;
+            Toggle(wo.Id);
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// The "RynthILT.Data" charms JSON: the registry charms
+    /// (IltCharmTracker.BuildJson) plus a "hands" array, every Guardian Hand carried now with its
+    /// object id (the Toggle's id), status and the server's switch. Pump thread.
+    /// </summary>
+    public string BuildReaderJson()
+    {
+        string json = _tracker.BuildJson();
+        if (!_ctx.Options.IsIltLikeWorld || !json.EndsWith("]}", StringComparison.Ordinal)) return json;
+        var inv = _ctx.Inventory;
+        string server = _ctx.Options.Get(IltFeature.Charm("Guardian Hand")) switch { IltTri.On => "on", IltTri.Off => "off", _ => "unknown" };
+        var sb = new System.Text.StringBuilder(json, 0, json.Length - 1, json.Length + 256);
+        sb.Append(",\"hands\":[");
+        bool first = true;
+        foreach (var wo in inv.Items().Where(IsGuardianHand))
+        {
+            if (!first) sb.Append(',');
+            first = false;
+            string active = inv.CharmStatus(wo) switch { IltTri.On => "on", IltTri.Off => "off", _ => "unknown" };
+            sb.Append("{\"id\":").Append(unchecked((uint)wo.Id));
+            sb.Append(",\"name\":\"").Append(IltStyle.JsonEscape(wo.Name)).Append('"');
+            sb.Append(",\"active\":\"").Append(active).Append('"');
+            sb.Append(",\"server\":\"").Append(server).Append("\"}");
+        }
+        return sb.Append("]}").ToString();
+    }
+
     // ── IIltFeature ─────────────────────────────────────────────────────────
 
     public void Tick(long nowMs)
@@ -93,13 +142,13 @@ internal sealed class IltCharms : IIltFeature
         var rows = _rows;
         if (rows.Length == 0)
         {
-            ImGui.TextDisabled(_ctx.WindowOpen ? "Reading your charms..." : "Open the Mini Remote to read your charms.");
+            SafeImGui.TextDisabled(_ctx.WindowOpen ? "Reading your charms..." : "Open the Mini Remote to read your charms.");
             RenderGuardianHand();
             return;
         }
 
         int acquired = rows.Count(r => r.Acquired != "no"), active = rows.Count(r => r.Active == IltTri.On);
-        ImGui.TextColored(IltStyle.ColTeal, $"{acquired} of {rows.Length} acquired, {active} active");
+        SafeImGui.TextColored(IltStyle.ColTeal, $"{acquired} of {rows.Length} acquired, {active} active");
         ImGui.SameLine();
         if (ImGui.SmallButton("Refresh##charms")) _ctx.Post(() => { _lastScan = 0; });
 
@@ -133,16 +182,16 @@ internal sealed class IltCharms : IIltFeature
         ImGui.TableNextColumn();
         bool carried = r.Acquired == "carried";
         if (carried) ImGui.TextUnformatted(r.Def.Name);
-        else ImGui.TextColored(IltStyle.ColTextMute, r.Def.Name);
-        if (ImGui.IsItemHovered() && r.Def.Effect.Length > 0) ImGui.SetTooltip(r.Def.Effect);
+        else SafeImGui.TextColored(IltStyle.ColTextMute, r.Def.Name);
+        if (ImGui.IsItemHovered() && r.Def.Effect.Length > 0) SafeImGui.SetTooltip(r.Def.Effect);
 
         ImGui.TableNextColumn();
-        if (carried) ImGui.TextColored(IltStyle.ColGreen, r.Count > 1 ? $"Carried x{r.Count}" : "Carried");
+        if (carried) SafeImGui.TextColored(IltStyle.ColGreen, r.Count > 1 ? $"Carried x{r.Count}" : "Carried");
         else if (r.Acquired == "seen")
         {
             ImGui.TextColored(IltStyle.ColAmber, "Stored");
             if (ImGui.IsItemHovered() && r.LastSeenUtc != default)
-                ImGui.SetTooltip("Last carried " + r.LastSeenUtc.ToString("yyyy-MM-dd"));
+                SafeImGui.SetTooltip("Last carried " + r.LastSeenUtc.ToString("yyyy-MM-dd"));
         }
         else ImGui.TextDisabled("No");
 
@@ -188,12 +237,12 @@ internal sealed class IltCharms : IIltFeature
         foreach (var h in hands)
         {
             ImGui.PushID(h.Id);
-            if (h.ServerDisabled) ImGui.TextDisabled($"{h.Name} - disabled on this server");
+            if (h.ServerDisabled) SafeImGui.TextDisabled($"{h.Name} - disabled on this server");
             else
             {
                 var col = h.Status == IltTri.On ? IltStyle.ColGreen
                         : h.Status == IltTri.Off ? IltStyle.ColTextMute : IltStyle.ColAmber;
-                ImGui.TextColored(col, h.Status == IltTri.On ? "ON " : h.Status == IltTri.Off ? "OFF" : " ? ");
+                SafeImGui.TextColored(col, h.Status == IltTri.On ? "ON " : h.Status == IltTri.Off ? "OFF" : " ? ");
                 ImGui.SameLine();
                 ImGui.TextUnformatted(h.Name);
                 ImGui.SameLine();

@@ -21,6 +21,9 @@ internal static class MiniRemoteMoveTests
 {
     private const uint Player = 0x50000E01;
 
+    [System.Runtime.CompilerServices.UnsafeAccessor(System.Runtime.CompilerServices.UnsafeAccessorKind.Field, Name = "_selectBreeding")]
+    private static extern ref bool SelectBreedingPending(PetsTab pets);
+
     private const string LegacyHubJson = """
         {
           "Bank": { "Pyreals": 99 },
@@ -35,7 +38,7 @@ internal static class MiniRemoteMoveTests
     {
         r.Add("mini remote: Pets / Quests settings come over from ilt-hub.json once, which is never rewritten", LegacyState);
         r.Add("mini remote: without RynthILT there are no ILT tabs, bits or verbs", NoRynthIlt);
-        r.Add("mini remote: /ra hub|quests|pets stay RynthAi's; ILT verbs say RynthILT is needed", Commands);
+        r.Add("mini remote: /ra hub|quests|pets stay RynthAi's; quest windows point to RynthOracle; ILT verbs say RynthILT is needed", Commands);
         r.Add("mini remote: the pyreal refill path never spends without RynthILT's confirmation", RefillNeedsIlt);
         r.Add("profile: the old Server Features fields still round-trip (RynthILT migrates them)", LegacyProfileFields);
         r.Add("RynthAi.Hub: table, spell names, nothing before login", HubTable);
@@ -123,9 +126,30 @@ internal static class MiniRemoteMoveTests
         Check.True(c.HandleCommand("pets", new[] { "show" }), "pets show");
         Check.True(FakeHost.Chat.Any(x => x.Contains("tab pets:show")), "same tab");
         FakeHost.Chat.Clear();
+        // The Pets tab's Breeding sub-tab is RynthILT's (Infinite Leaftide only): without RynthILT there is none.
+        Check.False(c.Pets.BreedingOffered, "no Breeding sub-tab without RynthILT");
+        Check.True(c.HandleCommand("hub", new[] { "open", "breeding" }), "hub open breeding is answered");
+        Check.True(FakeHost.Chat.Any(x => x.Contains(IltClient.NotLoaded)), "it says RynthILT is needed");
+        Check.False(FakeHost.Chat.Any(x => x.Contains("tab pets:")), "and opens nothing");
+        Check.False(SelectBreedingPending(c.Pets), "no Breeding sub-tab request");
+        FakeHost.Chat.Clear();
+        Check.True(c.HandleCommand("hub", new[] { "tab", "Breed" }), "hub tab breed (the dashboard)");
+        Check.False(FakeHost.Chat.Any(), "tab switches quietly");
+        Check.False(SelectBreedingPending(c.Pets), "still no Breeding sub-tab request without RynthILT");
+        FakeHost.Chat.Clear();
         Check.True(c.HandleCommand("hub", new[] { "bank" }), "hub bank is handled (answered)");
         Check.True(FakeHost.Chat.Any(x => x.Contains("RynthILT")), "it says the ILT verbs come with RynthILT");
-        Check.True(FakeHost.Chat.Any(x => x.Contains("/ra hub open quests|pets")), "and lists what RynthAi still has");
+        Check.True(FakeHost.Chat.Any(x => x.Contains("/ra hub open pets|crafting [show|hide|toggle]   /ra hub open breeding")), "and lists what RynthAi still has");
+        FakeHost.Chat.Clear();
+        // The Quests tab moved to RynthOracle (2026-10-13): its verbs and tab names say so.
+        Check.True(c.HandleCommand("hub", new[] { "open", "quests" }), "hub open quests is answered");
+        Check.True(FakeHost.Chat.Any(x => x.Contains("RynthOracle") && x.Contains("/ro timers")), "it points to RynthOracle");
+        FakeHost.Chat.Clear();
+        Check.True(c.HandleCommand("quests", new[] { "window" }), "quests window is answered");
+        Check.True(FakeHost.Chat.Any(x => x.Contains("RynthOracle")), "with the same note");
+        FakeHost.Chat.Clear();
+        Check.True(c.HandleCommand("quests", Array.Empty<string>()), "quests (refresh) stays RynthAi's");
+        Check.True(FakeHost.Chat.Any(x => x.Contains("Quest tracker not ready")), "the meta tracker's refresh (none in this test)");
         FakeHost.Chat.Clear();
         Check.True(c.HandleCommand("guardian", new[] { "handin" }), "guardian is answered");
         Check.True(FakeHost.Chat.Any(x => x.Contains("RynthILT")), "with the RynthILT note");

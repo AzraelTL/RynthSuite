@@ -27,8 +27,9 @@ internal enum LootPickupResult
 /// </summary>
 internal static class LootPickup
 {
+    /// <remarks><paramref name="skip"/>: destinations the server refused lately (<see cref="PackRefusals"/>).</remarks>
     public static LootPickupResult Send(RynthCoreHost host, WorldObjectCache? cache, uint itemId, uint playerId,
-        out uint destination)
+        out uint destination, System.Func<int, bool>? skip = null)
     {
         destination = 0;
         if (itemId == 0) return LootPickupResult.Failed;
@@ -39,7 +40,7 @@ internal static class LootPickup
             int pid = unchecked((int)playerId);
             int dest = cache == null
                 ? pid
-                : WorldObjectCache.FindLootDestination(cache.GetDirectInventory(forceRefresh: false), pid, host);
+                : WorldObjectCache.FindLootDestination(cache.GetDirectInventory(forceRefresh: false), pid, host, skip);
             if (dest == 0) return LootPickupResult.NoRoom;
             destination = unchecked((uint)dest);
             return host.MoveItemExternal(itemId, destination, 0) ? LootPickupResult.Moved : LootPickupResult.Failed;

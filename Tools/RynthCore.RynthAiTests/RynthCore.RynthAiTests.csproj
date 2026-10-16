@@ -21,12 +21,15 @@
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\LegacyUi\NavRouteParser.cs" Link="Linked\NavRouteParser.cs" />
     <!-- Combat: the melee/missile stall ladder (pure timing state, time passed in). -->
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Combat\CombatStallWatchdog.cs" Link="Linked\CombatStallWatchdog.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Combat\PointBlankFacing.cs" Link="Linked\PointBlankFacing.cs" />
     <!-- Weapon weakness selection: element ranking per monster. Its only outside reference is
          CreatureProfileStore.Folder (the user override folder), faked in Fakes\. -->
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\CreatureData\CreatureWeakness.cs" Link="Linked\CreatureWeakness.cs" />
     <!-- Learned per-monster damage (System only), for the Aelrynth difficulty-tier tests. -->
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\CreatureData\MonsterDamageStore.cs" Link="Linked\MonsterDamageStore.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\CreatureData\PlayerWeenies.cs" Link="Linked\PlayerWeenies.cs" />
+    <!-- Loot: the measured loot-timer baseline and its [LootSettings] log line. -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\LootBaseline.cs" Link="Linked\LootBaseline.cs" />
   </ItemGroup>
 
   <ItemGroup>

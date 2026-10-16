@@ -24,6 +24,9 @@
 //   * Healing pet (UB HealingBuddy subset): summons a heal pet when HP drops, dismisses it
 //     after the heal lands, holds PetManager's combat summons while it is out.
 //   * /pets and /shinies logs: RynthILT's (RynthILT.Hub section "pets-logs", ILT only).
+//   * Breeding sub-tab (Infinite Leaftide only): the tab becomes Roster | Breeding when RynthILT
+//     offers it (an ILT world whose server hasn't reported pet breeding off). Its whole body is
+//     RynthILT's pet breeding tracker (RynthILT.Hub section "pets-breeding"); this tab only hosts it.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -694,11 +697,65 @@ internal sealed class PetsTab
 
     // ── UI (render thread) ──────────────────────────────────────────────────
 
+    /// <summary>Set from any thread: the next frame opens the Breeding sub-tab ("/ra hub open breeding").</summary>
+    private volatile bool _selectBreeding;
+
+    /// <summary>Shows the Breeding sub-tab on the next frame (any thread).</summary>
+    public void SelectBreeding() => _selectBreeding = true;
+
+    /// <summary>
+    /// RynthILT offers the Breeding sub-tab: it calls this world Infinite Leaftide and the server
+    /// hasn't reported pet breeding off. False without RynthILT. Any thread.
+    /// </summary>
+    public bool BreedingOffered => _ctx.Ilt.IsIltWorld && !_ctx.Ilt.IsOff(RynthIltHub.FeaturePetBreeding);
+
+    /// <summary>
+    /// The Pets tab: the universal roster, and on Infinite Leaftide the Roster | Breeding sub-tabs
+    /// (Breeding is drawn by RynthILT).
+    /// </summary>
     public void Render()
     {
         var settings = _ctx.Settings;
         if (settings == null) { ImGui.TextDisabled("Not logged in."); return; }
 
+        if (!BreedingOffered)
+        {
+            RenderRoster(settings);
+            return;
+        }
+        if (!ImGui.BeginTabBar("##petsub")) return;
+        if (ImGui.BeginTabItem("Roster##petroster"))
+        {
+            RenderRoster(settings);
+            ImGui.EndTabItem();
+        }
+        ImGuiTabItemFlags breedFlags = _selectBreeding ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
+        _selectBreeding = false;
+        if (BeginTab(BreedingTabLabel, breedFlags))
+        {
+            // RynthILT's tracker; an older RynthILT (before 0.3.1) has no such section and draws nothing.
+            if (!_ctx.Ilt.RenderSection(RynthIltHub.SectionPetBreeding))
+                ImGui.TextDisabled("This RynthILT has no pet breeding tracker; update RynthILT to 0.3.1 or later.");
+            ImGui.EndTabItem();
+        }
+        ImGui.EndTabBar();
+    }
+
+    private static readonly byte[] BreedingTabLabel = System.Text.Encoding.UTF8.GetBytes("Breeding##petbreeding\0");
+
+    /// <summary>
+    /// BeginTabItem with flags but no close button (ImGui.NET pairs the flags overload with p_open,
+    /// which draws an X on the tab).
+    /// </summary>
+    private static unsafe bool BeginTab(byte[] labelUtf8Z, ImGuiTabItemFlags flags)
+    {
+        fixed (byte* label = labelUtf8Z)
+            return ImGuiNative.igBeginTabItem(label, null, flags) != 0;
+    }
+
+    /// <summary>The universal roster: types, summons, ILT charms, healing pets and RynthILT's /pets logs.</summary>
+    private void RenderRoster(LegacyUiSettings settings)
+    {
         RenderRosterHeader(settings);
         RenderRosterTable();
         // The tab is universal; the charms and the /pets and /shinies logs are ILT's (the logs RynthILT's).
@@ -742,10 +799,10 @@ internal sealed class PetsTab
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Appraise every pet to refresh bond, potency and breeding, and check pet-named items\n(an \"... Essence\" name alone isn't enough — the item must be a summoning pet device).");
         ImGui.SameLine();
         if (ImGui.Button("Add sel.")) _ctx.Post(() => AddSelectedAs(summonKind));
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip($"Make the item selected in your pack a {KindNames[(int)kind].ToLowerInvariant()} pet.");
+        if (ImGui.IsItemHovered()) SafeImGui.SetTooltip($"Make the item selected in your pack a {KindNames[(int)kind].ToLowerInvariant()} pet.");
 
         string active = _uiActivePet;
-        if (active.Length > 0) ImGui.TextColored(LegacyDashboardRenderer.ColTeal, "Active summon: " + active);
+        if (active.Length > 0) SafeImGui.TextColored(LegacyDashboardRenderer.ColTeal, "Active summon: " + active);
         else ImGui.TextDisabled("Active summon: none");
 
         switch (kind)
@@ -775,7 +832,7 @@ internal sealed class PetsTab
                 int resp = S.CosmeticRespawnSeconds;
                 ImGui.SetNextItemWidth(90);
                 if (ImGui.InputInt("Respawn (s)", ref resp)) S.CosmeticRespawnSeconds = Math.Clamp(resp, 5, 600);
-                ImGui.TextDisabled("Tick one cosmetic pet. Status: " + _cosmeticStatus);
+                SafeImGui.TextDisabled("Tick one cosmetic pet. Status: " + _cosmeticStatus);
                 break;
             }
         }
@@ -806,7 +863,7 @@ internal sealed class PetsTab
 
         if (rows.Length == 0)
         {
-            ImGui.TextDisabled(kind == PetKind.Cosmetic
+            SafeImGui.TextDisabled(kind == PetKind.Cosmetic
                 ? "No cosmetic pets yet — select an essence in your pack and press Add sel., or right-click a pet in another type."
                 : $"No {KindNames[(int)kind].ToLowerInvariant()} pet essences carried.");
             return;
@@ -837,10 +894,10 @@ internal sealed class PetsTab
                 _highlightId = _highlightId == r.Id ? 0 : r.Id;
             RenderRowContextMenu(r);
             ImGui.SetCursorPos(start);
-            ImGui.TextColored(DamageColor(r.DamageType), r.Line1);
-            ImGui.TextColored(LegacyDashboardRenderer.ColAmber, "  " + r.Line2);
-            if (r.UsesMax > 0 && r.UsesCur == 0) ImGui.TextColored(LegacyDashboardRenderer.ColHp, "  " + r.Line3);
-            else ImGui.TextDisabled("  " + r.Line3);
+            SafeImGui.TextColored(DamageColor(r.DamageType), r.Line1);
+            SafeImGui.TextColored(LegacyDashboardRenderer.ColAmber, "  " + r.Line2);
+            if (r.UsesMax > 0 && r.UsesCur == 0) SafeImGui.TextColored(LegacyDashboardRenderer.ColHp, "  " + r.Line3);
+            else SafeImGui.TextDisabled("  " + r.Line3);
 
             ImGui.TableNextColumn();
             if (showArrows && r.Selected)
@@ -905,7 +962,7 @@ internal sealed class PetsTab
         bool en = S.HealingEnabled;
         if (ImGui.Checkbox("Summon heal pet when health is low", ref en)) S.HealingEnabled = en;
         string healPet = S.HealPetName;
-        ImGui.TextDisabled("Heal pet: " + (string.IsNullOrWhiteSpace(healPet) ? "auto (Healing Buddy / Dule box)" : healPet)
+        SafeImGui.TextDisabled("Heal pet: " + (string.IsNullOrWhiteSpace(healPet) ? "auto (Healing Buddy / Dule box)" : healPet)
                            + "  — tick one under Type = Healing.");
         int thr = S.HealthThresholdPercent;
         ImGui.SetNextItemWidth(160);
@@ -921,6 +978,6 @@ internal sealed class PetsTab
         int to = S.PetTimeoutSeconds;
         ImGui.SetNextItemWidth(100);
         if (ImGui.InputInt("Heal timeout (s)", ref to)) S.PetTimeoutSeconds = Math.Max(5, to);
-        ImGui.TextDisabled("Status: " + _healStatus);
+        SafeImGui.TextDisabled("Status: " + _healStatus);
     }
 }

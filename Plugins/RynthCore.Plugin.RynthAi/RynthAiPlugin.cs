@@ -395,6 +395,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private void TeardownSession()
     {
         ObjectChangeTracker.Clear();
+        while (_engineCommands.TryDequeue(out _)) { }   // a fellowship button's command is for this character only
         // The server drops whatever it was doing for this character at logout.
         RynthCore.Plugin.Shared.ActionPacer.Forget("logout");
         _navigationEngine?.Stop();
@@ -689,6 +690,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _combatManager.SetWeaponSwapGate(_weaponSwapGate);
         _combatManager.Vitals = _vitals;   // the script hook's request carries the player's vitals
         _combatManager.HoldIdlePeace = LootHoldsIdlePeace;
+        _combatManager.HoldNewTarget = BoostLootHoldsNewTarget;   // Boost Loot Priority: one kill, one loot
         _combatManager.ManaReserveHold = spellId => _buffManager?.OffensiveCastHold(spellId);   // the mana reserve
         _combatManager.ManaCanEverAfford = spellId => _buffManager?.CanEverAfford(spellId) ?? true;   // script hook: never-payable spells
         _combatManager.SetStaleBusyCallback(OnCombatBusyStale);
@@ -904,6 +906,12 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             Huds.ServerMenuModel.Apply(value);
             return;
         }
+        // A server plugin's commands for one of RynthAi's section views (RynthILT's /fship for Fellowship).
+        if (action.Equals(ServerCommandShare.Action, StringComparison.OrdinalIgnoreCase))
+        {
+            Huds.ServerCommandModel.Apply(value);
+            return;
+        }
         var dash = _dashboard;
         if (dash == null) return;
         bool on = value is "1" or "true" or "on" or "True" or "TRUE"
@@ -949,7 +957,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "itemhud":
             case "remote":
             case "miniremote":
-                // Dashboard Hub launcher: left-click remote=toggle, right-click huds=show.
+                // RynthCore's Mini Remote commands ("remote","toggle"; "huds","show").
                 HandleHudCommand(action.ToLowerInvariant(), value);
                 break;
             case "itemhudadd":
@@ -1010,6 +1018,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         ["HealOthersAt"] = (0, 100), ["RestamOthersAt"] = (0, 100), ["InfuseOthersAt"] = (0, 100),
         ["MeleeAttackPower"] = (-1, 100), ["MissileAttackPower"] = (-1, 100),
         ["MeleeAttackHeight"] = (0, 2), ["MissileAttackHeight"] = (0, 2),
+        ["WeaponSwapSettleMs"] = (0, 3000), ["WeaponSwapMinHealthPct"] = (0, 100), ["WeaponSwapMinGainPct"] = (0, 200),
         ["PetMinMonsters"] = (1, 20),
         ["SpellCastIntervalMs"] = (100, 1500), ["StuckCastBreakMs"] = (0, 60000), ["RecoveryRetryMs"] = (200, 5000), ["AttackSpellIntervalMs"] = (0, 5000), ["MinRingTargets"] = (1, 20), ["MinBlastTargets"] = (1, 20), ["BlastRange"] = (0, 100), ["MinWallTargets"] = (1, 20), ["WallRange"] = (0, 100),
         ["MinSkillLevelTier1"] = (1, 500), ["MinSkillLevelTier2"] = (1, 500), ["MinSkillLevelTier3"] = (1, 500), ["MinSkillLevelTier4"] = (1, 500),
@@ -1379,6 +1388,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             if (_loginComplete) PostDataWriteProblems();   // a save that failed / folder not writable: say so in chat
             CombatHook.ObserveUseDone();        // ctx.last.err: the answer to the hook's last cast
             TickDelayedCommands();              // /ub delay
+            DrainEngineCommands();              // fellowship command buttons (RynthCore's Fellowship section)
             TickPropertyDump();                 // /ub propertydump: waits for the ID, chat in chunks
             if (_loginComplete) _dashboard?.TickPackSetup(_objectCache, _playerId);   // new/copied profile items
 
@@ -2180,6 +2190,18 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             // unguarded appraisal + health query here sent 4-6 identifies per corpse.
             RequestTargetVitals(currentTargetId, obj);
 
+            // Yourself: with Item Info on select, your ratings (RynthAiSelfRatings).
+            if (IsSelf(currentTargetId))
+            {
+                var selfInfo = _dashboard?.Settings.ItemInfoSettings;
+                if (selfInfo != null && selfInfo.OnSelect && !ItemInfo.SelfSelect.IsOurs(currentTargetId))
+                {
+                    ItemInfoLog($"select 0x{currentTargetId:X8} (yourself): ratings queue");
+                    QueueSelfRatings(auto: true);
+                }
+                return;
+            }
+
             // Skip non-items (monsters, players, NPCs, doors, corpses, portals, etc.)
             if (obj != null && IsLootableClass(obj.ObjectClass))
             {
@@ -2278,7 +2300,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _petManager?.OnChatWindowText(text);
         _combatManager?.TraceCastChat(text, chatType);
         _combatManager?.HandleChatForDebuffs(text);
-        _combatManager?.HandleChatForDamage(text);
+        _combatManager?.HandleChatForDamage(text, chatType);
         _missileCraftingManager?.HandleChat(text);
         _scrollLearner?.OnChat(text);
         _metaManager?.HandleChat(text, chatType);
@@ -2301,6 +2323,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats kill"); }
         if (string.IsNullOrEmpty(deathMessage)) return;
         _killClock.RecordKill();    // the only kill source: KillerNotification goes to the killer alone
+        NoteBoostLootKill();        // before combat sees the kill: its next target waits for the corpse
         _combatManager?.OnKillNotification(deathMessage);
         _dashboard?.RecordKill();   // feeds the kills/hour session stat
     }
@@ -3481,6 +3504,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "listgvars":    HandleListGvarsCommand(); break;
             case "dumpprops":    HandleDumpPropsCommand(parts); break;
             case "version":      HandleVersionCommand(); break;
+            case "server":       HandleServerCommand(); break;
             case "t11":          HandleT11Command(parts); break;
             case "wielded":      HandleWieldedCommand(); break;
             case "scan":         HandleScanCommand(); break;

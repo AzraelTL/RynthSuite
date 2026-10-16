@@ -113,6 +113,7 @@ internal static class Program
         MeleeStallTests.Register(runner);
         ServerMenuTests.Register(runner);
         MiniRemoteMoveTests.Register(runner);
+        SectionsTests.Register(runner);
         ItemsCleanTests.Register(runner);
         DeathRecallTests.Register(runner);
         InventoryAttributeFilterTests.Register(runner);
@@ -128,6 +129,11 @@ internal static class Program
         SaveFailureTests.Register(runner);
         DoorTests.Register(runner);
         BlankLoadTests.Register(runner);
+        GiveProfileTests.Register(runner);
+        TinkerTests.Register(runner);
+        LauncherSwapTests.Register(runner);
+        SelfRatingsTests.Register(runner);
+        IltClientLookupTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }

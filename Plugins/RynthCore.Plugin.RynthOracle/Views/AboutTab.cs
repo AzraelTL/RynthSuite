@@ -28,6 +28,21 @@ internal sealed partial class OracleView
         ServerIdentity sv = _c.Server;
         w.Text(sv.Tag.Length > 0 ? $"{sv.Tag}: its own pages and quest pack are on." : "No server-specific pages here (retail features only).");
         w.TextDisabled($"How it was decided: {sv.Source}");
+        // RynthCore's server list (API v86) and the active server's settings from the plugin that owns it.
+        RynthCore.Plugin.Shared.ServerStateClient st = _c.ServerState;
+        if (st.State is { } es)
+        {
+            w.TextDisabled(es.HasActive
+                ? $"RynthCore: {es.ActiveName} ({es.Active}){(es.Picked ? ", picked by hand" : "")}; settings from {(es.ActivePlugin.Length > 0 ? es.ActivePlugin : "no plugin")}"
+                : "RynthCore: no server active" + (es.Picked ? " (picked by hand)" : ""));
+            if (RynthCore.Plugin.Shared.ServerProfileView.Parse(st.ProfileJson) is { } prof)
+                w.TextDisabled($"{st.ProfilePlugin} ({RynthCore.Plugin.Shared.RynthServerProfileApiV1.InterfaceName}): {prof.Summary()}");
+            else if (es.ActivePlugin.Length > 0)
+                w.TextDisabled($"{es.ActivePlugin} hasn't sent its server settings (an older plugin?).");
+            w.TextDisabled("Change the server: RynthCore Options > Diagnostics > Server, or /rc server pick <id>|auto.");
+        }
+        else if (_c.Host.Version >= 75 && _c.Host.Version < 85)
+            w.TextDisabled($"This engine is API v{_c.Host.Version}; v86 lets RynthOracle follow RynthCore's server pick and overrides.");
         if (_c.Host.Version < 75) w.TextDisabled($"This engine is API v{_c.Host.Version}; v75 adds a surer server check and the titles you hold.");
 
         w.SeparatorText("Quest list");
@@ -48,6 +63,10 @@ internal sealed partial class OracleView
 
         w.SeparatorText("Commands");
         w.BulletText("/ro  open or close this window");
+        w.BulletText("/ro character  the Character tab (status, session)");
+        w.BulletText("/ro timers  open or close the Quest Timers window");
+        w.BulletText("/ro fellowship  the Fellowship tab");
+        w.BulletText("/ro about  this tab (settings, server)");
         w.BulletText("/ro void  open or close the Void window");
         w.BulletText("/ro quests  read your quest flags now");
         w.BulletText("/ro help  list the commands in chat");

@@ -56,6 +56,10 @@ internal static class WeaponTests
         r.Add("weapon swap: no flip-flop between two weapons", SwapNoFlipFlop);
         r.Add("weapon swap: a new target that wants the weapon just swapped away from gets it at once (Drakkon 2026-10-12)", SwapBackForNewTarget);
         r.Add("weapon swap: a server refusal counts as a failed try", SwapRefused);
+        r.Add("weapon swap: 'too busy' is no try, and a portal or recall ends the rest (Kelpie 2026-10-15)", SwapBusyNotCounted);
+        r.Add("weapon swap: combat reads ACE's busy answer (0x1D then SaveFailed 0) as busy, a real refusal as a try", CombatReadsBusyWield);
+        r.Add("weapon swap: a wield that lands after the choice moved still counts (no swap straight back)", SwapLandsWhenChoiceMoved);
+        r.Add("element choice: a weakness swap must beat the weapon in hand by the min gain", ChoiceMinSwapGain);
         r.Add("tester's case: Dragon's Isle, an unlisted fire wand and Blades", TesterDragonsIsle);
     }
 
@@ -905,6 +909,57 @@ internal static class WeaponTests
         Check.Eq(tr2.Next(next, hand, u.AddSeconds(5), forKey: 0x8010), WeaponSwapTracker.Step.Hold, "a fifth swap inside a minute: held");
     }
 
+    /// <summary>
+    /// Kelpie 2026-10-14 11:41:06-08: Fire -> Piercing sent, the target changed and the plan
+    /// wanted Fire again while Piercing reached the hand. The landing must count, so the swap
+    /// straight back is held (before: "not seen in hand", no landing, swapped back 2.5 s later).
+    /// </summary>
+    private static void SwapLandsWhenChoiceMoved()
+    {
+        var tr = new WeaponSwapTracker();
+        DateTime t = new(2026, 10, 14, 11, 41, 6);
+        const int fire = 1, piercing = 2;
+        Check.Eq(tr.Next(piercing, fire, t), WeaponSwapTracker.Step.Swap, "Piercing chosen: swap");
+        tr.Sent(piercing, fire, t);
+        Check.Eq(tr.Next(fire, piercing, t.AddMilliseconds(2500)), WeaponSwapTracker.Step.Hold,
+            "Piercing landed while Fire is wanted again: the swap back is held");
+        Check.Eq(tr.PendingId, 0, "nothing in flight once it landed");
+        Check.Eq(tr.TriesFor(piercing), 0, "the landed weapon's tries are cleared");
+        Check.Eq(tr.Notice, null, "no give-up notice: it didn't fail");
+
+        // A third weapon is not the one just swapped away from: allowed.
+        Check.Eq(tr.Next(3, piercing, t.AddMilliseconds(3000)), WeaponSwapTracker.Step.Swap, "another weapon may still swap");
+    }
+
+    /// <summary>WeaponPlanner.KeepInHand: a weakness swap must beat the hand by the min gain.</summary>
+    private static void ChoiceMinSwapGain()
+    {
+        var bows = new List<WeaponCandidate>
+        {
+            new(1, "Fire Bow", CombatMode.Missile, "Fire", "", InHand: true),
+            new(2, "Cold Bow", CombatMode.Missile, "Cold", "", InHand: false),
+        };
+        var close = Rank(("Cold", 1.1), ("Fire", 1.0));
+        var off = WeaponPlanner.Choose(bows, "", close, All);
+        Check.Eq(off.WeaponId, 2, "threshold off: the weakest element wins as before");
+        var keep = WeaponPlanner.Choose(bows, "", close, All, minSwapGain: 0.2);
+        Check.Eq(keep.WeaponId, 1, "Cold only 10% better than Fire in hand: keep the Fire bow");
+        Check.Eq(keep.Element, "Fire", "and its element");
+        Check.True(keep.Source.Contains("within 20%"), "source says why: " + keep.Source);
+
+        var far = Rank(("Cold", 1.5), ("Fire", 1.0));
+        Check.Eq(WeaponPlanner.Choose(bows, "", far, All, minSwapGain: 0.2).WeaponId, 2, "Cold 50% better: swap");
+
+        var learned = new CreatureWeakness.Ranking { Source = "learned", Order = { ("Cold", double.NaN), ("Fire", double.NaN) } };
+        Check.Eq(WeaponPlanner.Choose(bows, "", learned, All, minSwapGain: 0.2).WeaponId, 2, "order only (learned): no threshold, swap");
+
+        var immune = Rank(("Cold", 1.0), ("Fire", 0.0));
+        Check.Eq(WeaponPlanner.Choose(bows, "", immune, All, minSwapGain: 0.5).WeaponId, 2, "the hand does nothing to it: swap");
+
+        // An explicit Monsters rule element is never held back.
+        Check.Eq(WeaponPlanner.Choose(bows, "Cold", close, All, minSwapGain: 0.5).WeaponId, 2, "the rule's Cold: swap");
+    }
+
     private static void SwapRefused()
     {
         var tr = new WeaponSwapTracker { MaxTries = 2 };
@@ -916,6 +971,92 @@ internal static class WeaponTests
         tr.Sent(2, 1, t.AddMilliseconds(300));
         tr.Refused(t.AddMilliseconds(400));
         Check.Eq(tr.Next(2, 1, t.AddMilliseconds(500)), WeaponSwapTracker.Step.Hold, "second refusal with MaxTries 2: rest");
+    }
+
+    /// <summary>
+    /// Kelpie 2026-10-15 00:44:22-32: a house recall right after the wield; the server answered
+    /// all 3 tries 'too busy' and the Frost crossbow was benched for 2 min. A busy answer is no
+    /// try (bounded by MaxBusyRefunds), and a portal or recall ends every rest.
+    /// </summary>
+    private static void SwapBusyNotCounted()
+    {
+        var tr = new WeaponSwapTracker();
+        DateTime t = new(2026, 10, 15, 0, 44, 22);
+        for (int i = 0; i < 5; i++)
+        {
+            Check.Eq(tr.Next(2, 1, t), WeaponSwapTracker.Step.Swap, $"busy round {i}: swap");
+            tr.Sent(2, 1, t);
+            tr.Busy(t.AddMilliseconds(100));
+            Check.Eq(tr.PendingId, 0, "a busy answer ends the swap in flight");
+            Check.Eq(tr.TriesFor(2), 0, "and gives the try back");
+            Check.Eq(tr.Next(2, 1, t.AddMilliseconds(500)), WeaponSwapTracker.Step.Wait, "the wield waits out the busy pause");
+            t = t.AddMilliseconds(100 + tr.BusyRetryMs);
+        }
+        Check.Eq(tr.Notice, null, "no give-up while the server is only busy");
+        Check.Eq(tr.Next(2, 2, t), WeaponSwapTracker.Step.InHand, "once the server is free the weapon lands");
+
+        // A weapon the server always calls busy still gets rested, after MaxBusyRefunds.
+        var tr2 = new WeaponSwapTracker { MaxTries = 1, MaxBusyRefunds = 2 };
+        DateTime u = t;
+        for (int i = 0; i < 2; i++)
+        {
+            tr2.Next(3, 1, u); tr2.Sent(3, 1, u);
+            tr2.Busy(u);
+            u = u.AddMilliseconds(tr2.BusyRetryMs);
+        }
+        tr2.Next(3, 1, u); tr2.Sent(3, 1, u);
+        tr2.Busy(u);
+        Check.True(tr2.Notice != null && tr2.Notice.Contains("server too busy"), "past the refunds it counts: rested");
+        Check.Eq(tr2.Next(3, 1, u.AddSeconds(5)), WeaponSwapTracker.Step.Hold, "resting");
+
+        // A portal or recall ends the rest.
+        tr2.NewPlace();
+        Check.Eq(tr2.Next(3, 1, u.AddSeconds(10)), WeaponSwapTracker.Step.Swap, "after a portal: try again at once");
+        Check.Eq(tr2.TriesFor(3), 0, "with a fresh count");
+    }
+
+    /// <summary>
+    /// Combat reads ACE's busy answer to a wield: WeenieError 0x1D, then InventoryServerSaveFailed
+    /// with no error. The engine keeps only the last record, so the SaveFailed alone must read as
+    /// busy (before: "error 0", no answer, the try ran into the timeout and counted).
+    /// </summary>
+    private static void CombatReadsBusyWield()
+    {
+        const uint Old = 0x7000B001, New = 0x7000B002;
+        FakeHost.Reset();
+        FakeHost.WeenieErrorCalls = true;
+        FakeHost.Names[Old] = "Fire Crossbow"; FakeHost.Names[New] = "Frost Compound Crossbow";
+        var host = FakeHost.Create();
+        var cache = FakeHost.MakeCache(host, Player, new[] { Old, New });
+        var c = new CombatManager(host, new LegacyUiSettings(), cache);
+        c.SetPlayerId(Player);
+        const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic;
+        var send = typeof(CombatManager).GetMethod("MarkWieldSent", F)!;
+        var step = typeof(CombatManager).GetMethod("SwapStep", F)!;
+        int oldId = unchecked((int)Old), newId = unchecked((int)New);
+
+        send.Invoke(c, new object[] { newId, oldId });
+        FakeHost.WeenieError(0x1D);
+        FakeHost.WeenieError(0, 0x00A0, Old);
+        var s = (WeaponSwapTracker.Step)step.Invoke(c, new object[] { newId, oldId })!;
+        Check.Eq(s, WeaponSwapTracker.Step.Wait, "busy: wait out the pause, then wield again");
+        Check.Eq(c.SwapTracker.PendingId, 0, "the wield in flight is over");
+        Check.Eq(c.SwapTracker.TriesFor(newId), 0, "and not counted");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("answered 'too busy': not counted")), "logged");
+
+        // A real refusal (a specific error) still counts.
+        c.SwapTracker.NewPlace();
+        send.Invoke(c, new object[] { newId, oldId });
+        FakeHost.WeenieError(0x0036);
+        step.Invoke(c, new object[] { newId, oldId });
+        Check.Eq(c.SwapTracker.TriesFor(newId), 1, "a refusal is a try");
+
+        // Leaving portal space ends tries and rests.
+        FakeHost.Portaling = true;
+        c.OnHeartbeat();
+        FakeHost.Portaling = false;
+        c.OnHeartbeat();
+        Check.Eq(c.SwapTracker.TriesFor(newId), 0, "after the portal: a fresh count");
     }
 
     // ── The tester's case ─────────────────────────────────────────────────────

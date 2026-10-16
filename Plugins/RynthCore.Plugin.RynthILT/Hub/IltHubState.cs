@@ -53,7 +53,7 @@ public sealed class IltHubState
 public sealed class IltServerOptionsSnapshot
 {
     public string WorldName = string.Empty;
-    /// <summary>"ilt-features" (structured dump), "probe" (command probing) or "" (never refreshed).</summary>
+    /// <summary>"probe" (the login probe) or "" (never refreshed).</summary>
     public string Source = string.Empty;
     public DateTime LastRefreshUtc = DateTime.MinValue;
     /// <summary>Feature key → -1 unknown, 0 off, 1 on.</summary>
@@ -77,6 +77,8 @@ public sealed class IltBankState
     /// <summary>Last transfer recipient typed into the transfer form.</summary>
     public string TransferTarget = string.Empty;
     public int TransferCurrencyIndex;
+    /// <summary>Transfer form's trade-note denomination (IltBankCommands.NoteDenominations; 9 = MMD).</summary>
+    public int TransferNoteIndex = 9;
 
     /// <summary>Deposit / withdraw form choices (IltBankCommands.Deposits / Withdrawals / NoteDenominations).</summary>
     public int DepositIndex;
@@ -106,6 +108,8 @@ public sealed class IltPetState
     /// <summary>Last captured /pets and /shinies rosters (display only; the Pets tab's logs).</summary>
     public List<string> PetLog = new();
     public List<string> ShinyLog = new();
+    /// <summary>The breeding tracker: rules this server showed, growth stage names, recent events (IltPetBreeding).</summary>
+    public IltBreedingState Breeding = new();
     // The Pets tab's own settings (roster, healing / cosmetic pets, refill path) are RynthAi's
     // (its miniremote.json); older ilt-hub.json files still carry them, and they are ignored here.
 }
@@ -199,8 +203,17 @@ public sealed class IltGearState
     public bool AutoChunkCorrupted;
     public bool ChunkInCombat;
     public int ChunkIntervalMs = 2000;
-    /// <summary>Only chunk aetheria whose max level is below this (Coalesced always chunks).</summary>
+    /// <summary>
+    /// Only chunk aetheria whose max level is below this (Coalesced always chunks). Infinite Leaftide
+    /// aetheria goes up to level <see cref="IltInventory.AetheriaMaxLevel"/>, so the cap runs to one past it.
+    /// </summary>
     public int ChunkAetheriaUnderLevel = 4;
+    /// <summary>Never chunk aetheria carrying a Crit rating (C, GearCrit 372; ILT tier-10 sigils of level 6+).</summary>
+    public bool KeepAetheriaWithCrit = true;
+    /// <summary>Never chunk aetheria carrying a Crit Damage rating (CD, GearCritDamage 374).</summary>
+    public bool KeepAetheriaWithCritDamage = true;
+    /// <summary>Never chunk aetheria carrying a Crit Damage Resist rating (CDR, GearCritDamageResist 375).</summary>
+    public bool KeepAetheriaWithCritDamageResist = true;
 
     // Auto-clap (/clap all)
     public bool AutoClap;
@@ -216,6 +229,14 @@ public sealed class IltGearState
 
     // Equipment profiles (.utl suits). (The VTank .usd import path is RynthAi's: the importer stayed there.)
     public string LastEquipProfile = string.Empty;
+
+    // Rings inscription chain (IltRingChainRunner; SilentKelpie's, moved from RynthAi's Crafting tab)
+    /// <summary>Recipe id (IltRingChain.Recipes) to how many times to craft it. Pump thread only.</summary>
+    public Dictionary<string, int> RingRuns = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Answer the server's craft dialog Yes for the queued combines (engine API v85).</summary>
+    public bool RingAnswerCraftDialog = true;
+    /// <summary>Craft and inscribe in combat mode too (servers with combat-mode crafting).</summary>
+    public bool RingAllowInCombat;
 }
 
 // ── Games ───────────────────────────────────────────────────────────────────

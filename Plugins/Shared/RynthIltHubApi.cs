@@ -46,6 +46,11 @@ public static class RynthIltHub
     public const string SectionQuestBonus = "quests-qb";
     /// <summary>Pets tab: the /pets and /shinies logs.</summary>
     public const string SectionPetLogs = "pets-logs";
+    /// <summary>
+    /// Pets tab, Breeding sub-tab: the pet breeding tracker, the sub-tab's whole body (RynthILT 0.3.1+;
+    /// older copies draw nothing). RynthAi shows the sub-tab on an ILT world unless FeaturePetBreeding is off.
+    /// </summary>
+    public const string SectionPetBreeding = "pets-breeding";
     /// <summary>Mini Remote menu, under Infinite Leaftide: why no ILT feature is on, the Force-ILT override, Refresh.</summary>
     public const string SectionIltStatus = "ilt-status";
     /// <summary>Mini Remote menu without RynthCore's server list: RynthILT's own Infinite Leaftide items.</summary>
@@ -56,6 +61,8 @@ public static class RynthIltHub
     public const string FeaturePetRefill = "pet_refill";
     public const string FeatureUniversalMastery = "universal_mastery";
     public const string FeatureRequireComps = "require_spell_comps";
+    /// <summary>Pet breeding (the Pets tab's Breeding sub-tab is hidden while the server reports it off).</summary>
+    public const string FeaturePetBreeding = "pet_breeding";
 }
 
 /// <summary>One ILT tab as GetTabs hands it out. Blittable.</summary>

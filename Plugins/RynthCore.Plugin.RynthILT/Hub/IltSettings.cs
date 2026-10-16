@@ -4,7 +4,8 @@
 // The list was RynthAi's Settings > Misc "Server Features" (FeatureServerNames, saved with each
 // RynthAi profile). RynthILT keeps one list for every character; the first time a character
 // logs in with RynthILT, IltMigration folds that character's RynthAi list into this one.
-// Edited from the Character tab and "/ilt servers <list>".
+// Edited with "/ilt servers <list>" (the Character tab's editor went with the tab, 2026-10-13;
+// RynthCore Options > Diagnostics lists the world names RynthCore uses).
 using System;
 using System.Collections.Generic;
 using System.IO;

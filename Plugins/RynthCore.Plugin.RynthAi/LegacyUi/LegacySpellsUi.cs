@@ -13,6 +13,7 @@ using System.IO;
 using System.Numerics;
 using System.Threading;
 using ImGuiNET;
+using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthAi.LegacyUi;
 
@@ -80,8 +81,18 @@ internal sealed unsafe class LegacySpellsUi
         _refreshProfileList = refreshProfileList;
     }
 
-    /// <summary>True while the window is open (the plugin only feeds it data then).</summary>
-    public bool Visible => _settings.ShowSpellsWindow;
+    /// <summary>How long after its last embedded frame the body still counts as on screen.</summary>
+    private const long EmbeddedVisibleMs = 1500;
+
+    /// <summary>When RynthCore's Spells section last drew the body (TickCount64); render thread writes.</summary>
+    private long _embeddedDrawnAt = long.MinValue / 2;
+
+    /// <summary>
+    /// True while the window is open or RynthCore's Spells section shows the body (the plugin only
+    /// feeds it data then). Any thread.
+    /// </summary>
+    public bool Visible => _settings.ShowSpellsWindow
+                           || Environment.TickCount64 - Interlocked.Read(ref _embeddedDrawnAt) < EmbeddedVisibleMs;
 
     // ── Pump-thread side ────────────────────────────────────────────────────
 
@@ -115,34 +126,53 @@ internal sealed unsafe class LegacySpellsUi
         if (ImGui.Begin(WindowTitle, ref _settings.ShowSpellsWindow))
         {
             UiPlacement.RescueOncePerShow(ref _rescueChecked);
-            ApplyBuiltInList();
-
-            if (!SpellCatalog.IsLoaded)
-            {
-                ImGui.TextDisabled("The spell catalog is not loaded yet (it loads at login; see chat for errors).");
-            }
-            else
-            {
-                EnsureEffectItems();
-                float avail = ImGui.GetContentRegionAvail().X;
-                float leftW = MathF.Max(460f, avail * 0.58f);
-
-                if (ImGui.BeginChild("##spcatalog", new Vector2(leftW, 0), ImGuiChildFlags.Borders | ImGuiChildFlags.ResizeX))
-                {
-                    RenderFilters();
-                    RenderCatalogTable();
-                }
-                ImGui.EndChild();
-
-                ImGui.SameLine();
-                if (ImGui.BeginChild("##spprofile", Vector2.Zero, ImGuiChildFlags.Borders))
-                    RenderProfileEditor();
-                ImGui.EndChild();
-            }
-
-            RenderConfirmPopup();
+            RenderBody();
         }
         ImGui.End();
+    }
+
+    /// <summary>
+    /// RynthCore's Spells section (RynthPluginRenderEmbed "section:spells"): the window's body
+    /// drawn into the engine's current window. Render thread.
+    /// </summary>
+    public void RenderEmbedded()
+    {
+        long now = Environment.TickCount64;
+        // First frame after a gap: the same refresh as the window's open.
+        if (now - Interlocked.Read(ref _embeddedDrawnAt) >= EmbeddedVisibleMs && !_settings.ShowSpellsWindow) OnShown();
+        Interlocked.Exchange(ref _embeddedDrawnAt, now);
+        RenderBody();
+    }
+
+    /// <summary>The catalog (left, resizable) and the profile editor (right), in the current window.</summary>
+    private void RenderBody()
+    {
+        ApplyBuiltInList();
+
+        if (!SpellCatalog.IsLoaded)
+        {
+            ImGui.TextDisabled("The spell catalog is not loaded yet (it loads at login; see chat for errors).");
+        }
+        else
+        {
+            EnsureEffectItems();
+            float avail = ImGui.GetContentRegionAvail().X;
+            float leftW = MathF.Max(460f, avail * 0.58f);
+
+            if (ImGui.BeginChild("##spcatalog", new Vector2(leftW, 0), ImGuiChildFlags.Borders | ImGuiChildFlags.ResizeX))
+            {
+                RenderFilters();
+                RenderCatalogTable();
+            }
+            ImGui.EndChild();
+
+            ImGui.SameLine();
+            if (ImGui.BeginChild("##spprofile", Vector2.Zero, ImGuiChildFlags.Borders))
+                RenderProfileEditor();
+            ImGui.EndChild();
+        }
+
+        RenderConfirmPopup();
     }
 
     /// <summary>Each time the window opens: refresh the file list and open the active profile.</summary>
@@ -187,7 +217,7 @@ internal sealed unsafe class LegacySpellsUi
         bool knownReady = Volatile.Read(ref _known) != null;
         if (ImGui.Checkbox("Known only##spknown", ref _knownOnly)) _rowsDirty = true;
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(knownReady
+            SafeImGui.SetTooltip(knownReady
                 ? "Only spells in your spellbook."
                 : "Waiting for your spellbook (it is read a few seconds after login).");
 
@@ -225,7 +255,7 @@ internal sealed unsafe class LegacySpellsUi
     private void RenderCatalogTable()
     {
         RebuildRowsIfNeeded();
-        ImGui.TextDisabled($"{_rows.Count} of {SpellCatalog.All.Count} spells. Click a header to sort, Shift+click for a second sort. + or double-click adds a buff.");
+        SafeImGui.TextDisabled($"{_rows.Count} of {SpellCatalog.All.Count} spells. Click a header to sort, Shift+click for a second sort. + or double-click adds a buff.");
 
         const ImGuiTableFlags flags = ImGuiTableFlags.Sortable | ImGuiTableFlags.SortMulti | ImGuiTableFlags.RowBg
             | ImGuiTableFlags.ScrollY | ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.Resizable
@@ -275,7 +305,7 @@ internal sealed unsafe class LegacySpellsUi
         else if (inProfile) ImGui.TextColored(GoodColor, "*");
         else if (ImGui.SmallButton("+")) AddSpell(e);
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(!e.IsBuff ? "Only buffs can go in a buff profile."
+            SafeImGui.SetTooltip(!e.IsBuff ? "Only buffs can go in a buff profile."
                 : inProfile ? $"Already in the profile (as {key})." : $"Add to the profile (buffing casts {key}).");
 
         ImGui.TableSetColumnIndex((int)Col.Name);
@@ -468,7 +498,7 @@ internal sealed unsafe class LegacySpellsUi
         // Which list buffing uses.
         if (editIsActive)
         {
-            ImGui.TextColored(GoodColor, _dirty ? "Buffing uses this profile (save to apply edits)." : "Buffing uses this profile.");
+            SafeImGui.TextColored(GoodColor, _dirty ? "Buffing uses this profile (save to apply edits)." : "Buffing uses this profile.");
         }
         else if (ImGui.Button("Use for buffing##spuse"))
         {
@@ -499,7 +529,7 @@ internal sealed unsafe class LegacySpellsUi
         ImGui.SameLine();
         int enabled = 0;
         foreach (var en in _edit.Entries) if (en.Enabled) enabled++;
-        ImGui.TextDisabled($"{enabled} of {_edit.Entries.Count} on");
+        SafeImGui.TextDisabled($"{enabled} of {_edit.Entries.Count} on");
 
         float notesH = ImGui.GetTextLineHeightWithSpacing() * 3.2f;
         float statusH = ImGui.GetTextLineHeightWithSpacing() * 1.4f;
@@ -515,8 +545,8 @@ internal sealed unsafe class LegacySpellsUi
 
         if (_status.Length > 0)
         {
-            if (_statusIsWarning) ImGui.TextColored(WarnColor, _status);
-            else ImGui.TextDisabled(_status);
+            if (_statusIsWarning) SafeImGui.TextColored(WarnColor, _status);
+            else SafeImGui.TextDisabled(_status);
         }
     }
 
@@ -555,12 +585,12 @@ internal sealed unsafe class LegacySpellsUi
 
                 ImGui.TableSetColumnIndex(1);
                 if (entry.Enabled) ImGui.TextUnformatted(entry.Name);
-                else ImGui.TextDisabled(entry.Name);
+                else SafeImGui.TextDisabled(entry.Name);
                 var spell = entry.SpellId != 0 ? SpellCatalog.Get(entry.SpellId) : null;
                 if (spell != null && ImGui.IsItemHovered()) SpellTooltip(spell, entry.Key);
 
                 ImGui.TableSetColumnIndex(2);
-                ImGui.TextDisabled(entry.Key);
+                SafeImGui.TextDisabled(entry.Key);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Buffing casts the highest level of this spell you know.");
                 ImGui.TableSetColumnIndex(3);

@@ -43,10 +43,13 @@ namespace RynthOracle.Tests
             QuestLines();
             Catalog();
             Servers();
+            EngineServers();
+            QuestNotes();
             ConquestReplies();
             AelrynthReplies();
             Void();
             Pages();
+            CharacterExtras();
             Events();
             Console.WriteLine($"{_pass} passed, {_fail} failed");
             return _fail == 0 ? 0 : 1;
@@ -158,6 +161,71 @@ namespace RynthOracle.Tests
             Check(QuestCatalog.Validate(string.Join("\n", Enumerable.Repeat("x", 3)), out _) == false, "validation rejects junk");
         }
 
+        /// <summary>A RynthCore GetServerStateJson answer (schema 1) with the given servers.</summary>
+        private static string EngineJson(string active, string activeName, string activePlugin, string pick, string world, params string[] servers)
+            => "{\"schema\":1,\"revision\":3,\"host\":\"h\",\"world\":\"" + world + "\",\"pick\":\"" + pick + "\",\"active\":\"" + active
+               + "\",\"activeName\":\"" + activeName + "\",\"activePlugin\":\"" + activePlugin + "\",\"servers\":[" + string.Join(",", servers) + "]}";
+
+        private static string EngineRow(string id, bool active, string force, string plugin = "", string reason = "")
+            => "{\"id\":\"" + id + "\",\"name\":\"" + id.ToUpperInvariant() + "\",\"active\":" + (active ? "true" : "false")
+               + ",\"detected\":" + (active && force == "auto" ? "true" : "false") + ",\"force\":\"" + force
+               + "\",\"builtIn\":false,\"plugin\":\"" + plugin + "\",\"reason\":\"" + reason + "\"}";
+
+        // RynthCore's server list (API v86) drives the identity: overrides and the Diagnostics pick included.
+        private static void EngineServers()
+        {
+            // The shared parser.
+            Check(RynthCore.Plugin.Shared.EngineServerState.Parse(null) == null && RynthCore.Plugin.Shared.EngineServerState.Parse("junk") == null, "engine state: junk is null");
+            Check(RynthCore.Plugin.Shared.EngineServerState.Parse("{\"schema\":2}") == null, "engine state: another schema is null");
+            var st = RynthCore.Plugin.Shared.EngineServerState.Parse(EngineJson("ilt", "Infinite Leaftide", "RynthILT", "auto", "InfiniteLeaftide",
+                EngineRow("ilt", true, "auto", "RynthILT", "host matches"), EngineRow("aelrynth", false, "auto")));
+            Check(st != null && st.HasActive && st.IsActive("ILT") && st.ActivePlugin == "RynthILT" && !st.Picked, "engine state: active ILT, detected");
+            Check(st!.Servers.Count == 2 && st.Find("aelrynth") != null && st.Find("x") == null && st.Revision == 3, "engine state: rows");
+
+            // Identity from it.
+            ServerIdentity.FromEngine(st, "Launcher Profile", out string tag, out string world, out string source);
+            Check(tag == "" && world == "InfiniteLeaftide" && source.Contains("no RynthOracle pages"), "engine: ILT active has no Oracle tag (its screens are RynthILT's): " + source);
+            Check(source.Contains("host matches"), "engine: the reason is shown: " + source);
+
+            var picked = RynthCore.Plugin.Shared.EngineServerState.Parse(EngineJson("conquest", "ConquestAC", "RynthConquest", "conquest", "",
+                EngineRow("ilt", false, "off"), EngineRow("conquest", true, "on", "RynthConquest")))!;
+            ServerIdentity.FromEngine(picked, "Leaftide Box", out tag, out world, out source);
+            Check(tag == ServerTags.Conquest && world == "Leaftide Box", "engine: a pick beats the world name (and the world falls back): " + source);
+            Check(source.Contains("picked by hand"), "engine: a pick says so: " + source);
+
+            var off = RynthCore.Plugin.Shared.EngineServerState.Parse(EngineJson("", "", "", "mixed", "InfiniteLeaftide", EngineRow("ilt", false, "off")))!;
+            ServerIdentity.FromEngine(off, "", out tag, out _, out source);
+            Check(tag == "", "engine: ILT forced off stays off despite the Leaftide world name: " + source);
+
+            var unknown = RynthCore.Plugin.Shared.EngineServerState.Parse(EngineJson("", "", "", "auto", "Levistras", EngineRow("ilt", false, "auto")))!;
+            ServerIdentity.FromEngine(unknown, "", out tag, out _, out source);
+            Check(tag == ServerTags.Levistras, "engine: a world the engine has no server for still tags by name: " + source);
+
+            var coldeve = RynthCore.Plugin.Shared.EngineServerState.Parse(EngineJson("coldeve", "Coldeve", "RynthColdeve", "auto", "Coldeve", EngineRow("coldeve", true, "auto", "RynthColdeve")))!;
+            ServerIdentity.FromEngine(coldeve, "", out tag, out _, out source);
+            Check(tag == "" && source.Contains("Coldeve"), "engine: a server without Oracle pages has no tag: " + source);
+
+            Check(ServerIdentity.TagForEngineId("AELRYNTH") == ServerTags.Aelrynth && ServerIdentity.TagForEngineId(null) == "", "engine id to tag");
+            Check(ServerIdentity.EngineIdForTag(ServerTags.Aelrynth) == "aelrynth" && ServerIdentity.EngineIdForTag("") == "", "tag to engine id");
+
+            // The owner's profile, read leniently (a server plugin's, and RynthILT's).
+            var prof = RynthCore.Plugin.Shared.ServerProfileView.Parse(
+                "{\"schema\":1,\"id\":\"coldeve\",\"name\":\"Coldeve\",\"plugin\":\"RynthColdeve\",\"ruleset\":\"PvE\",\"emulator\":\"ACE\",\"botting\":\"forbidden\",\"bottingNote\":\"no bots\",\"accountLimit\":\"3 accounts\"}");
+            Check(prof != null && prof.Botting == "forbidden" && prof.Summary() == "PvE, ACE; botting forbidden - no bots; accounts: 3 accounts", "profile: server plugin: " + prof?.Summary());
+            var iltProf = RynthCore.Plugin.Shared.ServerProfileView.Parse("{\"ilt\":true,\"features\":[{\"key\":\"bank\",\"state\":1},{\"key\":\"x\",\"state\":0},{\"key\":\"y\",\"state\":1}]}");
+            Check(iltProf != null && iltProf.Ilt && iltProf.FeaturesOn == 2 && iltProf.Summary() == "ILT world, 2 Leaftide features on", "profile: RynthILT: " + iltProf?.Summary());
+            Check(RynthCore.Plugin.Shared.ServerProfileView.Parse("") == null && RynthCore.Plugin.Shared.ServerProfileView.Parse("[1]") == null, "profile: junk is null");
+            // A user's server-name list (ub-Rythai's ILT Auto list) against the engine's verdict.
+            string[] list = { "InfiniteLeaftide", "Conquest" };
+            Check(RynthCore.Plugin.Shared.EngineServerState.MatchesNameList(null, "Infinite Leaftide", list), "names: no engine, the world name decides (spaces ignored)");
+            Check(!RynthCore.Plugin.Shared.EngineServerState.MatchesNameList(null, "Coldeve", list), "names: no engine, another world");
+            Check(RynthCore.Plugin.Shared.EngineServerState.MatchesNameList(st, "Launcher Profile", list), "names: ILT active matches a Leaftide name whatever the world");
+            Check(RynthCore.Plugin.Shared.EngineServerState.MatchesNameList(picked, "", list), "names: a picked Conquest matches by id");
+            Check(!RynthCore.Plugin.Shared.EngineServerState.MatchesNameList(coldeve, "InfiniteLeaftide", list), "names: Coldeve active beats a Leaftide world name");
+            Check(!RynthCore.Plugin.Shared.EngineServerState.MatchesNameList(off, "InfiniteLeaftide", list), "names: ILT listed and off stays off");
+            Check(RynthCore.Plugin.Shared.EngineServerState.MatchesNameList(unknown, "Conquest", list), "names: a server the engine doesn't list still matches by world");
+        }
+
         private static void Servers()
         {
             Check(ServerIdentity.TagForWorld("Aeshnidae") == ServerTags.Aelrynth, "Aeshnidae (the live world name) is Aelrynth");
@@ -165,6 +233,7 @@ namespace RynthOracle.Tests
             Check(ServerIdentity.TagForWorld("Conquest") == ServerTags.Conquest, "Conquest");
             Check(ServerIdentity.TagForWorld("Levistras") == ServerTags.Levistras, "Levistras");
             Check(ServerIdentity.TagForWorld("Coldeve") == "" && ServerIdentity.TagForWorld("") == "", "other servers have no tag");
+            Check(ServerIdentity.TagForWorld("InfiniteLeaftide") == "", "Infinite Leaftide has no Oracle tag (RynthILT draws its screens)");
             var id = new ServerIdentity();
             id.Force("", "Coldeve");
             Check(id.Allows(null) && id.Allows("") && !id.Allows(ServerTags.Conquest) && !id.Allows(ServerTags.Aelrynth), "untagged everywhere, tagged nowhere else");
@@ -186,6 +255,78 @@ namespace RynthOracle.Tests
             c.Settings.TabName = OracleView.TabConquest;
             c.Server.Force(ServerTags.Aelrynth, "Aeshnidae");
             Check(view.Tab == OracleView.TabQuests, "a Conquest tab left selected falls back to Quests elsewhere");
+        }
+
+        // Quest notes: tracking and rewards saved per character, UB's reward format and import, kill-task timers.
+        private static void QuestNotes()
+        {
+            string root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RynthOracleTests-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                var r = new QuestReward { XpPercent = 1.5, LumPercent = 2, RecordedLevel = 275, Coins = 3, Trinkets = 1, Medallions = 2,
+                                          YellowPowder = 1, RedPowder = 1, BluePowder = 1, Mmd = 2 };
+                Check(r.ShortSummary() == "1.5%XP 2%Lum 3C 1T 2M 1Y 1R 1B 2D L275", "UB's short summary: " + r.ShortSummary());
+                Check(QuestReward.Percent(12.345) == "12.3" && QuestReward.Percent(0.1234) == "0.123" && QuestReward.Percent(1.234) == "1.23", "UB's percent format");
+                Check(QuestReward.TryParsePercent("2,5%", out double pc) && pc == 2.5, "a percent with a comma and a % sign");
+                Check(QuestReward.TryParsePercent("5000", out double big) && big == QuestReward.MaxPercent, "percent clamped to 1000");
+                Check(!QuestReward.TryParsePercent("abc", out _) && !QuestReward.TryParseCount("1.5", out _), "junk is refused");
+                Check(QuestReward.TryParseCount("-4", out int neg) && neg == 0 && QuestReward.TryParseCount("", out int blank) && blank == 0, "counts: negatives and blanks are 0");
+                Check(new QuestReward().IsEmpty && !r.IsEmpty, "empty entry");
+
+                // Track and record, then read it back as a new session would.
+                var book = new QuestBook { RootOverride = root, UbRootOverride = "" };
+                book.Load("Infinite Leaftide", "Test \"Char\"");
+                Check(book.Loaded && book.Tracked.Count == 0 && book.RewardCount == 0, "a new character starts empty");
+                book.SetTracked("killtaskdrudges", true);
+                book.SetTracked("30minattributes", true);
+                book.SetTracked("killtaskdrudges", true);
+                book.SetReward("30minattributes", r);
+                Check(book.Tracked.Count == 2 && book.IsTracked("KILLTASKDRUDGES"), "tracked once, case-insensitive");
+                string file = book.PathFor("Infinite Leaftide", "Test \"Char\"");
+                Check(System.IO.File.Exists(file) && System.IO.File.ReadAllText(file).All(ch => ch == '\n' || (ch >= 0x20 && ch <= 0x7E)), "saved at once, plain ASCII");
+
+                var again = new QuestBook { RootOverride = root, UbRootOverride = "" };
+                again.Load("Infinite Leaftide", "Test \"Char\"");
+                Check(again.Tracked.SequenceEqual(new[] { "killtaskdrudges", "30minattributes" }), "tracked list kept in order");
+                Check(again.TryGetReward("30minattributes", out QuestReward back) && back.ShortSummary() == r.ShortSummary(), "rewards read back");
+                again.SetReward("30minattributes", new QuestReward());
+                again.ToggleTracked("killtaskdrudges");
+                Check(again.RewardCount == 0 && again.Tracked.Count == 1, "an empty entry removes the rewards; untrack");
+
+                // UB ILT's quest_rewards.json is imported once for a character without notes.
+                string ub = System.IO.Path.Combine(root, "ub");
+                System.IO.Directory.CreateDirectory(System.IO.Path.Combine(ub, "InfiniteLeaftide", "Kelp"));
+                System.IO.File.WriteAllText(System.IO.Path.Combine(ub, "InfiniteLeaftide", "Kelp", "quest_rewards.json"),
+                    "{\"SchemaVersion\":2,\"Character\":\"Kelp\",\"Server\":\"InfiniteLeaftide\",\"Rewards\":{"
+                    + "\"stipendtimer_0812\":{\"XpPercent\":1.25,\"LumPercent\":0,\"RecordedLevel\":300,\"Coins\":5},"
+                    + "\"emptyone\":{\"XpPercent\":0}}}");
+                var imported = new QuestBook { RootOverride = root, UbRootOverride = ub };
+                imported.Load("Infinite Leaftide", "Kelp");
+                Check(imported.RewardCount == 1 && imported.TryGetReward("stipendtimer_0812", out QuestReward ir) && ir.Coins == 5 && ir.RecordedLevel == 300
+                      && imported.LoadNote.Contains("Imported 1"), "UB rewards imported (empty entries skipped): " + imported.LoadNote);
+                var noReimport = new QuestBook { RootOverride = root, UbRootOverride = ub };
+                noReimport.Load("Infinite Leaftide", "Kelp");
+                Check(noReimport.RewardCount == 1 && noReimport.LoadNote.Length == 0, "imported once: the next load reads Oracle's own file");
+
+                // Kill tasks: kills left, then the reset timer, then done (UB's rule).
+                DateTime now = new DateTime(2026, 10, 13, 12, 0, 0, DateTimeKind.Utc);
+                var kt = new QuestFlag { Key = "killtaskdrudges", Solves = 12, MaxSolves = 50, RepeatTime = TimeSpan.FromHours(20), CompletedOnUtc = now.AddHours(-1) };
+                Check(QuestTimer.IsKillTask(kt) && QuestTimer.State(kt, true, now, out string t1) == QuestTimerState.InProgress && t1 == "38 left", "kill task counting");
+                kt.Solves = 50;
+                Check(QuestTimer.State(kt, true, now, out string t2) == QuestTimerState.Waiting && t2.StartsWith("19h"), "kill task waiting: " + t2);
+                kt.CompletedOnUtc = now.AddDays(-2);
+                Check(QuestTimer.State(kt, true, now, out string t3) == QuestTimerState.Done && t3 == "done", "kill task done");
+                var timed = new QuestFlag { Key = "stipendtimer_0812", Solves = 3, RepeatTime = TimeSpan.FromHours(1), CompletedOnUtc = now.AddMinutes(-30) };
+                QuestTimerState s4 = QuestTimer.State(timed, true, now, out string t4);
+                Check(!QuestTimer.IsKillTask(timed) && s4 == QuestTimerState.Waiting && t4 == "30m 0s", "timer: " + t4);
+                timed.CompletedOnUtc = now.AddHours(-2);
+                Check(QuestTimer.State(timed, true, now, out string t5) == QuestTimerState.Ready && t5 == "ready", "timer ran out");
+                Check(QuestTimer.State(timed, false, now, out string t6) == QuestTimerState.Done && t6 == "completed", "one-time quest");
+            }
+            finally
+            {
+                try { System.IO.Directory.Delete(root, true); } catch (System.IO.IOException) { }
+            }
         }
 
         private static void ConquestReplies()
@@ -319,6 +460,13 @@ namespace RynthOracle.Tests
             ch.Enchantments.Add(new ActiveEnchantment(3531, "Bobo's Quickening", 600, 1800, false));
             ch.Enchantments.Add(new ActiveEnchantment(SpellIds.SurgeOfDestruction, "Surge of Destruction", 5, 8, false));
             c.Void.OnChatLine("You cast Corrosion VII on Drudge Slinker", c.NowMs, _ => 0, () => true);
+            // The quest book in a temp folder (never the player's %APPDATA%), with two tracked quests.
+            c.Book.RootOverride = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RynthOracleTests-" + Guid.NewGuid().ToString("N"));
+            c.Book.UbRootOverride = "";
+            c.Book.Load("Aeshnidae", ch.Name);
+            c.Book.SetTracked("30minattributes", true);
+            c.Book.SetTracked("societyribbonsperdaycounter", true);
+            c.Book.SetReward("30minattributes", new QuestReward { XpPercent = 1.5, RecordedLevel = 126, Coins = 2 });
             return c;
         }
 
@@ -331,6 +479,11 @@ namespace RynthOracle.Tests
             UiWindow voidW = host.Add(new UiWindow("RynthOracle/Void", "Void") { Visible = true });
             var vv = new VoidView(c);
             voidW.Begin(); vv.Draw(voidW); voidW.End();
+            UiWindow timersW = host.Add(new UiWindow("RynthOracle/QuestTimers", "Quest Timers") { Visible = true });
+            var tv = new QuestTimersView(c);
+            timersW.Begin(); tv.Draw(timersW); timersW.End();
+            string timersBody = Encoding.UTF8.GetString(timersW.Body);
+            Check(timersBody.Contains("Attribute and Skill Redistribution") && timersBody.Contains("ready"), "the Quest Timers window lists tracked quests with their timers");
 
             // Every tab on each server, including the server-specific ones (with data in them).
             c.Conquest.RequestBank(c.NowMs);
@@ -354,6 +507,24 @@ namespace RynthOracle.Tests
                     main.MarkSubmitted(true);
                 }
             }
+            // The Quests tab with a quest opened (rewards editor) and the Tracked filter on.
+            c.Server.Force("", "Coldeve");
+            c.Settings.TabName = OracleView.TabQuests;
+            main.Begin(); view.Draw(main); main.End();
+            Apply(host, Event(2, 89, main.Hash, main.KeyOf("q.tracked"), new byte[] { 1 }));
+            main.Begin(); view.Draw(main); main.End();
+            Check(Encoding.UTF8.GetString(main.Body).Contains("2 shown"), "the Tracked filter lists the two tracked quests");
+            Apply(host, Event(1, 90, main.Hash, main.KeyOf("q.r.30minattributes"), new byte[] { 1, 0, 0 }));
+            main.Begin(); view.Draw(main); main.End();
+            ParseAll(host, "quests with a quest opened", out int openOps);
+            string openBody = Encoding.UTF8.GetString(main.Body);
+            Check(openOps > 5 && openOps < 1400, $"quests page with a quest opened: {openOps} ops");
+            Check(openBody.Contains("Save rewards") && openBody.Contains("Level: 126"), "the opened quest shows the rewards editor");
+            Check(openBody.Contains("1.5%XP 2C L126"), "the Rewards column shows the recorded rewards");
+            Check(!openBody.Contains("/qb"), "no quest bonus list here (Infinite Leaftide's /qb is RynthILT's)");
+            Console.WriteLine($"  Quests (opened): {openOps} ops, {main.Body.Length} bytes");
+            main.MarkSubmitted(true);
+
             // The Conquest tab's sub-pages and the Aelrynth board views.
             c.Server.Force(ServerTags.Conquest, "Conquest");
             c.Settings.TabName = OracleView.TabConquest;
@@ -392,6 +563,41 @@ namespace RynthOracle.Tests
             fixed (byte* p = buf) rc = DisplayListParser.Parse(p, n, 4000f, out _, out windows, out error);
             Check(rc == 0, $"{what}: engine parser refused the submit ({rc}): {error}");
             maxOps = windows.Where(w => w.List != null).Select(w => w.List!.OpCount).DefaultIfEmpty(0).Max();
+        }
+
+        /// <summary>
+        /// The Character tab's RynthAi session (the generic part of the Mini Remote's old Character
+        /// tab, moved here 2026-10-13). Infinite Leaftide's charms are RynthILT's and never drawn here.
+        /// </summary>
+        private static void CharacterExtras()
+        {
+            OracleContext c = Context();
+            c.Server.Force("", "InfiniteLeaftide");
+            c.Settings.TabName = OracleView.TabCharacter;
+            var view = new OracleView(c);
+            var host = new UiHost();
+            UiWindow main = host.Add(new UiWindow("RynthOracle/Oracle", "Oracle") { Visible = true });
+
+            // Nothing from RynthAi yet: the tab says what to load.
+            main.Begin(); view.Draw(main); main.End();
+            string empty = Encoding.UTF8.GetString(main.Body);
+            Check(empty.Contains("Load RynthAi for the session rates"), "without RynthAi: says to load it");
+            Check(!empty.Contains("Charms") && !empty.Contains("RynthILT"), "no charms section on any world (RynthILT's Charms tab)");
+            main.MarkSubmitted(true);
+
+            c.Session = new RynthCore.Plugin.Shared.SessionStatsV1
+            {
+                StartUtcTicks = DateTime.UtcNow.AddHours(-1).Ticks, SessionSeconds = 3600, Xp = 1_234_567, XpPerHour = 1_234_567,
+                Lum = 4000, LumPerHour = 4000, LumLast5Min = 250, Kills = 42, KillsPerHour = 42,
+            };
+            c.SessionKnown = true;
+            main.Begin(); view.Draw(main); main.End();
+            ParseAll(host, "Character with the session", out int ops);
+            string body = Encoding.UTF8.GetString(main.Body);
+            Check(ops > 5 && ops < 1400, $"Character with the session: {ops} ops");
+            Check(body.Contains("1,234,567") && body.Contains("4,000") && body.Contains("42 (42/h)"), "the session shows RynthAi's XP, luminance and kills");
+            Check(OracleView.SessionStatsCommand == "/rc miniremote section char", "Session Stats opens the section, not the moved tab");
+            main.MarkSubmitted(true);
         }
 
         private static void Events()

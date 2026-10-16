@@ -113,14 +113,19 @@ public sealed class LegacyUiSettings
     public bool EnableMissileCrafting = true;
     public int MissileCraftAmmoThreshold = 1000;
 
+    /// <summary>Not read by the corpse looting (pickups are paced by the server's confirmations);
+    /// kept so saved profiles round-trip. Hidden in Advanced Settings.</summary>
     public int LootInterItemDelayMs = 50;
-    public int LootContentSettleMs = 100;
-    public int LootEmptyCorpseMs = 300;
+    // Loot timer defaults are the measured baseline (LootBaseline.cs).
+    public int LootContentSettleMs = LootBaseline.ContentSettleMs;
+    public int LootEmptyCorpseMs = LootBaseline.EmptyCorpseMs;
+    /// <summary>Not read by the corpse looting (a close is timed by the deferred-close logic); kept
+    /// so saved profiles round-trip. Hidden in Advanced Settings.</summary>
     public int LootClosingDelayMs = 200;
-    public int LootAssessWindowMs = 200;
-    public int LootRetryTimeoutMs = 500;
-    public int LootOpenRetryMs = 1500;
-    public int LootCorpseTimeoutMs = 12000;
+    public int LootAssessWindowMs = LootBaseline.AssessWindowMs;
+    public int LootRetryTimeoutMs = LootBaseline.RetryTimeoutMs;
+    public int LootOpenRetryMs = LootBaseline.OpenRetryMs;
+    public int LootCorpseTimeoutMs = LootBaseline.CorpseTimeoutMs;
     public bool LootJumpEnabled = false;
     public int LootJumpHeight = 10; // 0–100; maps to 0.0–1.0 JumpNonAutonomous extent
 
@@ -271,6 +276,8 @@ public sealed class LegacyUiSettings
     /// on the way as usual, recover the corpse, then carry on. Off by default.
     /// </summary>
     public bool TravelToOwnCorpse;
+    /// <summary>Not read by the corpse looting (no rare-corpse check exists); kept so saved profiles
+    /// round-trip. Hidden in Advanced Settings. The meta/MagTools option of that name sets Mine Only.</summary>
     public bool LootOnlyRareCorpses;
     /// <summary>Also pick up loose ground items that match the loot profile, within the corpse max range.</summary>
     public bool EnableGroundLoot;
@@ -473,6 +480,18 @@ public sealed class LegacyUiSettings
     /// <summary>Auto: dual wield rather than a shield when the Dual Wield skill is trained and a
     /// second one-handed melee weapon is listed. Off by default (the shield).</summary>
     public bool PreferDualWield;
+    /// <summary>
+    /// Weapon swaps (CombatManager.SwapDeferReason). A switch from one live target to another
+    /// waits this long (ms) before a swap starts, so a target that changes again doesn't cost a
+    /// wasted swap. A lock after a kill or drop swaps at once. 0 = never wait.
+    /// </summary>
+    public int WeaponSwapSettleMs = 750;
+    /// <summary>No new swap (same kind) onto a target at or under this health %: finish it with
+    /// the weapon in hand. 0 = off.</summary>
+    public int WeaponSwapMinHealthPct = 25;
+    /// <summary>A weakness pick (Auto) swaps only for at least this % more damage than the weapon
+    /// in hand (WeaponPlanner.KeepInHand). Damage tab, slayer and Monsters rule picks always swap. 0 = off.</summary>
+    public int WeaponSwapMinGainPct = 20;
     public int MeleeAttackHeight = 1;
     public int MissileAttackHeight = 1;
 
@@ -1027,6 +1046,11 @@ public sealed class SettingsBridgePayload
     public bool UseNativeAttack { get; set; }
     public bool SummonPets { get; set; }
     public int PetMinMonsters { get; set; }
+
+    // Weapon swaps (only when the sender includes them).
+    public int? WeaponSwapSettleMs { get; set; }
+    public int? WeaponSwapMinHealthPct { get; set; }
+    public int? WeaponSwapMinGainPct { get; set; }
 
     // Spell Combat
     public int SpellCastIntervalMs { get; set; }

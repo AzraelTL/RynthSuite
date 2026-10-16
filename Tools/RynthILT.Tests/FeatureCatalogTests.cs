@@ -1,0 +1,141 @@
+using System;
+using System.Text;
+using RynthCore.Plugin.RynthILT;
+using RynthCore.Plugin.RynthILT.Hub;
+using RynthCore.RynthAiTests.Harness;
+
+namespace RynthILT.Tests;
+
+// Leaftide feature list (IltFeatureCatalog): every feature the player asked RynthILT to cover is
+// listed and the states follow the server bits. Also the NUL-terminated copy RynthILT's interfaces
+// ("RynthServer.Profile", "RynthILT.Data") hand their JSON out with.
+internal static class FeatureCatalogTests
+{
+    public static void Register(Runner r)
+    {
+        r.Add("features: banking, guardian, attributes, augs, paragon x3, split arrows, T11 and fellowship are listed", Listed);
+        r.Add("features: state follows the server bit on ILT, built-ins are on, nothing is known off ILT", States);
+        r.Add("features: the interface copies the JSON only when it fits, NUL-terminated", InterfaceWrite);
+        r.Add("features: the ILT profile is on with the world; a refusal in chat turns a feature off", ProfileOnWithTheWorld);
+        r.Add("features: probed features read checking; options ILT runs off are off until chat shows them", ProbedAndOffInIlt);
+        r.Add("features: charms are on with the ILT world unless refused; rows describe themselves", Charms);
+    }
+
+    /// <summary>ACECustom options Infinite Leaftide runs with off (ServerConfig defaults, PROD_DEPLOY_PLAN.md).</summary>
+    private static readonly string[] OffInIlt = { "pet_strain", "pet_refill", "defense_scaling" };
+
+    /// <summary>Features the login probe (or the /myquests tracker) answers.</summary>
+    private static readonly string[] Probed =
+    {
+        "bank", "attributes", "augmentations", "enlightenment", "clap", "pets", "shinies",
+        "fellowship_blackjack", "quests", "quest_bonus", "powerball", "blackjack",
+    };
+
+    private static void ProfileOnWithTheWorld()
+    {
+        // The features the player asked about, plus the pet switches prod runs on (bond, potency).
+        foreach (string key in new[] { "bank_notes", "t11", "t11_craft_gate", "split_arrows", "charms", "pet_breeding",
+                                       "pet_maturity", "pet_bond", "pet_potency", "monster_capture", "universal_mastery",
+                                       "missile_power", "t11_hit_gate", "fship" })
+        {
+            IltFeatureInfo f = IltFeatureCatalog.Find(key)!;
+            Check.Eq(f.Known, IltKnown.Profile, key + " is on in the ILT profile");
+            Check.Eq(IltFeatureCatalog.StateOf(f, true, _ => IltTri.Unknown), IltTri.On, key + " on with the ILT world");
+            Check.Eq(IltFeatureCatalog.StateOf(f, false, _ => IltTri.On), IltTri.Unknown, key + " unknown off ILT");
+        }
+        IltFeatureInfo mastery = IltFeatureCatalog.Find("universal_mastery")!;
+        Check.Eq(IltFeatureCatalog.StateOf(mastery, true, k => k == IltFeature.UniversalMastery ? IltTri.Off : IltTri.Unknown),
+                 IltTri.Off, "a refusal in chat turns a profile feature off");
+        Check.Null(IltFeatureCatalog.Find("fellowship_additive"), "upstream ACE's additive fellowship option isn't an ILT feature");
+    }
+
+    private static void ProbedAndOffInIlt()
+    {
+        foreach (string key in Probed)
+        {
+            IltFeatureInfo f = IltFeatureCatalog.Find(key)!;
+            Check.Eq(f.Known, IltKnown.Checked, key + " is answered by the login probe");
+            Check.Eq(IltFeatureCatalog.StateText(IltFeatureCatalog.StateOf(f, true, _ => IltTri.Unknown)), "checking", key + " reads 'checking' until then");
+        }
+        foreach (string key in OffInIlt)
+        {
+            IltFeatureInfo f = IltFeatureCatalog.Find(key)!;
+            Check.Eq(f.Known, IltKnown.ProfileOff, key + " is off in the ILT profile");
+            Check.Eq(IltFeatureCatalog.StateOf(f, true, _ => IltTri.Unknown), IltTri.Off, key + " off with the ILT world");
+            Check.Eq(IltFeatureCatalog.StateOf(f, true, _ => IltTri.On), IltTri.On, key + " on once the server shows it");
+            Check.True(IltFeatureCatalog.Describe(key).Tooltip.Contains("Off in ILT"), key + "'s tooltip says it's off in ILT");
+        }
+
+        // ACECustom's three refill messages (PetDevice.TryApplyPyrealAutoRefillBeforeSummon) prove the refill is on.
+        Check.True(IltServerOptions.IsPyrealRefillLine("You restore one charge on your summoning essence at no cost."), "free refill");
+        Check.True(IltServerOptions.IsPyrealRefillLine("You spend 1,000 pyreals to restore one charge on your summoning essence."), "paid refill");
+        Check.True(IltServerOptions.IsPyrealRefillLine("You need 1,000 pyreals to auto-replenish your summoning essence. You do not have enough pyreals."), "refill too dear");
+        Check.False(IltServerOptions.IsPyrealRefillLine("Your summoning essence is empty."), "an empty essence says nothing about the refill");
+    }
+
+    private static void Charms()
+    {
+        Check.Eq(IltFeatureCatalog.CharmStateOf(true, IltTri.Unknown), IltTri.On, "a charm is on with the ILT world");
+        Check.Eq(IltFeatureCatalog.CharmStateOf(true, IltTri.Off), IltTri.Off, "a refused charm is off");
+        Check.Eq(IltFeatureCatalog.CharmStateOf(false, IltTri.On), IltTri.Unknown, "nothing is claimed off ILT");
+
+        var (label, group, tooltip) = IltFeatureCatalog.Describe(IltFeature.Charm("Mana Barrier"));
+        Check.Eq(label, "Mana Barrier", "a charm row shows the charm's name");
+        Check.Eq(group, IltFeatureCatalog.GroupCharms, "charms have their own section");
+        Check.True(tooltip.Contains("Mana absorbs"), "the tooltip carries the charm's effect");
+        Check.Eq(IltFeatureCatalog.Describe("something_new").Group, IltFeatureCatalog.GroupOther, "an unknown bit goes to Other");
+    }
+
+    private static readonly string[] Requested =
+    {
+        "bank", "guardian", "attributes", "augmentations", "paragon_armor", "paragon_weapons",
+        "paragon_jewelry", "split_arrows", "t11", "fellowship_large", "zone_share", "fellowship_blackjack",
+    };
+
+    private static void Listed()
+    {
+        foreach (string key in Requested)
+            Check.NotNull(IltFeatureCatalog.Find(key), "listed: " + key);
+        Check.Null(IltFeatureCatalog.Find("no_such_feature"), "an unknown key is not found");
+
+        var seen = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (IltFeatureInfo f in IltFeatureCatalog.All)
+        {
+            Check.True(seen.Add(f.Key), "keys are unique: " + f.Key);
+            Check.True(Array.IndexOf(IltFeatureCatalog.Groups, f.Group) >= 0, $"{f.Key} is in a known section ({f.Group})");
+            Check.True(f.Label.Length > 0 && f.Where.Length > 0 && f.Description.Length > 0, f.Key + " has a label, a place and a description");
+        }
+    }
+
+    private static void States()
+    {
+        IltFeatureInfo bank = IltFeatureCatalog.Find("bank")!;
+        IltFeatureInfo guardian = IltFeatureCatalog.Find("guardian")!;
+        Check.Eq(IltFeatureCatalog.StateOf(bank, true, _ => IltTri.On), IltTri.On, "bank on when the server answers /bank");
+        Check.Eq(IltFeatureCatalog.StateOf(bank, true, _ => IltTri.Off), IltTri.Off, "bank off when the server says so");
+        Check.Eq(IltFeatureCatalog.StateOf(bank, true, _ => IltTri.Unknown), IltTri.Unknown, "bank unknown before the check");
+        Check.Eq(IltFeatureCatalog.StateOf(guardian, true, _ => IltTri.Off), IltTri.On, "a built-in feature is on with the ILT world");
+        Check.Eq(IltFeatureCatalog.StateOf(guardian, false, _ => IltTri.On), IltTri.Unknown, "nothing is claimed off ILT");
+        Check.Eq(IltFeatureCatalog.StateText(IltTri.Unknown), "checking", "unknown reads 'checking'");
+        Check.Eq(IltFeatureCatalog.FellowshipMax(true), 29, "ILT fellowships hold 29");
+        Check.Eq(IltFeatureCatalog.FellowshipMax(false), 9, "retail fellowships hold 9");
+    }
+
+    private static unsafe void InterfaceWrite()
+    {
+        const string json = "{\"ilt\":true}";
+        byte* small = stackalloc byte[4];
+        small[0] = 0x55;
+        Check.Eq(ProfileInterface.Write(json, small, 4), json.Length, "too small: the length is returned");
+        Check.Eq(small[0], (byte)0x55, "too small: nothing written");
+
+        byte* exact = stackalloc byte[json.Length];
+        Check.Eq(ProfileInterface.Write(json, exact, json.Length), json.Length, "no room for the NUL: too small");
+
+        byte* big = stackalloc byte[64];
+        int n = ProfileInterface.Write(json, big, 64);
+        Check.Eq(n, json.Length, "fits: the length without the NUL");
+        Check.Eq(big[n], (byte)0, "NUL-terminated");
+        Check.Eq(Encoding.UTF8.GetString(big, n), json, "the JSON copied whole");
+    }
+}

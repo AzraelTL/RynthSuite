@@ -7,17 +7,20 @@
 //   * World identity: ServerFeatureGate (RynthILT's server list, or this character's
 //     override / the Hub's ForceLeaftideFeatures) decides whether we even ASK — it never
 //     switches a feature on by itself.
-//   * Preferred source: a structured "/ilt features" dump (ILTFEATURE key=0|1 lines) once
-//     ACECustom ships it. Today the server prints "Coming Soon", so:
-//   * Fallback: a one-shot login probe of read-only commands (/bank, /aug, /qb, /pets,
-//     /shinies, /xp, /pb, /blackjack, /fblackjack, /clap with no args). Replies are eaten.
+//   * Everything is decided on the Rynth side: the server is never asked for a feature list
+//     (ACECustom has none; "/ilt features" prints "Coming Soon"). IltFeatureCatalog's ILT
+//     profile says what the server runs, and these bits only record what the server returned:
+//   * Login probe: one pass of read-only commands (/bank, /aug, /qb, /pets, /shinies, /xp,
+//     /pb, /blackjack, /fblackjack, /clap with no args). Replies are eaten.
 //     /enl is NEVER probed — it opens the enlightenment confirmation dialog.
 //   * Passive: explicit server refusals seen in chat at any time flip a bit to Off
-//     ("Powerball lottery is not currently active", "myquests is not currently enabled", ...).
+//     ("Powerball lottery is not currently active", "myquests is not currently enabled", ...),
+//     and lines only an enabled feature sends flip it On (a summon-time pyreal refill).
 // Unknown bits are treated as OFF by anything that spends currency or runs automation.
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using RynthCore.Plugin.RynthILT.IltSettingsView;
 using RynthCore.PluginSdk;
 
 namespace RynthCore.Plugin.RynthILT.Hub;
@@ -103,11 +106,23 @@ internal sealed class IltServerOptions
         }
     }
 
+    /// <summary>RynthCore's id for Infinite Leaftide in its server verdicts.</summary>
+    public const string EngineServerId = "ilt";
+
     /// <summary>
-    /// True when the world is (or is declared to be) an ACECustom/ILT shard: its name is in the
-    /// server list (IltSettings), or this character's override is on (ServerFeatureGate).
+    /// RynthCore (2026.10.5.47+) decides whether this is Infinite Leaftide: one world check for
+    /// the engine and every plugin, with its per-character override ("/rc server ilt on|off|auto").
+    /// True once its first verdict has arrived (IltEngineVerdict).
     /// </summary>
-    public bool IsIltLikeWorld
+    public static bool EngineDecides => IltEngineVerdict.Active.HasValue;
+
+    /// <summary>
+    /// RynthILT's own verdict: the world name is in the server list (IltSettings), or this
+    /// character's "Treat this world as ILT" is on (ServerFeatureGate). This is what the status
+    /// export reports to the engine, which adds it to its own detection (never echo the engine's
+    /// verdict back, or it would latch on).
+    /// </summary>
+    public bool IsIltLikeWorldLocal
     {
         get
         {
@@ -118,7 +133,21 @@ internal sealed class IltServerOptions
         }
     }
 
-    /// <summary>True while a refresh (dump or probe) is running.</summary>
+    /// <summary>
+    /// True when the world is (or is declared to be) an ACECustom/ILT shard. With a RynthCore
+    /// that sends server verdicts, its verdict (which already includes ours, IsIltLikeWorldLocal,
+    /// unless this character's override is off); otherwise our own.
+    /// </summary>
+    public bool IsIltLikeWorld
+    {
+        get
+        {
+            bool? engine = IltEngineVerdict.Active;
+            return engine ?? IsIltLikeWorldLocal;
+        }
+    }
+
+    /// <summary>True while the login probe is running.</summary>
     public bool IsRefreshing => _refreshInFlight;
 
     public string Source => _state.ServerOptions.Source;
@@ -179,8 +208,11 @@ internal sealed class IltServerOptions
             return;
         }
 
-        // World not reported yet: try again next tick rather than concluding "not ILT".
-        if (string.IsNullOrEmpty(WorldName) && sinceLogin < WorldNameWaitMs)
+        // World not reported yet: try again next tick rather than concluding "not ILT". RynthCore's
+        // verdict trails the world name by up to a second (its push), and before its first push
+        // there is none: keep checking for the same window rather than conclude early.
+        if ((string.IsNullOrEmpty(WorldName) || EngineDecides || !IltEngineVerdict.Pushed)
+            && sinceLogin < WorldNameWaitMs)
             return;
 
         _loginRefreshDone = true;
@@ -189,8 +221,8 @@ internal sealed class IltServerOptions
     }
 
     /// <summary>
-    /// Runs the dump-then-probe refresh. Manual refreshes report progress in chat; the
-    /// login refresh is silent.
+    /// Runs the probe refresh. Manual refreshes report progress in chat; the login refresh is
+    /// silent.
     /// </summary>
     public void Refresh(bool manual)
     {
@@ -201,7 +233,10 @@ internal sealed class IltServerOptions
         }
         if (!IsIltLikeWorld)
         {
-            if (manual) _chat("[Mini Remote] This world is not in the Server Features list (Settings > Misc: add it, or tick the override).");
+            if (manual)
+                _chat(EngineDecides
+                    ? "[Mini Remote] RynthCore doesn't treat this world as Infinite Leaftide (/rc server ilt on forces it for this character; /rc server names ilt add <name> adds the world)."
+                    : "[Mini Remote] This world is not in the Server Features list (Settings > Misc: add it, or tick the override).");
             return;
         }
 
@@ -210,87 +245,8 @@ internal sealed class IltServerOptions
         RynthLog.Event(LogEvents.IltOptionsRefreshStart, $"refresh start (manual={manual}, world='{WorldName}')");
         if (manual) _chat("[Mini Remote] Refreshing server options...");
 
-        // Step 1: structured dump. Lines start with "=== ILT Custom Features ===".
-        _capture.Enqueue(new IltChatRequest
-        {
-            Command = "/ilt features",
-            IsResponseLine = t => t.StartsWith("ILTFEATURE", StringComparison.OrdinalIgnoreCase)
-                               || t.Contains("ILT Custom Features", StringComparison.OrdinalIgnoreCase)
-                               || t.Equals("Coming Soon", StringComparison.OrdinalIgnoreCase),
-            IdleEndMs = 1200,
-            FirstLineTimeoutMs = 8000,
-            Eat = true,
-            OnComplete = r => OnFeatureDump(r, manual),
-        });
-    }
-
-    private void OnFeatureDump(IltChatResult r, bool manual)
-    {
-        var fromDump = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (string line in r.Lines)
-        {
-            if (!line.StartsWith("ILTFEATURE", StringComparison.OrdinalIgnoreCase)) continue;
-            foreach (var kv in ParseFeatureLine(line))
-            {
-                Set(kv.Key, kv.Value);
-                fromDump.Add(kv.Key);
-            }
-        }
-
-        _state.ServerOptions.Source = fromDump.Count > 0 ? "ilt-features" : "probe";
-        RynthLog.Trace(LogCat.IltOptions, $"feature dump: {fromDump.Count} key(s) (timedOut={r.TimedOut}, unknown={r.UnknownCommand}) → source={_state.ServerOptions.Source}");
-        RunProbes(fromDump, manual);
-    }
-
-    /// <summary>
-    /// Parses "ILTFEATURE bank=1 powerball=0 charms=infinitecasting:1,guardianhand:0".
-    /// ServerConfig-style names ("powerball_enabled") are mapped onto Hub keys.
-    /// </summary>
-    internal static IEnumerable<KeyValuePair<string, IltTri>> ParseFeatureLine(string line)
-    {
-        string body = line.Substring("ILTFEATURE".Length).Trim();
-        foreach (string token in body.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-        {
-            int eq = token.IndexOf('=');
-            if (eq <= 0) continue;
-            string key = token.Substring(0, eq).Trim();
-            string val = token.Substring(eq + 1).Trim();
-
-            if (key.Equals("charms", StringComparison.OrdinalIgnoreCase))
-            {
-                foreach (string pair in val.Split(',', StringSplitOptions.RemoveEmptyEntries))
-                {
-                    int c = pair.IndexOf(':');
-                    if (c <= 0) continue;
-                    yield return new(IltFeature.Charm(pair.Substring(0, c)), ParseTri(pair.Substring(c + 1)));
-                }
-                continue;
-            }
-            yield return new(MapServerKey(key), ParseTri(val));
-        }
-    }
-
-    private static IltTri ParseTri(string v)
-    {
-        v = v.Trim().ToLowerInvariant();
-        return v is "1" or "on" or "true" or "yes" ? IltTri.On
-             : v is "0" or "off" or "false" or "no" ? IltTri.Off
-             : IltTri.Unknown;
-    }
-
-    private static string MapServerKey(string key)
-    {
-        string k = key.Trim().ToLowerInvariant();
-        return k switch
-        {
-            "powerball_enabled" => IltFeature.Powerball,
-            "quest_info_enabled" => IltFeature.Quests,
-            "pet_device_pyreal_auto_refill_enabled" => IltFeature.PetRefill,
-            "pet_charm_universal_summoning_mastery_enabled" => IltFeature.UniversalMastery,
-            "pet_bond_enabled" => IltFeature.PetBond,
-            "pet_potency_enabled" => IltFeature.PetPotency,
-            _ => k.EndsWith("_enabled", StringComparison.Ordinal) ? k.Substring(0, k.Length - "_enabled".Length) : k,
-        };
+        _state.ServerOptions.Source = "probe";
+        RunProbes(manual);
     }
 
     // ── Probe ───────────────────────────────────────────────────────────────
@@ -325,15 +281,13 @@ internal sealed class IltServerOptions
         || t.Contains(keyword2, StringComparison.OrdinalIgnoreCase)
         || (t.Contains(keyword, StringComparison.OrdinalIgnoreCase) && !t.StartsWith("<Tell", StringComparison.OrdinalIgnoreCase));
 
-    private void RunProbes(HashSet<string> alreadyKnown, bool manual)
+    private void RunProbes(bool manual)
     {
-        var todo = Probes.Where(p => !alreadyKnown.Contains(p.Key)).ToList();
+        var todo = Probes.ToList();
 
         // /enl is never probed (it pops the enlightenment confirmation). On an ILT-like
-        // world the command is part of ACECustom, so it is assumed present unless the
-        // dump said otherwise.
-        if (!alreadyKnown.Contains(IltFeature.Enl))
-            Set(IltFeature.Enl, IltTri.On);
+        // world the command is part of ACECustom, so it is assumed present.
+        Set(IltFeature.Enl, IltTri.On);
 
         _probesOutstanding = todo.Count;
         if (_probesOutstanding == 0) { CompleteRefresh(manual); return; }
@@ -345,6 +299,8 @@ internal sealed class IltServerOptions
             {
                 Command = probe.Command,
                 IsResponseLine = probe.IsReply,
+                // /aug: banner alone must not end the probe before Creature:/Item: lines arrive.
+                ArmsIdle = probe.Key == IltFeature.Aug ? t => IltParse.AugLine.IsMatch(t) : null,
                 IdleEndMs = 1500,
                 FirstLineTimeoutMs = 8000,
                 Eat = true,
@@ -379,8 +335,8 @@ internal sealed class IltServerOptions
     // ── Passive refusals ────────────────────────────────────────────────────
 
     /// <summary>
-    /// Watches every chat line for explicit server refusals and flips the matching bit Off.
-    /// Cheap substring checks; runs on the pump thread.
+    /// Watches every chat line for explicit server refusals (bit Off) and for lines only an
+    /// enabled feature sends (bit On). Cheap substring checks; runs on the pump thread.
     /// </summary>
     public void OnChatLine(string text)
     {
@@ -398,7 +354,18 @@ internal sealed class IltServerOptions
             Set(IltFeature.Charm("Auto-Rebuff"), IltTri.Off);
         else if (text.Contains("not permitted to use bank commands", StringComparison.OrdinalIgnoreCase))
             Set(IltFeature.Bank, IltTri.Off);
+        else if (IsPyrealRefillLine(text))
+            Set(IltFeature.PetRefill, IltTri.On);
     }
+
+    /// <summary>
+    /// ACECustom's summon-time refill messages (PetDevice.TryApplyPyrealAutoRefillBeforeSummon). The
+    /// server sends them only while pet_device_pyreal_auto_refill_enabled is on, so any of them
+    /// proves the refill is on even when the profile says it's off.
+    /// </summary>
+    internal static bool IsPyrealRefillLine(string text)
+        => text.Contains("charge on your summoning essence", StringComparison.OrdinalIgnoreCase)
+           || text.Contains("pyreals to auto-replenish your summoning essence", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Records what the login /myquests refresh learned (called by the Hub after the Meta tracker finishes).</summary>
     public void NoteQuestTrackerOutcome(bool disabled, int recordCount)

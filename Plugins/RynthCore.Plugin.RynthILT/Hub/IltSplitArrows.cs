@@ -14,6 +14,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using ImGuiNET;
 using RynthCore.Loot;
+using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthILT.Hub;
 
@@ -50,6 +51,9 @@ internal sealed class IltSplitArrows : IIltFeature
     private IltGearState G => _ctx.State.Gear;
     public bool Running => _weaponId != 0;
 
+    /// <summary>True while another ILT pack job (the Rings chain) is running: no imbue starts then.</summary>
+    public Func<bool>? Blocked;
+
     private int Needed(WorldObject w)
     {
         var inv = _ctx.Inventory;
@@ -83,6 +87,7 @@ internal sealed class IltSplitArrows : IIltFeature
     {
         var w = _ctx.Inventory.Cache?[weaponId];
         if (w == null) { _status = "weapon not found"; return; }
+        if (Blocked?.Invoke() == true) { _status = "the Rings chain is running"; return; }
         if (_ctx.Inventory.IsEquipped(w)) { _status = "unequip the weapon first"; return; }
         int need = Needed(w);
         if (need <= 0) { _status = $"{w.Name} needs no more splits"; return; }
@@ -179,7 +184,7 @@ internal sealed class IltSplitArrows : IIltFeature
         ImGui.SameLine();
         bool skip = G.SplitIgnoreImbued;
         if (ImGui.Checkbox("Skip imbued weapons", ref skip)) G.SplitIgnoreImbued = skip;
-        ImGui.TextDisabled($"Full White Quartz bags carried: {_bagCount}");
+        SafeImGui.TextDisabled($"Full White Quartz bags carried: {_bagCount}");
 
         foreach (var w in _weapons)
         {
@@ -200,6 +205,6 @@ internal sealed class IltSplitArrows : IIltFeature
         }
         if (_weapons.Length == 0) ImGui.TextDisabled("No missile weapons carried.");
         if (Running && ImGui.SmallButton("Stop imbuing")) _ctx.Post(() => Stop("stopped by player"));
-        ImGui.TextDisabled("Status: " + _status);
+        SafeImGui.TextDisabled("Status: " + _status);
     }
 }

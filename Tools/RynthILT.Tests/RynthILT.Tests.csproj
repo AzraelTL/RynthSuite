@@ -39,6 +39,8 @@
     <Compile Include="..\RynthCore.RynthAiTests\Harness\Check.cs" Link="Harness\Check.cs" />
     <Compile Include="..\RynthCore.RynthAiTests\Harness\Runner.cs" Link="Harness\Runner.cs" />
     <Compile Include="..\RynthCore.RynthAiHostTests\Fakes\FakeHost.cs" Link="Fakes\FakeHost.cs" />
+    <!-- The shared reader RynthAi's Crafting tab uses on RynthILT's RynthServer.Profile JSON (ProfileTests),
+         Plugins\Shared\EngineServerState.cs, comes with the plugin now (it reads RynthCore's server list). -->
   </ItemGroup>
 
   <!-- The engine's Bounties snapshot reader (self-contained DTOs), so BountyTests checks the plugin's

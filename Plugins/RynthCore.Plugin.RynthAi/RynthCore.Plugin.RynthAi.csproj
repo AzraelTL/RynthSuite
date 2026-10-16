@@ -53,6 +53,11 @@
     <Compile Include="..\Shared\ActionPacer.cs" Link="Shared\ActionPacer.cs" />
     <!-- Text in the world on the Nav3D buffer (waypoint labels; RynthNav's path markers use it too). -->
     <Compile Include="..\Shared\Nav3DText.cs" Link="Shared\Nav3DText.cs" />
+    <!-- Server signal vs a player's copy of it (chat type + line-start anchor). -->
+    <Compile Include="..\Shared\ChatSource.cs" Link="Shared\ChatSource.cs" />
+    <!-- Server commands a server plugin sends for a section (RynthILT's /fship for Fellowship), and their buttons. -->
+    <Compile Include="..\Shared\ServerCommandShare.cs" Link="Shared\ServerCommandShare.cs" />
+    <Compile Include="..\Shared\ServerCommandPanel.cs" Link="Shared\ServerCommandPanel.cs" />
     <!-- Mini Remote session stats: RynthTracker's code, so the two show the same numbers (2026-10-11). -->
     <Compile Include="..\Shared\KillCounter.cs" Link="Shared\KillCounter.cs" />
     <Compile Include="..\Shared\TrackerSessionStore.cs" Link="Shared\TrackerSessionStore.cs" />
@@ -60,11 +65,18 @@
     <Compile Include="..\Shared\SessionStatsTracker.cs" Link="Shared\SessionStatsTracker.cs" />
     <!-- ImGui.NET bound to the engine's cimgui (RynthILT links the same file). -->
     <Compile Include="..\Shared\ImGuiNativeBinding.cs" Link="Shared\ImGuiNativeBinding.cs" />
+    <!-- ImGui text calls for non-literal text ('%' escaped; RynthILT links the same file). -->
+    <Compile Include="..\Shared\SafeImGui.cs" Link="Shared\SafeImGui.cs" />
     <!-- Infinite Leaftide: RynthILT.Hub (its tabs in the Mini Remote) and RynthAi.Hub (what RynthILT borrows). -->
     <Compile Include="..\Shared\RynthIltHubApi.cs" Link="Shared\RynthIltHubApi.cs" />
     <Compile Include="..\Shared\RynthAiHubApi.cs" Link="Shared\RynthAiHubApi.cs" />
     <!-- Save failures said in chat with the reason and the fix (2026-10-13; RynthILT links it too). -->
     <Compile Include="..\Shared\DataWriteGuard.cs" Link="Shared\DataWriteGuard.cs" />
+    <!-- The active server (plugin API v86 GetServerStateJson) and its owner's "RynthServer.Profile"
+         JSON: the Mini Remote's Crafting tab shows the server's own salvage from it. -->
+    <Compile Include="..\Shared\EngineServerState.cs" Link="Shared\EngineServerState.cs" />
+    <Compile Include="..\Shared\ServerStateClient.cs" Link="Shared\ServerStateClient.cs" />
+    <Compile Include="..\Shared\RynthServerProfileApi.cs" Link="Shared\RynthServerProfileApi.cs" />
   </ItemGroup>
 
   <ItemGroup>

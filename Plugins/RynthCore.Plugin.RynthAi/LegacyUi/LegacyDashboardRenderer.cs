@@ -1056,6 +1056,9 @@ internal sealed partial class LegacyDashboardRenderer
                 SummonPets                 = s.SummonPets,
                 PetMinMonsters             = s.PetMinMonsters,
                 // Spell Combat
+                WeaponSwapSettleMs         = s.WeaponSwapSettleMs,
+                WeaponSwapMinHealthPct     = s.WeaponSwapMinHealthPct,
+                WeaponSwapMinGainPct       = s.WeaponSwapMinGainPct,
                 SpellCastIntervalMs        = s.SpellCastIntervalMs,
                 AttackSpellIntervalMs      = s.AttackSpellIntervalMs,
                 CastDispelSelf             = s.CastDispelSelf,
@@ -1292,6 +1295,9 @@ internal sealed partial class LegacyDashboardRenderer
             s.SummonPets                 = p.SummonPets;
             s.PetMinMonsters             = p.PetMinMonsters;
             // Spell Combat
+            if (p.WeaponSwapSettleMs is int wsSettle)         s.WeaponSwapSettleMs = Math.Clamp(wsSettle, 0, 3000);
+            if (p.WeaponSwapMinHealthPct is int wsHealth)     s.WeaponSwapMinHealthPct = Math.Clamp(wsHealth, 0, 100);
+            if (p.WeaponSwapMinGainPct is int wsGain)         s.WeaponSwapMinGainPct = Math.Clamp(wsGain, 0, 200);
             s.SpellCastIntervalMs        = p.SpellCastIntervalMs;
             if (p.AttackSpellIntervalMs is int attackDelay) s.AttackSpellIntervalMs = attackDelay;   // absent = unchanged
             s.CastDispelSelf             = p.CastDispelSelf;
@@ -1841,6 +1847,9 @@ internal sealed partial class LegacyDashboardRenderer
         dst.MeleeAttackPower         = tmp.MeleeAttackPower;
         dst.MissileAttackPower       = tmp.MissileAttackPower;
         dst.UseRecklessness          = tmp.UseRecklessness;
+        dst.WeaponSwapSettleMs       = Math.Clamp(tmp.WeaponSwapSettleMs, 0, 3000);
+        dst.WeaponSwapMinHealthPct   = Math.Clamp(tmp.WeaponSwapMinHealthPct, 0, 100);
+        dst.WeaponSwapMinGainPct     = Math.Clamp(tmp.WeaponSwapMinGainPct, 0, 200);
         dst.UseNativeAttack          = tmp.UseNativeAttack;
         dst.WieldUnlistedWandWhenNoneListed = tmp.WieldUnlistedWandWhenNoneListed;
         dst.OffhandDefault           = OffhandRules.SettingValue(OffhandRules.Parse(tmp.OffhandDefault, OffhandMode.Auto));

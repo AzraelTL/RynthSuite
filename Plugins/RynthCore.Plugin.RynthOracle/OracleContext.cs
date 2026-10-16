@@ -13,10 +13,19 @@ internal sealed class OracleContext
     public readonly QuestFlagStore Flags = new();
     public readonly QuestCatalog Catalog = new();
     public readonly QuestCatalogUpdater Updater = new();
+    /// <summary>This character's tracked quests and recorded rewards (loaded once the name is known).</summary>
+    public readonly QuestBook Book = new();
     public readonly CharacterSnapshot Character = new();
     public readonly VoidTracker Void = new();
     public readonly FellowshipTracker Fellowship = new();
     public readonly ServerIdentity Server = new();
+    /// <summary>RynthAi's session (the one session every tracker shows); read while the Character tab shows.</summary>
+    public readonly RynthCore.Plugin.Shared.RynthAiSessionClient AiSession = new();
+    /// <summary>The last session RynthAi reported; SessionKnown false without RynthAi.</summary>
+    public RynthCore.Plugin.Shared.SessionStatsV1 Session;
+    public bool SessionKnown;
+    /// <summary>RynthCore's server list (API v86) and the active server owner's settings; State null on older engines.</summary>
+    public readonly RynthCore.Plugin.Shared.ServerStateClient ServerState = new();
     /// <summary>ConquestAC-only data (tag Conquest); fed only while on ConquestAC.</summary>
     public readonly ConquestData Conquest = new();
     /// <summary>Aelrynth's leaderboards (tag Aelrynth); fed only while on Aelrynth.</summary>
@@ -38,6 +47,14 @@ internal sealed class OracleContext
 
     /// <summary>Set by the plugin: sends a chat command to the server as if typed (the views' buttons).</summary>
     public Func<string, bool> Send = _ => false;
+
+    /// <summary>Set by the plugin: runs a chat command through RynthCore's plugin dispatch (another plugin's window).</summary>
+    public Func<string, bool> RunCommand = _ => false;
+
+    /// <summary>Set by the plugin: shows or hides the Quest Timers window.</summary>
+    public Action<bool> SetQuestTimersWindow = _ => { };
+    /// <summary>Set by the plugin: whether the Quest Timers window is showing.</summary>
+    public Func<bool> QuestTimersWindowVisible = () => false;
 
     public Func<uint, int> Props => id => Character.Int(Host, id);
 

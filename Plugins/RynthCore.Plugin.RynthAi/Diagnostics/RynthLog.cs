@@ -178,7 +178,7 @@ internal static class LogEvents
         LogCat.Meta => "Meta (VTank-style) state machine and actions.",
         LogCat.Expressions => "Meta expression evaluation.",
         LogCat.Quests => "Quest tracking.",
-        LogCat.Crafting => "Missile ammo crafting.",
+        LogCat.Crafting => "Missile ammo crafting and the Mini Remote's Crafting tab.",
         LogCat.Raycast => "Line-of-sight raycasts and geometry loading.",
         LogCat.Radar => "Radar window.",
         LogCat.UI => "RynthAi UI windows and panels.",

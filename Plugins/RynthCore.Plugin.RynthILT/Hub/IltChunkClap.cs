@@ -1,13 +1,17 @@
 // IltChunkClap.cs — Lugian-hammer chunking and /clap automation (Gear tab).
 // Originally SilentKelpie's ILT Hub (RynthAi IltHub/); moved to RynthILT 2026-10-13.
 //
-// Chunk: uses a Lugian (Aetheria) Hammer on eligible items, one at a time:
+// Chunk: uses the Lugian Aetheria Hammer on eligible items, one at a time:
 //   Aetheria  — "Aetheria"/"Coalesced Aetheria" gems, not equipped, appraised, not flagged
-//               never-chunk (bool 9030), never levelled (ItemTotalXp quad 4 == 0), and
-//               max level (int 319) under the configured cap (Coalesced always qualifies).
+//               never-chunk (bool 9030), never levelled (ItemTotalXp quad 4 == 0), no kept
+//               C / CD / CDR rating (gear ints 372 / 374 / 375; on by default), and max level
+//               (int 319, up to 10 on ILT) under the configured cap (Coalesced always qualifies).
 //   Corrupted — "Corrupted" melee/missile weapons with no tinks (171), no imbue (179),
 //               not equipped, not never-chunk, cleave (292) <= 1.
 //   Peace mode only unless ChunkInCombat; waits for the result line (10 s max).
+//   The tool is the "Lugian Aetheria Hammer" only. The Lugian Hammer weapons (Flaming, Acid, ...)
+//   are loot and chunk nothing: the server answers with no result line, so every item timed out
+//   into the skip list and the status sat on "nothing eligible" (SilentKelpie, 2026-10-15).
 // Clap: "/clap all" converts aetheria chunks + trinkets into coins server-side. Needs the
 //   AutoCraftingEnabled stamp; 30 min ± 2 min interval, first attempt ~1 min after enable.
 using System;
@@ -15,6 +19,7 @@ using System.Collections.Generic;
 using System.Linq;
 using ImGuiNET;
 using RynthCore.Loot;
+using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthILT.Hub;
 
@@ -60,10 +65,14 @@ internal sealed class IltChunkClap : IIltFeature
 
     // ── Chunk ───────────────────────────────────────────────────────────────
 
+    /// <summary>Infinite Leaftide's chunking tool.</summary>
+    internal const string HammerName = "Lugian Aetheria Hammer";
+
+    /// <summary>True for the chunking tool only, never a Lugian Hammer weapon. Pure: the tests drive it.</summary>
+    internal static bool IsChunkHammer(string name) => name.Equals(HammerName, StringComparison.OrdinalIgnoreCase);
+
     private WorldObject? FindHammer()
-        => _ctx.Inventory.FindByName(n => n.Equals("Lugian Aetheria Hammer", StringComparison.OrdinalIgnoreCase)
-                                          || n.Equals("Lugian Hammer", StringComparison.OrdinalIgnoreCase)
-                                          || n.EndsWith(" Lugian Hammer", StringComparison.OrdinalIgnoreCase));
+        => _ctx.Inventory.Items().FirstOrDefault(wo => IsChunkHammer(wo.Name) && !_ctx.Inventory.IsEquipped(wo));
 
     /// <summary>True/false when decidable; null when appraisal is still needed.</summary>
     private bool? IsChunkableAetheria(WorldObject wo)
@@ -77,8 +86,23 @@ internal sealed class IltChunkClap : IIltFeature
         if (!inv.HasAppraisal(wo)) { inv.RequestAppraisal(wo); return null; }
         if (inv.Bool(wo, IltInventory.BoolNeverChunk)) return false;
         if (inv.Quad(wo, IltInventory.QuadItemTotalXp) != 0) return false;
-        return coalesced || inv.Int(wo, IltInventory.IntItemMaxLevel) < Math.Max(1, G.ChunkAetheriaUnderLevel);
+        if (KeptForRatings(G, inv.Int(wo, IltInventory.IntGearCrit), inv.Int(wo, IltInventory.IntGearCritDamage),
+                           inv.Int(wo, IltInventory.IntGearCritDamageResist)))
+            return false;
+        return coalesced || inv.Int(wo, IltInventory.IntItemMaxLevel) < ClampUnderLevel(G.ChunkAetheriaUnderLevel);
     }
+
+    /// <summary>The chunk cap in range: 1 (chunk nothing by level) to one past the ILT maximum (every level).</summary>
+    internal static int ClampUnderLevel(int under) => Math.Clamp(under, 1, IltInventory.AetheriaMaxLevel + 1);
+
+    /// <summary>
+    /// True when an aetheria's C / CD / CDR rating is one the settings keep (any rating above 0 with
+    /// its keep switch on). Pure: the tests drive it.
+    /// </summary>
+    internal static bool KeptForRatings(IltGearState g, int crit, int critDamage, int critDamageResist)
+        => (g.KeepAetheriaWithCrit && crit > 0)
+           || (g.KeepAetheriaWithCritDamage && critDamage > 0)
+           || (g.KeepAetheriaWithCritDamageResist && critDamageResist > 0);
 
     private bool? IsChunkableCorrupted(WorldObject wo)
     {
@@ -109,6 +133,7 @@ internal sealed class IltChunkClap : IIltFeature
         RynthLog.Trace(LogCat.IltGear, $"ChunkNow()");
         _manualPass = true;
         _lastChunkAt = 0;
+        _skip.Clear();   // a manual pass gives the items that got no answer another try
         _chunkStatus = "manual pass started";
     }
 
@@ -120,6 +145,7 @@ internal sealed class IltChunkClap : IIltFeature
         {
             if (now - _waitStartedAt < ChunkResultWaitMs) return;
             _skip.Add(_waitingOn); // no result line — don't hammer the same item forever
+            RynthLog.Write(LogCat.IltGear, $"chunk: no result line for 0x{(uint)_waitingOn:X8} in {ChunkResultWaitMs / 1000} s, skipped until a manual pass");
             _waitingOn = 0;
         }
         if (now - _lastChunkAt < Math.Max(500, G.ChunkIntervalMs)) return;
@@ -129,11 +155,12 @@ internal sealed class IltChunkClap : IIltFeature
         if (_ctx.Inventory.IsBusy) return;
 
         var hammer = FindHammer();
-        if (hammer == null) { _chunkStatus = "no Lugian Hammer carried"; _manualPass = false; return; }
+        if (hammer == null) { _chunkStatus = $"no {HammerName} carried"; _manualPass = false; return; }
         var target = NextChunkTarget();
         if (target == null)
         {
-            _chunkStatus = _chunked > 0 ? $"nothing left to chunk ({_chunked} this session)" : "nothing eligible";
+            _chunkStatus = (_chunked > 0 ? $"nothing left to chunk ({_chunked} this session)" : "nothing eligible")
+                         + (_skip.Count > 0 ? $"; {_skip.Count} skipped with no answer (Chunk now retries them)" : "");
             _manualPass = false;
             return;
         }
@@ -216,23 +243,43 @@ internal sealed class IltChunkClap : IIltFeature
         TickClap(nowMs);
     }
 
+    internal enum ChunkResult { None, Busy, Done, Refused }
+
+    /// <summary>
+    /// What a chat line says about the chunk in flight. ILT names the item and the tool ("You
+    /// smash the Corrupted Sword with the Lugian Aetheria Hammer."), so a line naming a corrupted
+    /// item with the hammer, powder or shatter is a result too (combat's "You smash Foo for 147"
+    /// names neither). Pure: the tests drive it.
+    /// </summary>
+    internal static ChunkResult ClassifyChat(string text)
+    {
+        if (text.StartsWith("You're too busy", StringComparison.OrdinalIgnoreCase) || text.StartsWith("You are too busy", StringComparison.OrdinalIgnoreCase))
+            return ChunkResult.Busy;
+        if (ChunkRefusedLines.Any(l => text.Contains(l, StringComparison.OrdinalIgnoreCase))) return ChunkResult.Refused;
+        if (ChunkDoneLines.Any(l => text.Contains(l, StringComparison.OrdinalIgnoreCase))) return ChunkResult.Done;
+        if (text.Contains("corrupted", StringComparison.OrdinalIgnoreCase)
+            && (text.Contains("hammer", StringComparison.OrdinalIgnoreCase) || text.Contains("powder", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("shatter", StringComparison.OrdinalIgnoreCase)))
+            return ChunkResult.Done;
+        return ChunkResult.None;
+    }
+
     public bool OnChat(string text)
     {
         if (_waitingOn == 0) return false;
-        if (text.StartsWith("You're too busy", StringComparison.OrdinalIgnoreCase) || text.StartsWith("You are too busy", StringComparison.OrdinalIgnoreCase))
+        switch (ClassifyChat(text))
         {
-            _waitingOn = 0; // retry the same item next interval
-            return false;
-        }
-        if (ChunkDoneLines.Any(l => text.Contains(l, StringComparison.OrdinalIgnoreCase)))
-        {
-            _chunked++;
-            _waitingOn = 0;
-        }
-        else if (ChunkRefusedLines.Any(l => text.Contains(l, StringComparison.OrdinalIgnoreCase)))
-        {
-            _skip.Add(_waitingOn);
-            _waitingOn = 0;
+            case ChunkResult.Busy:
+                _waitingOn = 0; // retry the same item next interval
+                break;
+            case ChunkResult.Done:
+                _chunked++;
+                _waitingOn = 0;
+                break;
+            case ChunkResult.Refused:
+                _skip.Add(_waitingOn);
+                _waitingOn = 0;
+                break;
         }
         return false;
     }
@@ -249,7 +296,7 @@ internal sealed class IltChunkClap : IIltFeature
 
     public void Render()
     {
-        ImGui.TextColored(IltStyle.ColTeal, "Chunking (Lugian Hammer)");
+        SafeImGui.TextColored(IltStyle.ColTeal, $"Chunking ({HammerName})");
         bool a = G.AutoChunkAetheria, c = G.AutoChunkCorrupted, comb = G.ChunkInCombat;
         if (ImGui.Checkbox("Auto-chunk low aetheria", ref a)) G.AutoChunkAetheria = a;
         ImGui.SameLine();
@@ -257,11 +304,24 @@ internal sealed class IltChunkClap : IIltFeature
         if (ImGui.Checkbox("Allow while in combat mode", ref comb)) G.ChunkInCombat = comb;
         int under = G.ChunkAetheriaUnderLevel;
         ImGui.SetNextItemWidth(100);
-        if (ImGui.InputInt("Chunk aetheria with max level below", ref under)) G.ChunkAetheriaUnderLevel = Math.Clamp(under, 1, 6);
+        if (ImGui.InputInt("Chunk aetheria with max level below", ref under)) G.ChunkAetheriaUnderLevel = ClampUnderLevel(under);
+        if (ImGui.IsItemHovered())
+            SafeImGui.SetTooltip($"Infinite Leaftide aetheria goes up to level {IltInventory.AetheriaMaxLevel}; {IltInventory.AetheriaMaxLevel + 1} chunks every level.");
+        bool kc = G.KeepAetheriaWithCrit, kcd = G.KeepAetheriaWithCritDamage, kcdr = G.KeepAetheriaWithCritDamageResist;
+        ImGui.TextUnformatted("Never chunk aetheria with:");
+        ImGui.SameLine();
+        if (ImGui.Checkbox("C##keepc", ref kc)) G.KeepAetheriaWithCrit = kc;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("A Crit rating (GearCrit).");
+        ImGui.SameLine();
+        if (ImGui.Checkbox("CD##keepcd", ref kcd)) G.KeepAetheriaWithCritDamage = kcd;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("A Crit Damage rating (GearCritDamage).");
+        ImGui.SameLine();
+        if (ImGui.Checkbox("CDR##keepcdr", ref kcdr)) G.KeepAetheriaWithCritDamageResist = kcdr;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("A Crit Damage Resist rating (GearCritDamageResist).");
         if (ImGui.Button("Chunk eligible items now...")) _ctx.Confirm("Chunk items",
             "Run one chunk pass now on every eligible aetheria and corrupted weapon?\nChunked items are destroyed.",
             ChunkNow, "Chunk");
-        ImGui.TextDisabled("Status: " + _chunkStatus);
+        SafeImGui.TextDisabled("Status: " + _chunkStatus);
 
         ImGui.Separator();
         ImGui.TextColored(IltStyle.ColTeal, "Clap (/clap all)");
@@ -277,6 +337,6 @@ internal sealed class IltChunkClap : IIltFeature
         if (ImGui.InputInt("Interval (min)", ref mins)) G.ClapIntervalMinutes = Math.Max(5, mins);
         if (ImGui.SmallButton("Clap now")) _ctx.Post(() => ClapNow(manual: true));
         ImGui.SameLine();
-        ImGui.TextDisabled(_clapStatus);
+        SafeImGui.TextDisabled(_clapStatus);
     }
 }

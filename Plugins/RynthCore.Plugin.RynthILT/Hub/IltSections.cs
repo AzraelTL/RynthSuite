@@ -1,20 +1,30 @@
 // IltSections.cs - The Infinite Leaftide tabs of RynthAi's Mini Remote and the Guardian panel.
 // Originally SilentKelpie's ILT Hub sections (RynthAi IltHub/); moved to RynthILT 2026-10-13.
 //
-// Character, Banking, Gear, Charms and Games are Mini Remote tabs: RynthAi's MiniRemoteHud draws
-// the tab bar (after its Remote, Quests and Pets tabs) and asks RynthILT for each tab's body
-// (RynthILT.Hub GetTabs / RenderTab); "/ra hub open <section>" picks one. Guardian is a RynthCore
-// ILT panel instead (the bar's ILT button, next to Bounties; "/rc guardian"), drawn by this
-// plugin through RynthPluginRenderEmbed("guardian"). The Quests and Pets tabs are RynthAi's
-// (every server: /myquests and summoning essences aren't ILT's).
+// Banking, Gear, Charms and Games are Mini Remote tabs: RynthAi's MiniRemoteHud draws the tab bar
+// (after its Remote, Pets and Crafting tabs) and asks RynthILT for each tab's body (RynthILT.Hub
+// GetTabs / RenderTab); "/ra hub open <section>" picks one, and with RynthCore's sections rail
+// RynthAi lists them as "section:<tab>" views (Inventory). Guardian is a RynthCore ILT panel
+// instead (the bar's ILT button, next to Bounties; "/rc guardian"), drawn by this plugin through
+// RynthPluginRenderEmbed("guardian"). The Pets tab is RynthAi's (every server: summoning essences
+// aren't ILT's); quests are RynthOracle's.
+//
+// Character was a Mini Remote tab until 2026-10-13. It moved out:
+//   the character overview and session -> RynthOracle's Character tab ("/ro character");
+//   the ILT session rates               -> RynthCore's Mini Remote "Session Stats" section
+//                                          (RynthILT's own surface "section:ilt-rates");
+//   the force-server override           -> RynthCore Options > Diagnostics only.
+// Its names still parse, so old links and commands land on the new home (MovedCommand). Charms and
+// Banking are Infinite Leaftide's own screens and stay RynthILT's tabs.
 using System;
 using System.Numerics;
 
 namespace RynthCore.Plugin.RynthILT.Hub;
 
-/// <summary>ILT sections: the Mini Remote's ILT tabs, then the Guardian panel.</summary>
+/// <summary>ILT sections: the Mini Remote's ILT tabs, the one that moved out, then the Guardian panel.</summary>
 internal enum IltSection
 {
+    /// <summary>Moved out (2026-10-13): RynthOracle's Character tab and the Session Stats section.</summary>
     Character,
     Banking,
     Gear,
@@ -30,11 +40,14 @@ internal static class IltSections
     /// <summary>The ILT tabs, in tab-bar order (RynthAi puts them after its own tabs).</summary>
     public static readonly IltSection[] Tabs =
     {
-        IltSection.Character, IltSection.Banking, IltSection.Gear, IltSection.Charms, IltSection.Games,
+        IltSection.Banking, IltSection.Gear, IltSection.Charms, IltSection.Games,
     };
 
     /// <summary>The Mini Remote's own tab (the remote itself): its tab id.</summary>
     public const string RemoteTab = "";
+
+    /// <summary>RynthOracle's Character tab: the character overview and this session.</summary>
+    public const string OracleCharacterCommand = "/ro character";
 
     public static string Label(IltSection s) => s switch
     {
@@ -62,10 +75,20 @@ internal static class IltSections
         _ => s.ToString().ToLowerInvariant(),
     };
 
-    /// <summary>True for the sections drawn as Mini Remote tabs (all but the Guardian panel).</summary>
-    public static bool IsTab(IltSection s) => s != IltSection.Guardian;
+    /// <summary>True for the sections drawn as Mini Remote tabs (Banking, Gear, Charms, Games).</summary>
+    public static bool IsTab(IltSection s) => s is IltSection.Banking or IltSection.Gear or IltSection.Charms or IltSection.Games;
 
-    /// <summary>"quests" / "pets" (and their aliases): RynthAi's universal tabs, not ILT sections.</summary>
+    /// <summary>
+    /// Where a section that moved out of the Mini Remote lives now, as the chat command that opens
+    /// it; null for a section that is still RynthILT's (a tab or the Guardian panel).
+    /// </summary>
+    public static string? MovedCommand(IltSection s) => s switch
+    {
+        IltSection.Character => OracleCharacterCommand,
+        _ => null,
+    };
+
+    /// <summary>"quests" / "pets" (and their aliases): not ILT sections (RynthAi's Pets tab, RynthOracle's quests).</summary>
     public static bool IsUniversalTabName(string text) => (text ?? string.Empty).Trim().ToLowerInvariant() switch
     {
         "quests" or "quest" or "pets" or "pet" => true,
@@ -83,7 +106,7 @@ internal static class IltSections
             case "games": case "game": section = IltSection.Games; return true;
             case "charms": case "charm": section = IltSection.Charms; return true;
             case "guardian": case "temple": case "riddle": section = IltSection.Guardian; return true;
-            default: section = IltSection.Character; return false;
+            default: section = IltSection.Gear; return false;
         }
     }
 
@@ -93,7 +116,6 @@ internal static class IltSections
     /// </summary>
     public static Vector2 TabSize(IltSection section) => section switch
     {
-        IltSection.Character => new Vector2(520, 440),
         IltSection.Banking => new Vector2(560, 520),
         IltSection.Gear => new Vector2(560, 520),
         IltSection.Charms => new Vector2(560, 520),

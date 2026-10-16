@@ -74,7 +74,7 @@ internal sealed unsafe class RynthAiClient
             if (_host.HasGetPluginInterface)
             {
                 var t = (RynthAiHubApiV1*)_host.GetPluginInterface(RynthAiHub.PluginName, RynthAiHubApiV1.InterfaceName, RynthAiHubApiV1.InterfaceVersion);
-                if (t != null && t->Version >= 1 && t->StructSize >= (uint)sizeof(RynthAiHubApiV1)) _t = t;
+                if (t != null && t->Version >= 1 && t->StructSize >= RynthAiHubApiV1.BaseStructSize) _t = t;
             }
             System.Threading.Volatile.Write(ref _renderTable, (IntPtr)_t);
             return _t;

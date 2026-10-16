@@ -1,6 +1,7 @@
-// IltBanking.cs — ILT Hub "Banking" tab: /bank balances, deposits, withdrawals, confirmed
-// Originally SilentKelpie's ILT Hub (RynthAi IltHub/); moved to RynthILT 2026-10-13.
-// transfers, transaction log.
+// IltBanking.cs — ILT banking: /bank balances, deposits, withdrawals, confirmed transfers,
+// transaction log. Originally SilentKelpie's ILT Hub (RynthAi IltHub/); moved to RynthILT 2026-10-13.
+// Render is the Mini Remote's "Banking" tab. The balances and log are also exported to other
+// plugins through "RynthILT.Data" (IltBankExport; their verbs come back through RunVerb).
 //
 // Server contract (ACECustom PlayerCommands bank handler, upstream 2026-10-11):
 //   /bank                  → "[BANK] Your balances are:" then "[BANK] Pyreals: N", "Luminance:",
@@ -9,8 +10,9 @@
 //   /b d, /b lum, /b w     → deposits and withdrawals (IltBankCommands has the commands and replies).
 //   /bank t <c> <n> <who>  → "Transferred {N0} {Currency} to {Name}[ (offline)]" or an error;
 //                            the recipient sees "Received {N0} {currency} from {Name}".
-//   Codes: p pyreals, l luminance, k legendary keys, mk mythical keys, e enl coins, we weak coins.
-//   Prestige Coins (pc) are bound: deposit and withdraw only.
+//   /bank t n <d> <n> <who> → trade notes' pyreal value, then "(Equivalent to ...)".
+//   What each item allows is IltBankCommands.Items (the server's table): Prestige Coins (pc)
+//   are bound (deposit and withdraw only); pyreal peas and luminance tokens deposit only.
 // Deposit, withdraw and transfer share the server's bank_command_limit throttle; a balance
 // refresh doesn't, so it has its own (client-side) spacing.
 // Balance lines are parsed whenever they appear (player-typed /bank too) but only EATEN
@@ -20,21 +22,14 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using ImGuiNET;
+using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthILT.Hub;
 
 internal sealed class IltBanking : IIltFeature
 {
-    /// <summary>Transfer currency table: display name, /bank t code.</summary>
-    public static readonly (string Name, string Code)[] Currencies =
-    {
-        ("Pyreals", "p"),
-        ("Luminance", "l"),
-        ("Legendary Keys", "k"),
-        ("Mythical Keys", "mk"),
-        ("Enlightened Coins", "e"),
-        ("Weakly Enlightened Coins", "we"),
-    };
+    /// <summary>Transfer currencies: display name, /bank t code (IltBankCommands.Transfers).</summary>
+    public static readonly (string Name, string Code)[] Currencies = IltBankCommands.Transfers;
     private static readonly string[] CurrencyNames = Currencies.Select(c => c.Name).ToArray();
     private static readonly string[] DepositNames = IltBankCommands.Deposits.Select(d => d.Label).ToArray();
     private static readonly string[] WithdrawNames = IltBankCommands.Withdrawals.Select(w => w.Label).ToArray();
@@ -69,6 +64,23 @@ internal sealed class IltBanking : IIltFeature
     private string _txFilter = string.Empty;
     private string _lastResult = string.Empty;
     private volatile string _actionResult = string.Empty;
+    /// <summary>The newest action reply or error (deposit, withdrawal or transfer), for the bank export.</summary>
+    private volatile string _latestResult = string.Empty;
+
+    /// <summary>
+    /// Another plugin is showing the balances (a "RynthILT.Data" reader):
+    /// the periodic quiet refresh runs as it does while the Mini Remote is open. Pump thread.
+    /// </summary>
+    public bool ReaderWatching;
+
+    /// <summary>The newest action reply or error (any thread).</summary>
+    public string LatestResult => _latestResult;
+
+    /// <summary>The transaction log as last published (any thread; oldest first).</summary>
+    public IReadOnlyList<IltBankTransaction> Transactions => _txSnapshot;
+
+    /// <summary>The bank state (pump thread).</summary>
+    public IltBankState State => Bank;
 
     /// <summary>Raised (pump thread) after a balance line updates the state; Character rates use the deltas.</summary>
     public event Action<string, long, long>? BalanceChanged;
@@ -128,40 +140,36 @@ internal sealed class IltBanking : IIltFeature
     }
 
     /// <summary>
-    /// Validates and (after the UI confirm) sends a transfer. Pump thread.
+    /// Validates and (after the UI confirm) sends a transfer. For trade notes
+    /// <paramref name="amount"/> is the note count of <paramref name="denomination"/>. Pump thread.
     /// Returns an error message, or empty when the command was queued.
     /// </summary>
-    public string SendTransfer(int currencyIndex, long amount, string target)
+    public string SendTransfer(int currencyIndex, long amount, string target, int denomination = -1)
     {
-        RynthLog.Trace(LogCat.IltBanking, $"SendTransfer(currency={currencyIndex}, amount={amount}, target='{target}')");
+        RynthLog.Trace(LogCat.IltBanking, $"SendTransfer(currency={currencyIndex}, amount={amount}, denom={denomination}, target='{target}')");
         if (!Enabled) return "Bank is not available on this server.";
-        if (currencyIndex < 0 || currencyIndex >= Currencies.Length) return "Pick a currency.";
-        if (amount <= 0) return "Amount must be positive.";
         target = (target ?? string.Empty).Trim();
-        if (target.Length == 0) return "Enter a recipient.";
         // The recipient is spliced into a chat command, so only character-name characters are
-        // allowed: no '/', control characters or line breaks that could start a second command.
-        if (!IltParse.CharacterName.IsMatch(target)) return "Recipient must be a character name (letters, spaces, ' and - only).";
+        // allowed: no '/', quotes, control characters or line breaks that could start a second command.
+        if (target.Length > 0 && !IltParse.CharacterName.IsMatch(target)) return "Recipient must be a character name (letters, spaces, ' and - only).";
         if (target.Equals(_ctx.CharName, StringComparison.OrdinalIgnoreCase)) return "You cannot transfer to yourself.";
+        string cmd = IltBankCommands.Transfer(currencyIndex, amount, denomination, target, out string error);
+        if (cmd.Length == 0) return error;
         long now = IltHubContext.NowMs;
         if (now - _lastBankCommandAt < BankCommandSpacingMs) return "Bank commands are limited to one every 5 seconds.";
         _lastBankCommandAt = now;
 
-        string cmd = $"/bank t {Currencies[currencyIndex].Code} {amount} {target}";
         _ctx.Capture.Enqueue(new IltChatRequest
         {
             Command = cmd,
-            IsResponseLine = t => t.StartsWith("Transferred ", StringComparison.Ordinal)
-                               || t.StartsWith("Character '", StringComparison.Ordinal)
-                               || t.StartsWith("You cannot transfer", StringComparison.Ordinal)
-                               || t.StartsWith("You don't have enough", StringComparison.Ordinal)
-                               || t.StartsWith("[Transfer]", StringComparison.Ordinal),
+            IsResponseLine = IltBankCommands.IsTransferReply,
             IdleEndMs = 500,
             FirstLineTimeoutMs = 8000,
             Eat = false,
             OnComplete = r =>
             {
                 _lastResult = r.Lines.Count > 0 ? r.Lines[^1] : (r.TimedOut ? "No reply from server." : string.Empty);
+                _latestResult = _lastResult;
                 // Balances changed: read them again shortly.
                 _refreshDueAt = IltHubContext.NowMs + RefreshAfterActionMs;
             },
@@ -212,19 +220,51 @@ internal sealed class IltBanking : IIltFeature
             {
                 _actionResult = r.Lines.Count > 0 ? string.Join("\n", r.Lines.TakeLast(6))
                     : r.TimedOut ? "No reply from the server." : string.Empty;
+                _latestResult = _actionResult;
                 _refreshDueAt = IltHubContext.NowMs + RefreshAfterActionMs;
             },
         });
         return string.Empty;
     }
 
+    /// <summary>
+    /// A bank verb line from "RynthILT.Data" BankCommand (Plugins/Shared/RynthIltDataApi.cs):
+    /// "refresh", "deposit i", "withdraw i amount note", "transfer i amount note name". The reader
+    /// has already confirmed a transfer with the player. Pump thread. Returns an error, or empty
+    /// when it was queued; either way the outcome shows in <see cref="LatestResult"/>.
+    /// </summary>
+    public string RunVerb(string line)
+    {
+        string[] p = (line ?? string.Empty).Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        string err;
+        if (p.Length == 0) err = "Empty bank command.";
+        else if (p[0] == "refresh" && p.Length == 1) { RequestRefresh(quiet: true); return string.Empty; }
+        else if (p[0] == "deposit" && p.Length == 2 && int.TryParse(p[1], out int d)) err = SendDeposit(d);
+        else if (p[0] == "withdraw" && p.Length == 4 && int.TryParse(p[1], out int w) && long.TryParse(p[2], out long wa)
+                 && int.TryParse(p[3], out int wn))
+            err = SendWithdraw(w, wa, wn);
+        else if (p[0] == "transfer" && p.Length >= 5 && int.TryParse(p[1], out int c) && long.TryParse(p[2], out long ta)
+                 && int.TryParse(p[3], out int tn))
+        {
+            // The name may hold spaces; SendTransfer checks it is a character name.
+            string who = string.Join(' ', p, 4, p.Length - 4);
+            err = SendTransfer(c, ta, who, IltBankCommands.IsNoteTransfer(c) ? tn : -1);
+            if (err.Length == 0) _latestResult = "Transfer sent...";
+        }
+        else err = "Unknown bank command.";
+        if (err.Length > 0) _latestResult = err;
+        RynthLog.Trace(LogCat.IltBanking, $"reader verb '{line}' -> {(err.Length > 0 ? err : "queued")}");
+        return err;
+    }
+
     // ── IIltFeature ─────────────────────────────────────────────────────────
 
     public void Tick(long nowMs)
     {
-        // Periodic quiet refresh only while the Hub is open and the server has /bank.
+        // Periodic quiet refresh only while the balances are on screen (the Hub, or a reader's
+        // Banking tab) and the server has /bank.
         int every = Bank.AutoRefreshSeconds;
-        if (Enabled && _ctx.WindowOpen && every > 0 && nowMs - _lastAutoRefreshAt >= every * 1000L
+        if (Enabled && (_ctx.WindowOpen || ReaderWatching) && every > 0 && nowMs - _lastAutoRefreshAt >= every * 1000L
             && nowMs - _lastBalanceAt >= BalanceSpacingMs)
         {
             _lastAutoRefreshAt = nowMs;
@@ -369,7 +409,7 @@ internal sealed class IltBanking : IIltFeature
     {
         if (!Enabled)
         {
-            ImGui.TextColored(IltStyle.ColTextMute,
+            SafeImGui.TextColored(IltStyle.ColTextMute,
                 _ctx.Options.IsOff(IltFeature.Bank) ? "The server reports /bank is not available." : "Waiting for the server options check...");
             return;
         }
@@ -381,7 +421,7 @@ internal sealed class IltBanking : IIltFeature
         ImGui.SameLine();
         if (ImGui.SmallButton("Copy##bank")) ImGui.SetClipboardText(BuildCopyLine());
         ImGui.SameLine();
-        ImGui.TextDisabled(Bank.LastUpdated == DateTime.MinValue ? "never updated" : "updated " + Bank.LastUpdated.ToString("g"));
+        SafeImGui.TextDisabled(Bank.LastUpdated == DateTime.MinValue ? "never updated" : "updated " + Bank.LastUpdated.ToString("g"));
 
         if (ImGui.BeginTable("##iltbal", 2, ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerV))
         {
@@ -432,7 +472,7 @@ internal sealed class IltBanking : IIltFeature
             _ctx.Post(() => { string err = SendDeposit(index); if (err.Length > 0) _actionResult = err; });
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(IltBankCommands.Deposit(dep) + "\nEverything banks all currencies, notes and luminance tokens."
+            SafeImGui.SetTooltip(IltBankCommands.Deposit(dep) + "\nEverything banks all currencies, notes and luminance tokens."
                              + "\nThe server refuses while you are busy or moving.");
 
         ImGui.TextColored(IltStyle.ColTeal, "Withdraw");
@@ -463,12 +503,12 @@ internal sealed class IltBanking : IIltFeature
         {
             ImGui.SameLine();
             if (!ok) ImGui.TextColored(IltStyle.ColHp, "invalid amount");
-            else if (notes) ImGui.TextDisabled("= " + IltParse.N0(amount * IltBankCommands.NoteDenominations[denom].Value) + " pyreals");
-            else ImGui.TextDisabled("= " + IltParse.N0(amount));
+            else if (notes) SafeImGui.TextDisabled("= " + IltParse.N0(amount * IltBankCommands.NoteDenominations[denom].Value) + " pyreals");
+            else SafeImGui.TextDisabled("= " + IltParse.N0(amount));
         }
 
         string result = _actionResult;
-        if (result.Length > 0) ImGui.TextWrapped(result);
+        if (result.Length > 0) SafeImGui.TextWrapped(result);
     }
 
     private void RenderTransferForm()
@@ -478,9 +518,18 @@ internal sealed class IltBanking : IIltFeature
         ImGui.SetNextItemWidth(200);
         if (ImGui.Combo("Currency##xfer", ref idx, CurrencyNames, CurrencyNames.Length))
             Bank.TransferCurrencyIndex = idx;
+        bool notes = IltBankCommands.IsNoteTransfer(idx);
+        int denom = Math.Clamp(Bank.TransferNoteIndex, 0, NoteNames.Length - 1);
+        if (notes)
+        {
+            ImGui.SetNextItemWidth(200);
+            if (ImGui.Combo("Denomination##xfer", ref denom, NoteNames, NoteNames.Length)) Bank.TransferNoteIndex = denom;
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("The server moves the notes' pyreal value from your bank (/b t n <denomination> <count> <name>).");
+        }
 
         ImGui.SetNextItemWidth(200);
-        ImGui.InputTextWithHint("Amount##xfer", "e.g. 250000, 1.5m, 2b", ref _amountText, 32u);
+        ImGui.InputTextWithHint("Amount##xfer", notes ? "how many notes" : "e.g. 250000, 1.5m, 2b", ref _amountText, 32u);
         string target = Bank.TransferTarget;
         ImGui.SetNextItemWidth(200);
         if (ImGui.InputTextWithHint("Recipient##xfer", "character name", ref target, 64u))
@@ -490,33 +539,37 @@ internal sealed class IltBanking : IIltFeature
         if (_amountText.Length > 0)
         {
             ImGui.SameLine();
-            if (amountOk) ImGui.TextDisabled("= " + IltParse.N0(amount));
-            else ImGui.TextColored(IltStyle.ColHp, "invalid amount");
+            if (!amountOk) ImGui.TextColored(IltStyle.ColHp, "invalid amount");
+            else if (notes) SafeImGui.TextDisabled("= " + IltParse.N0(IltBankCommands.NoteValue(denom, amount)) + " pyreals");
+            else SafeImGui.TextDisabled("= " + IltParse.N0(amount));
         }
 
         ImGui.BeginDisabled(!amountOk || string.IsNullOrWhiteSpace(Bank.TransferTarget));
         if (ImGui.Button("Send transfer..."))
         {
-            int cur = idx;
+            int cur = idx, note = notes ? denom : -1;
             long amt = amount;
             string who = Bank.TransferTarget.Trim();
+            string what = notes
+                ? $"{IltParse.N0(amt)} {IltBankCommands.NoteDenominations[denom].Label} trade notes ({IltParse.N0(IltBankCommands.NoteValue(denom, amt))} pyreals)"
+                : $"{IltParse.N0(amt)} {Currencies[cur].Name}";
             _ctx.Confirm("Confirm bank transfer",
-                $"Send {IltParse.N0(amt)} {Currencies[cur].Name} to {who}?\n\nThis cannot be undone.",
+                $"Send {what} to {who}?\n\nThis cannot be undone.",
                 () =>
                 {
-                    string err = SendTransfer(cur, amt, who);
+                    string err = SendTransfer(cur, amt, who, note);
                     _lastResult = err.Length > 0 ? err : "Transfer sent...";
                 },
                 "Send");
         }
         ImGui.EndDisabled();
-        if (_lastResult.Length > 0) ImGui.TextWrapped(_lastResult);
+        if (_lastResult.Length > 0) SafeImGui.TextWrapped(_lastResult);
     }
 
     private void RenderTransactionLog()
     {
         var snap = _txSnapshot;
-        ImGui.TextColored(IltStyle.ColTeal, $"Transactions ({snap.Length})");
+        SafeImGui.TextColored(IltStyle.ColTeal, $"Transactions ({snap.Length})");
         ImGui.SameLine();
         ImGui.SetNextItemWidth(180);
         ImGui.InputTextWithHint("##txfilter", "filter player / currency", ref _txFilter, 64u);
@@ -543,7 +596,7 @@ internal sealed class IltBanking : IIltFeature
                 ImGui.TableNextRow();
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(t.Timestamp.ToString("g"));
                 ImGui.TableNextColumn();
-                ImGui.TextColored(t.Type == "Sent" ? IltStyle.ColAmber : IltStyle.ColGreen, t.Type);
+                SafeImGui.TextColored(t.Type == "Sent" ? IltStyle.ColAmber : IltStyle.ColGreen, t.Type);
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(IltParse.N0(t.Amount));
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(t.Currency);
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(t.OtherPlayer);

@@ -49,12 +49,16 @@ internal static class LootCorpseTests
         r.Add("loot chain: without GetContainerContents an unseen item stays unseen (no crash)", UnseenItemOldEngine);
         r.Add("loot starvation: a corpse waiting behind far-off combat gets a turn, a close monster keeps combat", LootStarvation);
         r.Add("loot logging: a corpse held by combat is logged once, with the reason", HeldByCombatLoggedOnce);
+        r.Add("boost loot: our kill holds the next target until its corpse is looted (one kill, one loot)", BoostLootOneKillOneLoot);
+        r.Add("boost loot: the wait ends after BoostLootKillWaitMs, for a close monster, and with Boost Loot off", BoostLootHoldLimits);
+        r.Add("boost loot: looting the kill's corpse ends the wait; an older corpse does not", BoostLootWaitEndsOnKillCorpse);
         r.Add("monster ignore: a close Priority 0 monster neither holds combat nor starves the corpse", IgnoredMonsterDoesNotHoldLoot);
         r.Add("corpse close: a finished corpse is closed once (CloseContainer, API v76)", FinishedCorpseClosedOnce);
         r.Add("corpse close: an engine without CloseContainer leaves it to the next open (no close)", FinishedCorpseNotClosedOnOldEngine);
         r.Add("corpse close: an abandoned open corpse is closed once", AbandonedCorpseClosed);
         r.Add("corpse close: stopping the macro mid-loot closes the open corpse, not marked completed", MacroStopClosesCorpse);
         r.Add("loot pacing: a pickup waits for the last bend-down, and no retry is timed while it plays", PickupWaitsForAnimation);
+        r.Add("loot: a pack that takes none of an item's tries is left out; the item tries another, else looting stops", RefusingPackIsLeftOut);
         r.Add("loot pacing: no pickup (first or retry) while the server owes an answer to a cast; it goes on the UseDone", PickupWaitsForCastAnswer);
         r.Add("corpse close: not while the last item is between the corpse and the pack - it closes once the item is in the inventory", CloseWaitsForInventory);
         r.Add("loot pacing: an item merged into a stack in the pack is confirmed without the 4 s arrival wait", MergedPickupConfirmedQuickly);
@@ -396,6 +400,113 @@ internal static class LootCorpseTests
         Check.Eq(ActivityArbiter.Decide(in inputs), BotActivity.Looting, "so looting has the tick without needing a starved turn");
     }
 
+    // ── Boost Loot Priority: one kill, one loot (2026-10-14, Kelpie: the next target was locked
+    //    6 ms after each kill, the corpse came 3 s later, and corpses were looted in batches) ──
+
+    /// <summary>
+    /// A monster <paramref name="monsterMeters"/> away, Boost Loot Priority on, and combat's
+    /// HoldNewTarget wired to the plugin. The corpse is created only with <paramref name="withCorpse"/>.
+    /// </summary>
+    private static Bot BoostWorld(float monsterMeters, bool withCorpse, out CombatManager combat, bool boost = true)
+    {
+        BaseWorld(corpsePositioned: true);
+        FakeHost.Names[Monster] = "Ancient Water Elemental";
+        FakeHost.ItemTypes[Monster] = ItemTypeCreature;
+        FakeHost.Positions[Monster] = (Me0.Cell, Me0.X + monsterMeters, Me0.Y + 0.5f, Me0.Z);
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        bot.S.EnableCombat = true;
+        bot.S.MonsterRange = 50;
+        bot.S.BoostLootPriority = boost;
+        if (withCorpse) bot.Cache.OnCreateObject(Corpse);
+        _ = bot.Cache[unchecked((int)Monster)];
+        bot.Cache.OnUpdateHealth(Monster, 1f);
+        bot.Cache.Tick();
+        combat = new CombatManager(host, bot.S, bot.Cache);
+        combat.SetPlayerId(Player);
+        typeof(CombatManager).GetField("_lastScanTime", Any)?.SetValue(combat, DateTime.MinValue);
+        combat.ScanNearbyTargets();
+        bot.Set("_combatManager", combat);
+        combat.HoldNewTarget = () => (bool)bot.Call("BoostLootHoldsNewTarget")!;
+        return bot;
+    }
+
+    private static void BoostLootOneKillOneLoot()
+    {
+        var bot = BoostWorld(15f, withCorpse: false, out var combat);
+        Check.False((bool)bot.Call("BoostLootHoldsNewTarget")!, "no kill, no corpse: nothing to wait for");
+
+        // The kill lands; the corpse doesn't exist yet (ACE creates it after the death animation).
+        bot.Call("NoteBoostLootKill");
+        combat.HandleCombatTrigger();
+        Check.Eq(combat.activeTargetId, 0, "the next monster (15 m) is not locked while the corpse forms");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("[CombatTarget] next target waits: Boost Loot Priority")), "said once");
+        Check.True(bot.HasLootWork(), "the forming corpse is loot work");
+        Check.False(combat.IsUnderCloseAttack, "nothing locked, nothing close: not engaged");
+        var waiting = new ArbiterInputs(true, false, combat.HasEngageableTarget, true, false, true,
+                                        combatEngaged: combat.IsUnderCloseAttack, boostLoot: true);
+        Check.Eq(ActivityArbiter.Decide(in waiting), BotActivity.Looting, "so the arbiter gives Looting the tick");
+
+        // The corpse arrives: it is claimed and opened before the next fight.
+        bot.Cache.OnCreateObject(Corpse);
+        bot.Cache.Tick();
+        Check.True(bot.HasLootWork(), "the kill's corpse is lootable");
+        combat.HandleCombatTrigger();
+        Check.Eq(combat.activeTargetId, 0, "still no new target with the corpse in range");
+        bot.Tick(BotActivity.Looting);
+        Check.Eq(bot.Get<int>("_targetCorpseId"), unchecked((int)Corpse), "the corpse is claimed");
+        Check.True(FakeHost.Uses.Contains(Corpse), "and opened");
+    }
+
+    private static void BoostLootHoldLimits()
+    {
+        // The corpse never comes: the wait runs out and the next monster is locked.
+        var bot = BoostWorld(15f, withCorpse: false, out var combat);
+        bot.Call("NoteBoostLootKill");
+        bot.Set("_boostLootKillAt", Environment.TickCount64 - RynthAiPlugin.BoostLootKillWaitMs - 1);
+        Check.False((bool)bot.Call("BoostLootHoldsNewTarget")!, "past BoostLootKillWaitMs: no hold");
+        combat.HandleCombatTrigger();
+        Check.Eq(combat.activeTargetId, unchecked((int)Monster), "the next monster is locked");
+
+        // A monster within 5 yd is fought at once.
+        var close = BoostWorld(2f, withCorpse: false, out var combat2);
+        close.Call("NoteBoostLootKill");
+        combat2.HandleCombatTrigger();
+        Check.Eq(combat2.activeTargetId, unchecked((int)Monster), "a monster at 2 m: locked, the corpse waits");
+
+        // Boost Loot off: the old order (combat first) is unchanged.
+        var off = BoostWorld(15f, withCorpse: false, out var combat3, boost: false);
+        off.Call("NoteBoostLootKill");
+        Check.False(off.HasLootWork(), "no forming-corpse loot work without Boost Loot");
+        combat3.HandleCombatTrigger();
+        Check.Eq(combat3.activeTargetId, unchecked((int)Monster), "the next monster is locked at once");
+
+        // Rare-only looting: most kills leave nothing to wait for.
+        var rare = BoostWorld(15f, withCorpse: false, out var combat4);
+        rare.S.LootOnlyRareCorpses = true;
+        rare.Call("NoteBoostLootKill");
+        combat4.HandleCombatTrigger();
+        Check.Eq(combat4.activeTargetId, unchecked((int)Monster), "Loot Only Rare Corpses: no wait");
+    }
+
+    private static void BoostLootWaitEndsOnKillCorpse()
+    {
+        var bot = BoostWorld(15f, withCorpse: false, out _);
+        var waiting = bot.Get<Dictionary<int, long>>("_corpseWaitingSince");
+        const int Older = 0x0BADC0DE, Fresh = 0x0BADF00D;
+
+        bot.Call("NoteBoostLootKill");
+        long kill = bot.Get<long>("_boostLootKillAt");
+        waiting[Older] = kill - 5000;
+        bot.Call("EndBoostLootKillWait", Older);
+        Check.Eq(bot.Get<long>("_boostLootKillAt"), kill, "a corpse from an earlier kill doesn't end the wait");
+
+        waiting[Fresh] = kill + 1500;
+        bot.Call("EndBoostLootKillWait", Fresh);
+        Check.Eq(bot.Get<long>("_boostLootKillAt"), 0L, "the kill's corpse (first seen after it) ends the wait");
+        Check.False((bool)bot.Call("BoostLootHoldsNewTarget")!, "so combat goes on at once");
+    }
+
     private static void HeldByCombatLoggedOnce()
     {
         var bot = StarvationWorld(15f, out _);
@@ -541,18 +652,56 @@ internal static class LootCorpseTests
         }
         Check.Eq(FakeHost.ExternalMoves.Count(m => m.Id == Gem), 1, "the pickup goes out once the character is still");
 
+        // The bot's Loot Retry Timeout (the LootBaseline default).
+        int retryWindowMs = bot.S.LootRetryTimeoutMs;
+
         // Its own bend-down plays for longer than 3 retry windows: no retry, no give-up.
         FakeHost.CastBusy = 1;
-        TickFor(bot, 1800);
+        TickFor(bot, retryWindowMs * 3 + 300);
         Check.Eq(FakeHost.ExternalMoves.Count(m => m.Id == Gem), 1, "no retry while the pickup animates");
         Check.False(FakeHost.Logs.Any(l => l.Contains("pickup failed")), "the item is not given up on");
 
         // Still again and the item still on the corpse: the retry window starts now.
         FakeHost.CastBusy = 0;
-        TickFor(bot, 250);
+        TickFor(bot, retryWindowMs / 2);
         Check.Eq(FakeHost.ExternalMoves.Count(m => m.Id == Gem), 1, "the retry window counts from when the character is still");
-        TickFor(bot, 500);
+        TickFor(bot, retryWindowMs);
         Check.Eq(FakeHost.ExternalMoves.Count(m => m.Id == Gem), 2, "then one retry");
+    }
+
+    // 2026-10-15, Drakkon: every item went to one pack the server wouldn't take loot into (its
+    // contents unknown to the client), 3 tries each, and every item on every corpse was skipped.
+    // A pack that takes none of an item's tries now counts as full for a while: the item gets one
+    // more round into another pack, and with none left looting stops with the pack-full message.
+    private static void RefusingPackIsLeftOut()
+    {
+        var refusals = new RynthCore.Plugin.RynthAi.Loot.PackRefusals();
+        refusals.Refuse(7, 1000);
+        Check.True(refusals.IsRefused(7, 1000 + RynthCore.Plugin.RynthAi.Loot.PackRefusals.HoldMs - 1), "refused for the hold");
+        Check.False(refusals.IsRefused(7, 1000 + RynthCore.Plugin.RynthAi.Loot.PackRefusals.HoldMs), "then tried again");
+        refusals.Refuse(8, 0);
+        refusals.Accepted(8);
+        Check.False(refusals.IsRefused(8, 1), "an item landing there ends the hold");
+
+        BaseWorld(corpsePositioned: true);
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        bot.Cache.OnCreateObject(Corpse);
+        bot.Cache.Tick();
+        bot.Tick(BotActivity.Looting);
+        bot.Cache.OnCreateObject(Gem);
+        bot.Cache.Tick();
+        bot.P.OnViewObjectContents(Corpse);
+
+        // The main pack (the only destination here) never takes the gem: it stays on the corpse.
+        int retryWindowMs = bot.S.LootRetryTimeoutMs;
+        TickFor(bot, retryWindowMs * 4 + 600);
+        Check.True(FakeHost.ExternalMoves.Count(m => m.Id == Gem) >= 3, "three tries into the main pack");
+        Check.True(FakeHost.ExternalMoves.Where(m => m.Id == Gem).All(m => m.Target == Player), "all into the main pack");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("took none of 3 tries") && l.Contains("trying another pack")), "the refusing pack is left out, said once");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("no pack has a free slot")), "no other pack: the corpse is left");
+        Check.True(FakeHost.Chat.Any(l => l.Contains("Pack full")), "and the player is told");
+        Check.False(FakeHost.Logs.Any(l => l.Contains("pickup failed")), "not three more wasted tries into the same pack");
     }
 
     // A pickup sent while Bloodstone Bolt VII was unanswered came back

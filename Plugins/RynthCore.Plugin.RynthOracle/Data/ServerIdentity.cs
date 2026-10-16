@@ -1,4 +1,5 @@
 using System;
+using RynthCore.Plugin.Shared;
 using RynthCore.PluginSdk;
 
 namespace RynthCore.Plugin.RynthOracle.Data;
@@ -20,6 +21,8 @@ internal static class ServerTags
 /// only load or show where <see cref="Allows"/> says so; untagged (retail) ones work anywhere.
 ///
 /// Sources, best first:
+///   0. Engine API v86 GetServerStateJson (ServerStateClient): RynthCore's active server, with
+///      this character's overrides and the Diagnostics page's server pick applied (FromEngine).
 ///   1. Engine API v75 GetServerInfo: the engine's own verdict for Aelrynth (connect host,
 ///      announced world name, Bank mod properties) and the world name the server announced
 ///      at login. Never the launcher profile name.
@@ -28,7 +31,8 @@ internal static class ServerTags
 ///      mod's player properties 9101-9103, which only Aelrynth sends.
 /// Aelrynth's live config still names the world "Aeshnidae" (its earlier name); both count.
 /// ConquestAC and Levistras are matched on their world names, as upstream does
-/// (Decal's CharacterFilter.Server).
+/// (Decal's CharacterFilter.Server). Infinite Leaftide has no RynthOracle pages: its screens are
+/// RynthILT's, so RynthCore's "ilt" server gives no tag here.
 /// </summary>
 internal sealed class ServerIdentity
 {
@@ -51,8 +55,20 @@ internal sealed class ServerIdentity
         Set("", "", "not logged in");
     }
 
-    public void Refresh(RynthCoreHost host, uint playerId)
+    /// <param name="engine">
+    /// RynthCore's server list (plugin API v86, ServerStateClient); null on older engines. When there,
+    /// it decides: it already applies this character's overrides and the Diagnostics page's pick.
+    /// </param>
+    public void Refresh(RynthCoreHost host, uint playerId, EngineServerState? engine = null)
     {
+        if (engine != null)
+        {
+            string fallbackWorld = host.TryGetWorldName(out string fw) ? fw.Trim() : "";
+            FromEngine(engine, fallbackWorld, out string t, out string wn, out string src);
+            Set(t, wn, src);
+            return;
+        }
+
         string tag, world, source;
         if (host.TryGetServerInfo(out bool aelrynth, out bool staging, out string announced))
         {
@@ -84,6 +100,59 @@ internal sealed class ServerIdentity
         }
         Set(tag, world, source);
     }
+
+    /// <summary>
+    /// The identity from RynthCore's server list. An active server decides the tag (its own, or ""
+    /// for a server RynthOracle has nothing for). With none active, the world name may still tag a
+    /// server the engine doesn't know (Conquest without RynthConquest loaded), but never one the
+    /// engine lists: that one is off on purpose (not detected, or this character's override).
+    /// Pure: the tests drive it.
+    /// </summary>
+    internal static void FromEngine(EngineServerState engine, string fallbackWorld, out string tag, out string world, out string source)
+    {
+        world = engine.World.Length > 0 ? engine.World : (fallbackWorld ?? "").Trim();
+        if (engine.HasActive)
+        {
+            tag = TagForEngineId(engine.Active);
+            EngineServer? s = engine.Find(engine.Active);
+            string how = engine.Picked ? "picked by hand"
+                : s != null && s.Force.Equals("on", StringComparison.OrdinalIgnoreCase) ? "forced on for this character"
+                : s != null && s.Reason.Length > 0 ? s.Reason : "detected";
+            string name = engine.ActiveName.Length > 0 ? engine.ActiveName : engine.Active;
+            source = $"RynthCore: {name} ({how})" + (tag.Length == 0 ? " - no RynthOracle pages for it" : "");
+            return;
+        }
+
+        tag = TagForWorld(world);
+        string id = EngineIdForTag(tag);
+        if (tag.Length > 0 && id.Length > 0 && engine.Find(id) != null)
+        {
+            source = $"RynthCore: {tag} is off for this world (not detected, or overridden)";
+            tag = "";
+            return;
+        }
+        source = tag.Length > 0
+            ? $"world name \"{world}\" (RynthCore has no {tag} server loaded)"
+            : "RynthCore: no server active (retail features only)";
+    }
+
+    /// <summary>The tag for a RynthCore server id; "" for servers without RynthOracle features.</summary>
+    public static string TagForEngineId(string? id) => (id ?? "").Trim().ToLowerInvariant() switch
+    {
+        EngineServerState.AelrynthId => ServerTags.Aelrynth,
+        "conquest" => ServerTags.Conquest,
+        "levistras" => ServerTags.Levistras,
+        _ => "",
+    };
+
+    /// <summary>The RynthCore server id for a tag; "" for none.</summary>
+    public static string EngineIdForTag(string? tag) => tag switch
+    {
+        ServerTags.Aelrynth => EngineServerState.AelrynthId,
+        ServerTags.Conquest => "conquest",
+        ServerTags.Levistras => "levistras",
+        _ => "",
+    };
 
     /// <summary>The tag for a world name; "" for servers without their own features.</summary>
     public static string TagForWorld(string? world)

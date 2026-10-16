@@ -1572,7 +1572,8 @@ public class WorldObjectCache
     // Snapshot overload — caller supplies an already-built inventory list (AutoCram
     // reuses its single per-tick GetDirectInventory snapshot here; do NOT re-refresh).
     public static int FindPackFor(IReadOnlyList<WorldObject> inv, int playerId,
-                                  bool includeMainPack, int requireFree, RynthCoreHost? host = null)
+                                  bool includeMainPack, int requireFree, RynthCoreHost? host = null,
+                                  Func<int, bool>? skip = null)
     {
         if (inv == null || playerId == 0) return 0;
         if (requireFree < 1) requireFree = 1;
@@ -1593,6 +1594,7 @@ public class WorldObjectCache
             // Skip foci — technically containers but reserved for spell components.
             if (!string.IsNullOrEmpty(p.Name)
                 && p.Name.IndexOf("Foci", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+            if (skip != null && skip(p.Id)) continue; // the server refused it lately (PackRefusals)
             int capacity = p.Values(LongValueKey.ItemsCapacity, 0);
             if (capacity <= 0) continue; // capacity unknown — don't risk the move
             int used = 0;
@@ -1612,7 +1614,7 @@ public class WorldObjectCache
         // Dequip fallback: the bow needs ONE free main-pack slot; a dequip into a
         // non-full main pack is AV-safe (the AV is only on a genuinely FULL target).
         int mainFree = 102 - mainUsed;
-        return mainFree > 0 ? playerId : 0;
+        return mainFree > 0 && !(skip != null && skip(playerId)) ? playerId : 0;
     }
 
     /// <summary>
@@ -1623,7 +1625,9 @@ public class WorldObjectCache
     /// (2026-10-02). A move needs an explicit target, and the engine refuses a move into a
     /// full pack of ours, so this finds one with room.
     /// </summary>
-    public static int FindLootDestination(IReadOnlyList<WorldObject> inv, int playerId, RynthCoreHost? host = null)
+    /// <remarks><paramref name="skip"/>: packs (or the player id, for the main pack) the server refused lately.</remarks>
+    public static int FindLootDestination(IReadOnlyList<WorldObject> inv, int playerId, RynthCoreHost? host = null,
+                                          Func<int, bool>? skip = null)
     {
         if (inv == null || playerId == 0) return 0;
         int mainUsed = 0; // same tally as FindPackFor
@@ -1635,8 +1639,8 @@ public class WorldObjectCache
             if (host.HasValue && IsWieldable(p) && IsWieldedByPlayer(host.Value, p)) continue;
             mainUsed++;
         }
-        if (102 - mainUsed > 0) return playerId;
-        return FindPackFor(inv, playerId, includeMainPack: false, requireFree: 1, host);
+        if (102 - mainUsed > 0 && !(skip != null && skip(playerId))) return playerId;
+        return FindPackFor(inv, playerId, includeMainPack: false, requireFree: 1, host, skip);
     }
 
     /// <summary>

@@ -1,16 +1,18 @@
 // MiniRemoteHud.cs — The Mini Remote (UtilityBelt-style) for RynthAi. Render thread only.
 //
-// One window with tabs: Remote (the sections below), the universal tabs Quests and Pets (every
-// world, MiniRemote/), and on Infinite Leaftide the RynthILT plugin's ILT tabs (Character,
-// Banking, Gear, Charms, Games: RynthILT.Hub GetTabs / RenderTab through IltClient; an ILT tab
+// One window with tabs: Remote (the sections below), the universal tabs Pets and Crafting (every
+// world, MiniRemote/; the Quests tab moved to RynthOracle 2026-10-13), and on Infinite Leaftide
+// the RynthILT plugin's ILT tabs (Banking, Gear, Charms, Games; its Character tab moved to
+// RynthOracle's Character tab 2026-10-13: RynthILT.Hub GetTabs / RenderTab through IltClient; an ILT tab
 // shows once the server reports its feature on, and never without RynthILT). The tab bar's
 // selection is saved (HudState.MiniRemoteTab) and "/ra hub open <section>" or RynthCore's
 // dashboard switch it (RequestTab). The Guardian and Bounties are RynthILT's RynthCore ILT
 // panels (the bar's ILT button).
-// Right-click on the remote: "Character" (Spells, Quests, Pets, Skills, Inventory, Item Count,
-// Inventory HUDs: windows every server has), then "Server: <name>", i.e. the installed server
-// plugins' windows for the world you're on, which RynthCore sends (ServerMenuModel), or "Treat
-// this world as ..." when none matches. The Options button holds the Mini Remote's own settings.
+// Right-click on the remote: "Character" (Spells, Pets, Crafting, RynthOracle's Character, Quests,
+// Quest Timers and Fellowship, Skills, Inventory, Item Count, Inventory HUDs: windows every server
+// has), then "Server: <name>", i.e. the installed server plugins' windows for the world you're on,
+// which RynthCore sends (ServerMenuModel), or a link to RynthCore's Options > Diagnostics (where a
+// server is forced) when none matches. The Options button holds the Mini Remote's own settings.
 // The V/H button stacks the sections (vertical) or lays them out in three columns (horizontal).
 //
 // Remote sections (each can be hidden from the Options menu):
@@ -30,12 +32,13 @@
 // All game actions are posted to the pump thread.
 //
 // RenderEmbedded draws the same sections and Options menu inside the engine's RynthAi dashboard
-// (its Mini Remote drawer, opened by the Hub launcher's right-click or the drawer tab) and
+// (its Mini Remote drawer, opened by the drawer tab) and
 // reports the size it wants; the drawer is sized from that. The drawer leaves out Toggles (the
 // dashboard it sits on already has those switches) and the tabs (it is too narrow for them).
 // RenderEmbedded(window: true) draws it in the engine's Mini Remote window instead (bar button,
 // /rc miniremote): tabs and Toggles included, and the floating window stays hidden meanwhile
-// (HudController), so that window is the one Mini Remote.
+// (HudController), so that window is the one Mini Remote. RynthCore 2026.10.5.46+ shows the tabs
+// as its own sections (RynthPluginGetSectionsJson) and asks for the remote alone (tabs: false).
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -136,7 +139,7 @@ internal sealed class MiniRemoteHud
     /// themselves from the result) instead of a window of their own. Returns the content size it
     /// wants: the selected tab's width, and the height drawn.
     /// </summary>
-    public Vector2 RenderEmbedded(bool window = false)
+    public Vector2 RenderEmbedded(bool window = false, bool tabs = true)
     {
         var s = _hud.State;
         _slotMenuIndex = -1;
@@ -146,7 +149,8 @@ internal sealed class MiniRemoteHud
         ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(4, 3));
         try
         {
-            float width = RenderBody(s, _hud.Remote(), allowTabs: !InDrawer);
+            // Without tabs (RynthCore's sections show them instead) the remote alone.
+            float width = RenderBody(s, _hud.Remote(), allowTabs: tabs && !InDrawer);
 
             if (_onRemoteTab && _slotMenuIndex < 0 && ImGui.IsWindowHovered(ImGuiHoveredFlags.ChildWindows) && ImGui.IsMouseReleased(ImGuiMouseButton.Right))
                 ImGui.OpenPopup(MenuPopup);
@@ -214,7 +218,7 @@ internal sealed class MiniRemoteHud
                 // The tab draws into a child of its own size; tables in it scroll inside it.
                 ImGui.BeginChild(TabBodyId(tab.Id), tab.Size, ImGuiChildFlags.None, ImGuiWindowFlags.None);
                 bool drawn = tab.Ilt ? remote!.Ilt.RenderTab(tab.Id) : remote!.RenderTab(tab.Id);
-                if (!drawn) ImGui.TextDisabled(tab.Ilt ? "RynthILT isn't drawing this tab (not loaded, or not ready yet)." : "Not ready.");
+                if (!drawn) SafeImGui.TextDisabled(tab.Ilt ? "RynthILT isn't drawing this tab (not loaded, or not ready yet)." : "Not ready.");
                 ImGui.EndChild();
                 width = Math.Max(width, tab.Size.X);
                 ImGui.EndTabItem();
@@ -313,7 +317,7 @@ internal sealed class MiniRemoteHud
         if (ImGui.Button((s.MiniRemoteHorizontal ? "H" : "V") + "##mrlayout", new Vector2(HeaderButtonWidth, 0)))
             s.MiniRemoteHorizontal = !s.MiniRemoteHorizontal;
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(s.MiniRemoteHorizontal ? "Horizontal: sections in columns. Click to stack them." : "Vertical: sections stacked. Click to lay them out in columns.");
+            SafeImGui.SetTooltip(s.MiniRemoteHorizontal ? "Horizontal: sections in columns. Click to stack them." : "Vertical: sections stacked. Click to lay them out in columns.");
         ImGui.SameLine();
         // Opened by RenderOptions: this row sits inside the Remote tab, whose ID the popup must not get.
         if (ImGui.Button("Options##mropts", new Vector2(HeaderButtonWidth, 0))) _openOptions = true;
@@ -418,7 +422,7 @@ internal sealed class MiniRemoteHud
 
     private static void Stat(string label, string value)
     {
-        ImGui.TextColored(ColLabel, label);
+        SafeImGui.TextColored(ColLabel, label);
         ImGui.SameLine();
         ImGui.TextUnformatted(value);
     }
@@ -438,7 +442,7 @@ internal sealed class MiniRemoteHud
         if (v.PassUpTracked)
         {
             Stat("Pass-up:", HudDraw.Compact(v.PassUpPerHour) + "/h");
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip($"{v.LumPassUp:N0} this session.\n{PassUpTooltip}");
+            if (ImGui.IsItemHovered()) SafeImGui.SetTooltip($"{v.LumPassUp:N0} this session.\n{PassUpTooltip}");
         }
         Stat("Kills:", HudDraw.Compact(v.KillsPerHour) + "/h");
         if (remote == null || !remote.Ilt.TryGetRates(out double coins, out double pyreals)) return;
@@ -446,7 +450,53 @@ internal sealed class MiniRemoteHud
         Stat("Pyr:", HudDraw.Compact(pyreals) + "/h");
     }
 
-    /// <summary>What the pass-up figure is (RynthILT's Character tab says the same).</summary>
+    /// <summary>
+    /// RynthCore's Mini Remote "Session Stats" section (surface "section:session"): the one session,
+    /// totals and per-hour rates, with Reset and Report. RynthTracker, RynthOracle and RynthILT read
+    /// these same numbers (RynthAi.Hub SessionStats), so every XP/h and lum/h on screen agrees.
+    /// Render thread.
+    /// </summary>
+    public void RenderSessionSection()
+    {
+        var v = _hud.SessionStats?.View ?? RynthCore.Plugin.Shared.SessionStatsView.Empty;
+        bool running = !ReferenceEquals(v, RynthCore.Plugin.Shared.SessionStatsView.Empty);
+        SafeImGui.TextDisabled(running
+            ? "Session " + MiniRemoteText.Duration(TimeSpan.FromSeconds(SessionClock(v)))
+            : "The session starts once you are in the world.");
+        if (ImGui.BeginTable("##mrsession", 3, ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.SizingStretchProp))
+        {
+            ImGui.TableSetupColumn("Stat", ImGuiTableColumnFlags.WidthStretch, 1.2f);
+            ImGui.TableSetupColumn("Session", ImGuiTableColumnFlags.WidthStretch, 1f);
+            ImGui.TableSetupColumn("Per hour", ImGuiTableColumnFlags.WidthStretch, 1f);
+            ImGui.TableHeadersRow();
+            SessionRow("XP", HudDraw.Compact(v.Xp), HudDraw.Compact(v.XpPerHour));
+            SessionRow("Luminance", HudDraw.Compact(v.Lum), HudDraw.Compact(v.LumPerHour));
+            // The last five minutes' luminance, and that pace for an hour.
+            SessionRow("  last 5 min", HudDraw.Compact(v.LumLast5Min), HudDraw.Compact(v.LumLast5Min * 12.0));
+            if (v.PassUpTracked) SessionRow("  pass-up", HudDraw.Compact(v.LumPassUp), HudDraw.Compact(v.PassUpPerHour), PassUpTooltip);
+            if (v.Rad > 0) SessionRow("Radiance", HudDraw.Compact(v.Rad), HudDraw.Compact(v.RadPerHour));
+            SessionRow("Kills", v.Kills.ToString("N0"), HudDraw.Compact(v.KillsPerHour));
+            if (v.XpPerKill > 0) SessionRow("  XP per kill", HudDraw.Compact(v.XpPerKill), string.Empty);
+            if (v.Deaths > 0) SessionRow("Deaths", v.Deaths.ToString("N0"), string.Empty);
+            ImGui.EndTable();
+        }
+        RenderStatButtons(_hud.Remote());
+    }
+
+    /// <summary>One Session Stats row: label, session total, per hour (and an optional tooltip on the label).</summary>
+    private static void SessionRow(string label, string total, string perHour, string tooltip = "")
+    {
+        ImGui.TableNextRow();
+        ImGui.TableNextColumn();
+        SafeImGui.TextColored(ColLabel, label);
+        if (tooltip.Length > 0 && ImGui.IsItemHovered()) SafeImGui.SetTooltip(tooltip);
+        ImGui.TableNextColumn();
+        ImGui.TextUnformatted(total);
+        ImGui.TableNextColumn();
+        ImGui.TextUnformatted(perHour);
+    }
+
+    /// <summary>What the pass-up figure is (RynthILT's session rates say the same).</summary>
     private const string PassUpTooltip =
         "Luminance that reached your bank without a \"You've banked\" line: your vassals' pass-up.\n"
         + "Fellowship and Zone Share splits arrive the same silent way and are included.";
@@ -465,7 +515,7 @@ internal sealed class MiniRemoteHud
         if (c.TargetDistance >= 0)
         {
             ImGui.SameLine();
-            ImGui.TextDisabled($"{c.TargetDistance:F0}yd");
+            SafeImGui.TextDisabled($"{c.TargetDistance:F0}yd");
         }
         HealthBar("##mrtargethp", c.TargetHealth);
     }
@@ -484,7 +534,7 @@ internal sealed class MiniRemoteHud
         if (name.Length == 0) { ImGui.TextDisabled("No combat pet set"); return; }
         ImGui.TextUnformatted(name);
         var col = status switch { "Ready" => ColReady, "Out" => ColOut, "Healing" => ColBusy, _ => ColEmpty };
-        ImGui.TextColored(col, status);
+        SafeImGui.TextColored(col, status);
     }
 
     private static void RenderSummon(MiniRemoteController? remote, CombatHudSnapshot c)
@@ -513,14 +563,14 @@ internal sealed class MiniRemoteHud
             }
             else
             {
-                ImGui.TextColored(left.TotalSeconds <= 30 ? ColEmpty : ColOut, text);
+                SafeImGui.TextColored(left.TotalSeconds <= 30 ? ColEmpty : ColOut, text);
             }
         }
         else
         {
             // No RemainingLifespan from the server: show how long it has been out instead.
             var up = TimeSpan.FromMilliseconds(Math.Max(0, now - c.PetSeenAtMs));
-            ImGui.TextDisabled($"Out {FormatClock(up)}");
+            SafeImGui.TextDisabled($"Out {FormatClock(up)}");
             if (ImGui.IsItemHovered()) ImGui.SetTooltip("The server hasn't reported this summon's lifespan yet.");
         }
     }
@@ -556,7 +606,7 @@ internal sealed class MiniRemoteHud
                 _hud.SessionStats?.RequestReset();
                 _hud.Remote()?.Ilt.Command("rates reset");   // RynthILT's coin / pyreal session too
             });
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Start the session stats over (the Tracker panel keeps its own session).");
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Start the session stats over (RynthTracker, RynthOracle and RynthILT follow this session).");
         ImGui.SameLine();
         if (ImGui.Button("Report", new Vector2(w, 0))) _hud.Post(ReportToChat);
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Print the session rates in your chat window (local only).");
@@ -604,7 +654,7 @@ internal sealed class MiniRemoteHud
                 if (e.IsEmpty) ImGui.PopStyleColor();
             }
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip(e.IsEmpty ? EmptySlotTip(i) : $"{e.Name}\n{count:N0} carried\nClick to use, right-click for options.\nCtrl+wheel: box size.");
+                SafeImGui.SetTooltip(e.IsEmpty ? EmptySlotTip(i) : $"{e.Name}\n{count:N0} carried\nClick to use, right-click for options.\nCtrl+wheel: box size.");
             int slotIndex = i;
             if (clicked)
             {
@@ -678,7 +728,7 @@ internal sealed class MiniRemoteHud
     {
         if (!ImGui.BeginPopup(SlotPopup)) return;
         _slotMenuIndex = index;
-        ImGui.TextDisabled(e.IsEmpty ? $"Slot {index + 1:00}" : $"Slot {index + 1:00}: {e.Name}");
+        SafeImGui.TextDisabled(e.IsEmpty ? $"Slot {index + 1:00}" : $"Slot {index + 1:00}: {e.Name}");
         string candidate = _hud.AssignCandidate;
         if (ImGui.MenuItem(candidate.Length > 0 ? $"Assign {candidate}" : "Assign selected item"))
             _hud.Post(() => _hud.SetSlotFromSelection(index));
@@ -805,8 +855,9 @@ internal sealed class MiniRemoteHud
     }
 
     /// <summary>
-    /// "Character": RynthAi's own windows, the universal Mini Remote tabs (Quests, Pets), and
-    /// RynthCore's panels when it runs /rc commands.
+    /// "Character": RynthAi's own windows, the universal Mini Remote tabs (Pets, Crafting), RynthOracle's
+    /// quest and fellowship windows (the Quests and Fellowship tabs moved there 2026-10-13) and
+    /// RynthCore's panels, when chat commands can be run.
     /// </summary>
     private void RenderCharacterMenu(HudState s)
     {
@@ -822,6 +873,17 @@ internal sealed class MiniRemoteHud
         }
         if (_hud.Host.HasInvokeChatParser)
         {
+            // RynthOracle's commands (it toggles its own windows; without RynthOracle nothing answers "/ro").
+            // The character overview and its session are RynthOracle's Character tab (2026-10-13);
+            // Infinite Leaftide's charms and bank stay RynthILT's tabs (the server section below).
+            if (ImGui.MenuItem("Character##mrcharacter", MovedTabs.OracleCharacter)) _hud.RunEngineCommand(MovedTabs.OracleCharacter);
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("RynthOracle's Character tab: the character and this session.");
+            if (ImGui.MenuItem("Quests##mrquests", "/ro")) _hud.RunEngineCommand("/ro");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("RynthOracle: quest timers, tracking and rewards.");
+            if (ImGui.MenuItem("Quest Timers##mrqtimers", "/ro timers")) _hud.RunEngineCommand("/ro timers");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("RynthOracle's Quest Timers window: your tracked quests and the time left on each.");
+            if (ImGui.MenuItem("Fellowship##mrfellow", "/ro fellowship")) _hud.RunEngineCommand("/ro fellowship");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("RynthOracle's Fellowship tab: members, levels and XP sharing.");
             if (ImGui.MenuItem("Skills##mrskills", "/rc skills")) _hud.RunEngineCommand("/rc skills toggle");
             if (ImGui.MenuItem("Inventory##mrinv", "/rc inventory")) _hud.RunEngineCommand("/rc inventory");
             if (ImGui.MenuItem("Item Count##mritemcount", "/rc itemcount")) _hud.RunEngineCommand("/rc itemcount");
@@ -852,17 +914,21 @@ internal sealed class MiniRemoteHud
             if (!g.Active && !forcedHere) continue;
             any = true;
             ImGui.Separator();
-            ImGui.TextDisabled("Server: " + (g.Active ? g.Name : g.Name + " (forced)"));
+            SafeImGui.TextDisabled("Server: " + (g.Active ? g.Name : g.Name + " (forced)"));
             foreach (ServerMenuEntry item in g.Items)
             {
                 string? tab = ServerMenuModel.TabOf(item.Feature);
-                // Universal tabs are under Character; RynthCore 2026.10.5.30 and older list them here too.
-                if (tab != null && MiniRemoteTabs.Parse(tab) != null) continue;
+                // Universal tabs are under Character; RynthCore 2026.10.5.30 and older list them here too
+                // (with the retired Quests tab, now RynthOracle's).
+                if (tab != null && (MiniRemoteTabs.Parse(tab) != null || tab.Equals("quests", StringComparison.OrdinalIgnoreCase))) continue;
+                // Character (an older RynthCore still lists it) moved out: it is under Character above
+                // (RynthOracle's Character tab).
+                if (tab != null && MovedTabs.CommandFor(tab) != null) continue;
                 bool enabled = tab == null || TabAvailable(remote, tab);
                 if (ImGui.MenuItem(item.Label + "##mrsrv_" + g.Id, item.Command, false, enabled))
                     RunServerItem(item, tab);
                 if (item.Tooltip.Length > 0 && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                    ImGui.SetTooltip(enabled ? item.Tooltip : item.Tooltip + "\nShows once the server reports this feature on.");
+                    SafeImGui.SetTooltip(enabled ? item.Tooltip : item.Tooltip + "\nShows once the server reports this feature on.");
             }
             if (ilt) remote?.Ilt.RenderSection(RynthIltHub.SectionIltStatus);
         }
@@ -870,14 +936,12 @@ internal sealed class MiniRemoteHud
 
         ImGui.Separator();
         ImGui.TextDisabled("Server: no installed server plugin matches this world");
-        foreach (ServerMenuGroup g in groups)
-        {
-            if (g.ForceCommand.Length == 0) continue;
-            if (ImGui.MenuItem("Treat this world as " + g.Name + "##mrforce_" + g.Id, g.ForceCommand))
-                ForceServer(g, remote);
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Shows this server's windows here anyway. It only says which world this is:\nthe server still decides which features exist.");
-        }
+        // Forcing a server lives in one place since 2026-10-13: RynthCore's Options > Diagnostics.
+        if (_hud.Host.HasInvokeChatParser && ImGui.MenuItem("Force a server... (Options > Diagnostics)##mrforce", MovedTabs.Diagnostics))
+            _hud.RunEngineCommand(MovedTabs.Diagnostics);
+        if (ImGui.IsItemHovered())
+            SafeImGui.SetTooltip("RynthCore's server selection (Options > Diagnostics) shows a server's windows here anyway.\n"
+                                 + "It only says which world this is: the server still decides which features exist.");
     }
 
     /// <summary>A Mini Remote tab switches here and now; anything else is a RynthCore command.</summary>
@@ -885,16 +949,6 @@ internal sealed class MiniRemoteHud
     {
         if (tab != null) _hud.HandleTabCommand(tab, "show");
         else if (item.Command.Length > 0) _hud.RunEngineCommand(item.Command);
-    }
-
-    /// <summary>
-    /// Forces a server: RynthCore's session override, plus for Infinite Leaftide this character's
-    /// "Treat this world as ILT" (so RynthILT's tabs come too).
-    /// </summary>
-    private void ForceServer(ServerMenuGroup g, MiniRemoteController? remote)
-    {
-        if (g.Id.Equals(IltServerId, StringComparison.OrdinalIgnoreCase) && remote != null) remote.Ilt.ForceIlt = true;
-        _hud.RunEngineCommand(g.ForceCommand);
     }
 
     /// <summary>RynthILT reports that ILT tab's feature on (false without RynthILT).</summary>
