@@ -128,6 +128,7 @@ internal static class Program
         VTankHotkeyTests.Register(runner);
         SaveFailureTests.Register(runner);
         DoorTests.Register(runner);
+        ServerPolicyTests.Register(runner);
         BlankLoadTests.Register(runner);
         GiveProfileTests.Register(runner);
         TinkerTests.Register(runner);

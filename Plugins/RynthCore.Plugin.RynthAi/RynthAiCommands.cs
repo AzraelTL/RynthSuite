@@ -2805,6 +2805,28 @@ public sealed partial class RynthAiPlugin
 
     private void HandleDungeonNavPatrolCommand(string[] parts) => HandleDungeonNavPatrol();
 
+    /// <summary>Takes the auto-generated patrol off the character: no patrol route, navigation off.</summary>
+    private void StopPatrolForServer()
+    {
+        _dunPatrolActive = false;
+        var s = _dashboard?.Settings;
+        if (s == null) return;
+        s.EnableNavigation = false;
+        s.CurrentRoute = new NavRouteParser();
+        _navigationEngine?.Stop();
+    }
+
+    /// <summary>DreamWeave's Thread lines in chat ("The Thread Gem opens a way into ...", "[REALM] ... eph=1"):
+    /// where the character is, for ServerPolicy. Logged when it changes.</summary>
+    private void NoteServerPolicyChat(string text)
+    {
+        bool was = ServerPolicy.Run != null;
+        uint cell = Host.HasGetPlayerPose && Host.TryGetPlayerPose(out uint c, out _, out _, out _, out _, out _, out _, out _) ? c : 0;
+        if (!ServerPolicy.NoteChat(text, cell)) return;
+        bool now = ServerPolicy.Run != null;
+        if (now != was) Host.Log(now ? "[RynthAi] ServerPolicy: in a Thread (the server says so)." : "[RynthAi] ServerPolicy: out of the Thread.");
+    }
+
     /// <summary>
     /// Builds a Circular hunt patrol covering every cell in the current dungeon landblock.
     /// Called from both /ra dunnav-patrol and the NavPanel "Dungeon Patrol" button.
@@ -2851,6 +2873,14 @@ public sealed partial class RynthAiPlugin
 
     private void BuildDunPatrol(bool isRebuild, bool settingsChanged = false)
     {
+        // The one way into the dungeon patrol (the command, the dashboard button, a meta's "Patrol", the hazard
+        // reroute): where a server's owners asked for it to be off (a Thread on DreamWeave) nothing is built (ServerPolicy).
+        if (ServerPolicy.PatrolOff(Host))
+        {
+            if (_dunPatrolActive) StopPatrolForServer();
+            if (!isRebuild) ChatLine(ServerPolicy.PatrolOffMessage);
+            return;
+        }
         var settings = _dashboard?.Settings;
         if (settings == null) { if (!isRebuild) ChatLine("[RynthAi] Settings not ready."); return; }
         var patrolOptions = PatrolOptionsFrom(settings);
@@ -3033,6 +3063,9 @@ public sealed partial class RynthAiPlugin
     private void TickDunPatrolHazardReroute()
     {
         if (!_dunPatrolActive) return;
+        // A patrol running when the character enters a Thread on DreamWeave (or one that began before the world name
+        // was known): stopped the moment it is (ServerPolicy).
+        if (ServerPolicy.PatrolOff(Host)) { StopPatrolForServer(); ChatLine(ServerPolicy.PatrolOffMessage); return; }
         if (_objectCache == null) return;
 
         var settings = _dashboard?.Settings;

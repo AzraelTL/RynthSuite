@@ -297,6 +297,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         Loot.T11ItemSupport.Reset();
         // A real logout: the next OnLoginComplete is a fresh login, not a hot reload.
         ClearInGameMarker();
+        ServerPolicy.Forget();   // the next login's [REALM] line says whether the character is in a Thread
         TeardownSession();
     }
 
@@ -2285,6 +2286,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     public override void OnChatWindowText(string? text, int chatType, ref int eat)
     {
         if (string.IsNullOrEmpty(text)) return;
+        try { NoteServerPolicyChat(text); } catch { }   // DreamWeave's Thread lines (ServerPolicy)
         try { NoteDoorServerText(text); } catch { }   // "The door is locked!" (the door logic)
         try { _sessionStats?.OnChatWindowText(text); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats chat"); }
         // The Meta Manager eats the reply to its own /myquests poll (only that).
