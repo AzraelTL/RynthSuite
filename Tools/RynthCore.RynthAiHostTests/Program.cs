@@ -126,6 +126,7 @@ internal static class Program
         LootPacingTests.Register(runner);
         CorpseCloseTests.Register(runner);
         VTankHotkeyTests.Register(runner);
+        OneTouchHealTests.Register(runner);
         SaveFailureTests.Register(runner);
         DoorTests.Register(runner);
         ServerPolicyTests.Register(runner);

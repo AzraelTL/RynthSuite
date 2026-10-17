@@ -268,6 +268,7 @@ public static class VirindiTankProfileImporter
             OffhandId = row.OffhandId,
             PreferredAmmoItemId = row.PreferredAmmoItemId,
             PetDamage = row.PetDamage,
+            PreferredDamage = row.PreferredDamage,
         };
 
     private static void TryMergeMonsterFile(string jsonPath, LegacyUiSettings settings, Result result)
