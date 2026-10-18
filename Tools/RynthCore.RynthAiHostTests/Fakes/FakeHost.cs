@@ -51,6 +51,14 @@ internal static unsafe class FakeHost
     /// <summary>Item id -> container id. When it has entries at Create() time the host also gets
     /// GetObjectOwnershipInfo (opt-in, so tests written without it see no ownership, as before).</summary>
     public static readonly Dictionary<uint, uint> Containers = new();
+    /// <summary>Extra ids GetContainerContents lists for a container without them being in it (the
+    /// client lists what the player wields in the player's own contents; ownership says no container).</summary>
+    public static readonly Dictionary<uint, List<uint>> ContentsExtra = new();
+    /// <summary>Opt-in (set before Create): v87 GetWieldedItems answering <see cref="Equipped"/> (the
+    /// engine's EquipmentTracker: item -> EquipMask). <see cref="EquippedNotReady"/> answers -1.</summary>
+    public static bool EquippedCalls;
+    public static bool EquippedNotReady;
+    public static readonly Dictionary<uint, uint> Equipped = new();
     /// <summary>Item id -> the creature wielding it (GetObjectOwnershipInfo's wielder). Entries here
     /// also install GetObjectOwnershipInfo; an id in neither map reads as unknown ownership.</summary>
     public static readonly Dictionary<uint, uint> Wielders = new();
@@ -252,12 +260,14 @@ internal static unsafe class FakeHost
 
     public static void Reset()
     {
+        EquippedCalls = false; EquippedNotReady = false; Equipped.Clear();
+        RynthCore.Plugin.RynthAi.EquippedState.Invalidate();
         Nav3DCalls = false; Nav3DRings.Clear(); Nav3DLines.Clear(); Nav3DTriangles.Clear();
         Names.Clear(); Positions.Clear(); ItemTypes.Clear();
         Ints.Clear(); Doubles.Clear(); Quads.Clear(); Bools.Clear(); Strings.Clear();
         Skills.Clear(); SkillLevels.Clear(); Attributes.Clear();
         SpellIds.Clear(); DataIds.Clear(); InstanceIds.Clear(); Palettes.Clear(); KnownSpells.Clear(); NotAttackable.Clear(); Enchantments.Clear();
-        Containers.Clear(); Wielders.Clear(); Bitfields.Clear();
+        Containers.Clear(); ContentsExtra.Clear(); Wielders.Clear(); Bitfields.Clear();
         ServerTime = 0; Vitae = 1.0f; Portaling = false; PlayerPose = default; HasPose = true;
         Vitals = default; BaseVitals = default; WorldName = ""; AccountName = "";
         HeadingDeg = 0; Wcids.Clear(); Spellbook.Clear(); PlayerIdValue = 0;
@@ -319,6 +329,8 @@ internal static unsafe class FakeHost
             api.GetPlayerIdFn       = (IntPtr)(delegate* unmanaged[Cdecl]<uint>)&GetPlayerId;
         if (Containers.Count > 0 || Wielders.Count > 0)
             api.GetObjectOwnershipInfoFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint*, uint*, uint*, int>)&GetObjectOwnershipInfo;
+        if (EquippedCalls)
+            api.GetWieldedItemsFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint*, uint*, int, int>)&GetWieldedItems;
         if (ContentsCalls)
             api.GetContainerContentsFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint*, int, int>)&GetContainerContents;
         if (Bitfields.Count > 0)
@@ -449,6 +461,7 @@ internal static unsafe class FakeHost
             api.GetObjectPropertiesFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, byte*, int, int>)&GetObjectProperties;
         }
         LastApi = api;
+        if (EquippedCalls) api.Version = Math.Max(api.Version, 87u);   // v87 GetWieldedItems
         return new RynthCoreHost(api);
     }
 
@@ -569,11 +582,27 @@ internal static unsafe class FakeHost
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetWieldedItems(uint* ids, uint* locations, int max)
+    {
+        if (EquippedNotReady) return -1;
+        int n = 0;
+        foreach (var kv in Equipped)
+        {
+            if (n >= max) break;
+            ids[n] = kv.Key; locations[n] = kv.Value; n++;
+        }
+        return n;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int GetContainerContents(uint container, uint* output, int max)
     {
         int n = 0;
         foreach (var kv in Containers)
             if (kv.Value == container && n < max) output[n++] = kv.Key;
+        if (ContentsExtra.TryGetValue(container, out var extra))
+            foreach (uint id in extra)
+                if (n < max) output[n++] = id;
         return n;
     }
 

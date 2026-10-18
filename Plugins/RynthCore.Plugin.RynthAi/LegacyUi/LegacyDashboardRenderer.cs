@@ -1013,6 +1013,7 @@ internal sealed partial class LegacyDashboardRenderer
                 TargetFPSBackground        = s.TargetFPSBackground,
                 EnableAutocram             = s.EnableAutocram,
                 PeaceModeWhenIdle          = s.PeaceModeWhenIdle,
+                RearmAfterVitals           = s.RearmAfterVitals,
                 StartMacroOnLogin          = s.StartMacroOnLogin,
                 PatrolOnLogin              = s.PatrolOnLogin,
                 YieldToVTank               = s.YieldToVTank,
@@ -1250,6 +1251,7 @@ internal sealed partial class LegacyDashboardRenderer
             s.TargetFPSBackground        = p.TargetFPSBackground;
             s.EnableAutocram             = p.EnableAutocram;
             s.PeaceModeWhenIdle          = p.PeaceModeWhenIdle;
+            if (p.RearmAfterVitals is bool rav) s.RearmAfterVitals = rav;
             s.StartMacroOnLogin          = p.StartMacroOnLogin;
             s.PatrolOnLogin              = p.PatrolOnLogin;
             s.YieldToVTank               = p.YieldToVTank;
@@ -1848,6 +1850,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.LootOnlyRareCorpses      = tmp.LootOnlyRareCorpses;
         dst.EnableGroundLoot         = tmp.EnableGroundLoot;
         dst.PeaceModeWhenIdle        = tmp.PeaceModeWhenIdle;
+        dst.RearmAfterVitals         = tmp.RearmAfterVitals;
         dst.RebuffWhenIdle           = tmp.RebuffWhenIdle;
         dst.RebuffSecondsRemaining   = tmp.RebuffSecondsRemaining;
         dst.RebuffTopOffSecondsRemaining = tmp.RebuffTopOffSecondsRemaining;

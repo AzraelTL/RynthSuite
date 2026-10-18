@@ -691,6 +691,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _combatManager.SetWeaponSwapGate(_weaponSwapGate);
         _combatManager.Vitals = _vitals;   // the script hook's request carries the player's vitals
         _combatManager.HoldIdlePeace = LootHoldsIdlePeace;
+        _combatManager.LastVitalCastAt = () => _buffManager?.LastVitalCastAt ?? DateTime.MinValue;
+        _combatManager.BuffingWantsTick = () => _buffManager != null
+            && (_buffManager.PendingSpellId != 0 || _buffManager.WantsVitalRecharge
+                || (_dashboard?.Settings?.EnableBuffing == true && _buffManager.NeedsAnyBuff()));
         _combatManager.HoldNewTarget = BoostLootHoldsNewTarget;   // Boost Loot Priority: one kill, one loot
         _combatManager.ManaReserveHold = spellId => _buffManager?.OffensiveCastHold(spellId);   // the mana reserve
         _combatManager.ManaCanEverAfford = spellId => _buffManager?.CanEverAfford(spellId) ?? true;   // script hook: never-payable spells

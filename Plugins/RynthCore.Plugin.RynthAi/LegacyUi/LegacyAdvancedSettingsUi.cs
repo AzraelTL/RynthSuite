@@ -313,6 +313,9 @@ internal sealed class LegacyAdvancedSettingsUi
 
                 ImGui.Spacing();
                 ImGui.Checkbox("Peace Mode When Idle", ref _settings.PeaceModeWhenIdle);
+                ImGui.Checkbox("Weapons Back After Heals", ref _settings.RearmAfterVitals);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("After a heal, restam or remana spell with nothing to fight, put the last fight's weapons (main hand and off hand) back on.");
                 ImGui.Checkbox("Start Macro On Login", ref _settings.StartMacroOnLogin);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Automatically starts the macro when RynthAi loads.");

@@ -19,6 +19,9 @@ public partial class BuffManager : IDisposable
     private DateTime _lastCastAttempt = DateTime.MinValue;
     /// <summary>When buffing last sent a cast (buff, vital or refill). The buffing-coma watchdog's sign of progress.</summary>
     public DateTime LastCastAttemptAt => _lastCastAttempt;
+    /// <summary>When the last heal, restam or remana spell went out (Weapons Back After Heals).</summary>
+    public DateTime LastVitalCastAt => _lastVitalCastAt;
+    private DateTime _lastVitalCastAt = DateTime.MinValue;
     // Throttles ChangeCombatMode(Magic) from EnsureMagicMode's "wand wielded but
     // mode != Magic" branch. Without this, when the server rejects/silently-drops
     // mode flips (e.g. wedged-target combat state), the branch fires every tick
@@ -2231,6 +2234,7 @@ public partial class BuffManager : IDisposable
             return VitalNo($"the client refused the cast (spell {spellId})");
         }
         sent = true;
+        _lastVitalCastAt = DateTime.Now;
         if (IsRecoveryVital(what)) NoteRecoveryAttempt();
         NoteCastIssued(spellId);
         if (_pendingVitalLabel == LabelMana) _manaStarvedLogged = false;   // the next starved spell logs again
@@ -2257,10 +2261,20 @@ public partial class BuffManager : IDisposable
         if (_worldObjectCache == null) return false;
         foreach (var rule in _settings.ConsumableRules)
             if (Array.FindIndex(types, t => t.Equals(rule.Type, StringComparison.OrdinalIgnoreCase)) >= 0
+                && !IsKitName(rule.Name)
                 && ConsumableLookup.Resolve(_worldObjectCache, rule) != null)
                 return true;
         return false;
     }
+
+    /// <summary>
+    /// A healing or stamina kit: used on yourself (the kit path), never drunk. A Greater Stamina
+    /// Kit on the Items list was typed "Stamina", the old name for stamina potions, and the potion
+    /// step used it with no target every 3 s, the server never answering, Revitalize never cast
+    /// (Drakkon, 2026-10-17).
+    /// </summary>
+    internal static bool IsKitName(string? name) =>
+        !string.IsNullOrEmpty(name) && name.TrimEnd().EndsWith(" Kit", StringComparison.OrdinalIgnoreCase);
 
     /// <summary><paramref name="listedOnly"/>: only the Consumables list, not any potion in the pack.</summary>
     private bool AttemptPotion(bool listedOnly, params string[] types)
@@ -2270,7 +2284,9 @@ public partial class BuffManager : IDisposable
         foreach (var rule in _settings.ConsumableRules)
         {
             if (Array.FindIndex(types, t => t.Equals(rule.Type, StringComparison.OrdinalIgnoreCase)) < 0) continue;
+            if (IsKitName(rule.Name)) continue;   // the kit path uses it, on yourself
             if (ConsumableLookup.Resolve(_worldObjectCache, rule) is not WorldObject potion) continue;
+            if (IsKitName(potion.Name)) continue;
             if (HeldCastBlocksItemUse(out string heldWhy)) return VitalNo(heldWhy);
             _host.Log($"[RynthAi] Vitals: drinking {rule.Name} ({rule.Type})" + (potion.Id != rule.Id ? " from a new stack." : "."));
             _host.UseFor(unchecked((uint)potion.Id), "Buff", $"vitals: drink {rule.Name} ({rule.Type}) from the Items list");
@@ -2286,6 +2302,7 @@ public partial class BuffManager : IDisposable
         {
             string? kind = RynthCore.Plugin.RynthAi.LegacyUi.LegacyWeaponsUi.PotionType(wo);
             if (kind == null || Array.FindIndex(types, t => t.Equals(kind, StringComparison.OrdinalIgnoreCase)) < 0) continue;
+            if (IsKitName(wo.Name)) continue;
             if (HeldCastBlocksItemUse(out string heldWhy)) return VitalNo(heldWhy);
             _host.Log($"[RynthAi] Vitals: using {wo.Name} from the pack ({kind}).");
             _host.UseFor(unchecked((uint)wo.Id), "Buff", $"vitals: {kind} potion from the pack");
@@ -2416,7 +2433,9 @@ public partial class BuffManager : IDisposable
         WorldObject? kit = null;
         bool fromPack = false;
         foreach (var r in _settings.ConsumableRules)
-            if (r.Type.Equals("HealthKit", StringComparison.OrdinalIgnoreCase) && ConsumableLookup.Resolve(_worldObjectCache, r) is WorldObject wo) { kit = wo; break; }
+            if (r.Type.Equals("HealthKit", StringComparison.OrdinalIgnoreCase)
+                && !(r.Name ?? "").Contains("Stamina Kit", StringComparison.OrdinalIgnoreCase)   // a stamina kit heals no health
+                && ConsumableLookup.Resolve(_worldObjectCache, r) is WorldObject wo) { kit = wo; break; }
         if (kit == null) { kit = BestPackHealingKit(); fromPack = true; }
         if (kit == null) return VitalNo("no healing kit");
         if (KitRetryWait(out string kitWait)) return VitalNo(kitWait);
@@ -4962,6 +4981,7 @@ public partial class BuffManager : IDisposable
             _bowDequipPendingId = 0;
             _bowDequipAttempts = 0;
             _wieldGateFailCount = 0;
+            _wandWieldFails.Clear();
             // In Magic, but the stance we asked for may still be settling: yield the tick.
             return StanceSettled(urgentHeal);
         }
@@ -5011,12 +5031,13 @@ public partial class BuffManager : IDisposable
             alreadyWielded = wandObj.Values(LongValueKey.CurrentWieldedLocation, 0) > 0;
 
         // Secondary check via API if primary didn't confirm
-        if (!alreadyWielded && _host.HasGetObjectWielderInfo)
+        if (EquippedState.IsWielded(_host, wandId) is bool trackedWand) alreadyWielded = trackedWand;   // the server's word
+        else if (!alreadyWielded && _host.HasGetObjectWielderInfo)
         {
             uint playerId = _host.GetPlayerId();
             if (playerId != 0 &&
                 _host.TryGetObjectWielderInfo((uint)wandId, out uint wielder, out _) &&
-                wielder == playerId)
+                wielder == playerId && _worldObjectCache?.InPackWalk(wandId) != true)   // a stale record (the wand in a pack)
                 alreadyWielded = true;
         }
 
@@ -5056,6 +5077,7 @@ public partial class BuffManager : IDisposable
                 }
                 _host.Log($"[WieldGate] UseObject(0x{(uint)_pendingWieldId:X8}) not confirmed in " +
                           $"{WieldResolveTimeoutMs:0}ms — cooling down {WieldCooldownMs:0}ms");
+                NoteWandWieldFailed(_pendingWieldId);
                 _pendingWieldId = 0;
                 _wieldCooldownUntil = now.AddMilliseconds(WieldCooldownMs);
                 // FIX: bound the previously-infinite wield loop. If the wand still won't
@@ -5125,7 +5147,18 @@ public partial class BuffManager : IDisposable
             }
 
             _pendingWieldDirect = bowId != 0 && !PackFirst;
-            _host.UseFor((uint)wandId, "Buff", _pendingWieldDirect ? "buffing: switch to the wand" : "buffing: wield the wand");
+            // Hands free: wield the caster into the Held slot (GetAndWieldItem, the paperdoll drag),
+            // as the off hand does. A use only wields a plain caster: a caster with a spell of its own
+            // (Electric Baton, Acid Staff) takes the use as "cast it" and the client says it must be
+            // wielded first (Drakkon, 2026-10-18 14:00). With a weapon still in hand the use stays
+            // (the client swaps); when that misses, the next swap empties the hands first.
+            if (!_pendingWieldDirect && _host.HasWieldItem)
+            {
+                _host.WieldItem((uint)wandId, HeldSlot);
+                _host.Log($"[WieldGate] wielding 0x{(uint)wandId:X8} '{_worldObjectCache?[wandId]?.Name}' into the Held slot");
+            }
+            else
+                _host.UseFor((uint)wandId, "Buff", _pendingWieldDirect ? "buffing: switch to the wand" : "buffing: wield the wand");
             NoteStanceRequest();
             _pendingWieldClaim = _weaponSwapGate?.Claims ?? 0;
             _pendingWieldId = wandId;
@@ -5254,8 +5287,9 @@ public partial class BuffManager : IDisposable
         if (_host.HasGetObjectWielderInfo)
         {
             uint pid = _host.GetPlayerId();
+            if (EquippedState.IsWielded(_host, id) is bool tracked) return tracked;
             if (pid != 0 && _host.TryGetObjectWielderInfo((uint)id, out uint wielder, out _))
-                return wielder == pid;
+                return wielder == pid && _worldObjectCache?.InPackWalk(id) != true;
         }
         return false;
     }
@@ -5305,7 +5339,95 @@ public partial class BuffManager : IDisposable
         if (_worldObjectCache == null) return 0;
         var cache = _worldObjectCache;
         return WeaponList.FindWand(_settings.ItemRules, i => cache[i], wo => WorldObjectCache.IsWieldedByPlayer(_host, wo),
-            cache.GetInventory(), _settings.WieldUnlistedWandWhenNoneListed, out _);
+            cache.GetInventory(), _settings.WieldUnlistedWandWhenNoneListed, out _, SkipBuffWand, BuffWandRank);
+    }
+
+    /// <summary>0 = no wield requirement (a plain caster: the surest), 1 = a requirement it meets.</summary>
+    private int BuffWandRank(WorldObject wo) => WieldRequirements.Has(_host, unchecked((uint)wo.Id)) ? 1 : 0;
+
+    // Identify requests for listed casters whose requirements aren't known yet: (count, last ask).
+    private readonly Dictionary<int, (int Count, DateTime At)> _wandIdAsked = new();
+    private const int WandIdMaxAsks = 3;
+    private const double WandIdRetrySec = 10;
+
+    // ── Buff wands that can't be wielded ────────────────────────────────────
+    // 2026-10-18 01:00-01:24: Drakkon's buff wand was gone, the next caster on his Items list was
+    // an Electric Baton that needs War Magic (untrained). Buffing sent its wield every ~8 s for
+    // 24 minutes, the server never answered, every buff was parked "fighting unbuffed" in turn,
+    // and Heal Self (which never gives up on the wand) couldn't go when he needed it: he died.
+    private readonly Dictionary<int, int> _wandWieldFails = new();
+    private readonly Dictionary<int, DateTime> _wandSkipUntil = new();
+    private readonly HashSet<int> _wandReqNoted = new();
+    internal const int WandWieldFailMax = 2;
+    internal const double WandSkipMin = 30;
+
+    // PropertyInt WieldRequirements (158), WieldSkillType (159), WieldDifficulty (160); ACE
+    // WieldRequirement 1 = Skill (buffed), 2 = RawSkill (base), 8 = Training.
+    private const uint PropWieldReq = 158, PropWieldSkill = 159, PropWieldDiff = 160;
+    // EquipMask Held: the casters' slot.
+    private const uint HeldSlot = 0x01000000;
+
+    /// <summary>A caster buffing must not try: its wield requirement isn't met, or its wields kept failing.</summary>
+    private bool SkipBuffWand(WorldObject wo)
+    {
+        if (_wandSkipUntil.TryGetValue(wo.Id, out DateTime until))
+        {
+            if (DateTime.Now < until) return true;
+            _wandSkipUntil.Remove(wo.Id);
+            _wandWieldFails.Remove(wo.Id);
+        }
+        // Not identified yet: its requirements aren't known (the Acid Staff was tried unidentified and
+        // the client refused it, 2026-10-18). Ask, and skip it until the answer is in; after
+        // WandIdMaxAsks unanswered asks it is tried anyway (a server refusal still rules it out).
+        uint uid = unchecked((uint)wo.Id);
+        if (_host.HasRequestId && !_host.HasAppraisalData(uid))
+        {
+            _wandIdAsked.TryGetValue(wo.Id, out var asked);
+            if (asked.Count < WandIdMaxAsks)
+            {
+                if ((DateTime.Now - asked.At).TotalSeconds >= WandIdRetrySec)
+                {
+                    _host.RequestId(uid);
+                    _wandIdAsked[wo.Id] = (asked.Count + 1, DateTime.Now);
+                    _host.Log($"[WieldGate] identifying 0x{uid:X8} '{wo.Name}' before using it to buff (its wield requirement isn't known yet)");
+                }
+                return true;
+            }
+        }
+        string? why = UnmetWandRequirement(wo.Id);
+        if (why == null) return false;
+        if (_wandReqNoted.Add(wo.Id))
+        {
+            _host.Log($"[WieldGate] not using 0x{(uint)wo.Id:X8} '{wo.Name}' to buff: {why}");
+            _host.WriteToChat($"[RynthAi] Buffing: {wo.Name} can't be wielded ({why}), so it isn't used to buff.", 1);
+        }
+        return true;
+    }
+
+    /// <summary>The caster's wield requirement the character doesn't meet (null = met, none, or not known).</summary>
+    private string? UnmetWandRequirement(int id) => WieldRequirements.Unmet(_host, _charSkills, unchecked((uint)id));
+
+    /// <summary>A wield of <paramref name="wandId"/> went unanswered: after WandWieldFailMax, leave it out for WandSkipMin.</summary>
+    private void NoteWandWieldFailed(int wandId)
+    {
+        if (wandId == 0) return;
+        int n = _wandWieldFails.TryGetValue(wandId, out int f) ? f + 1 : 1;
+        _wandWieldFails[wandId] = n;
+        // The server said "skill too low" (WeenieError 0x0468) for this very wand: no second try.
+        // Unbuffed after a death every caster on the list can be under its requirement; one try
+        // each gets to the bare-handed Magic stance (AC casts without a wand) in seconds, not minutes.
+        // Any refusal naming this wand is final (with the Held-slot wield the server answers a refused
+        // wield with InventoryServerSaveFailed for the item); "too busy" is not a refusal.
+        bool tooLow = _host.HasGetLastWeenieError && _host.TryGetLastWeenieError(out _, out uint wErr, out _, out uint wObj)
+                      && wObj == unchecked((uint)wandId) && wErr != 0 && wErr != 0x1D;
+        if (n < WandWieldFailMax && !tooLow) return;
+        _wandSkipUntil[wandId] = DateTime.Now.AddMinutes(WandSkipMin);
+        _wandWieldFails.Remove(wandId);
+        string name = _worldObjectCache?[wandId]?.Name ?? "?";
+        _host.Log($"[WieldGate] 0x{(uint)wandId:X8} '{name}' didn't wield after {n} tries: left out of buffing for {WandSkipMin:0} min");
+        _host.WriteToChat(tooLow
+            ? $"[RynthAi] Buffing: your skill is too low to wield {name}. Left out for {WandSkipMin:0} min (with no caster left, buffs are cast bare-handed)."
+            : $"[RynthAi] Buffing: {name} wouldn't wield ({n} tries, no answer from the server). Left out for {WandSkipMin:0} min; check its wield requirement.", 1);
     }
 
     private static bool IsWandObject(WorldObject wo) => WeaponList.IsWand(wo);

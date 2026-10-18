@@ -284,6 +284,9 @@ public sealed class LegacyUiSettings
     /// <summary>Also pick up loose ground items that match the loot profile, within the corpse max range.</summary>
     public bool EnableGroundLoot;
     public bool PeaceModeWhenIdle = true;
+    /// <summary>After a heal, restam or remana spell with no monster to fight, put the last fight's
+    /// weapons (main hand and off hand) back on instead of waiting for the next target.</summary>
+    public bool RearmAfterVitals;
     public bool RebuffWhenIdle;
     /// <summary>
     /// Re-cast a self buff when its remaining duration drops below this many seconds.
@@ -986,6 +989,8 @@ public sealed class SettingsBridgePayload
     public int TargetFPSBackground { get; set; }
     public bool EnableAutocram { get; set; }
     public bool PeaceModeWhenIdle { get; set; }
+    // Optional: an engine without the row doesn't send it, and that must not turn it off.
+    public bool? RearmAfterVitals { get; set; }
     public bool StartMacroOnLogin { get; set; }
     public bool PatrolOnLogin { get; set; }
     // Dungeon patrol. Nullable: an engine that predates them doesn't send them, and its save

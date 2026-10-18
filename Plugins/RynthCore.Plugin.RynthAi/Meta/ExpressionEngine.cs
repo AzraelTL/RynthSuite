@@ -2905,8 +2905,9 @@ internal sealed class ExpressionEngine
         if (_host.HasGetObjectWielderInfo)
         {
             uint pid = _host.GetPlayerId();
+            if (EquippedState.IsWielded(_host, id) is bool tracked) return tracked;
             if (pid != 0 && _host.TryGetObjectWielderInfo((uint)id, out uint wielder, out _))
-                return wielder == pid;
+                return wielder == pid && _worldObjectCache?.InPackWalk(id) != true;
         }
         return false;
     }
@@ -3602,6 +3603,7 @@ internal sealed class ExpressionEngine
             ["EnableCombineSalvage"]= (() => B(s.EnableCombineSalvage),v => s.EnableCombineSalvage= ToDouble(v) != 0),
             ["SalvageWithoutPanel"] = (() => B(s.SalvageWithoutPanel), v => s.SalvageWithoutPanel = ToDouble(v) != 0),
             ["PeaceModeWhenIdle"]   = (() => B(s.PeaceModeWhenIdle),   v => s.PeaceModeWhenIdle   = ToDouble(v) != 0),
+            ["RearmAfterVitals"]    = (() => B(s.RearmAfterVitals),    v => s.RearmAfterVitals    = ToDouble(v) != 0),
             ["RebuffWhenIdle"]      = (() => B(s.RebuffWhenIdle),      v => s.RebuffWhenIdle      = ToDouble(v) != 0),
             ["UsePotions"] = (() => B(s.UsePotions), v => s.UsePotions = ToDouble(v) != 0),
             ["UseBuffItems"] = (() => B(s.UseBuffItems), v => s.UseBuffItems = ToDouble(v) != 0),
