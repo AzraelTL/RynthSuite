@@ -22,6 +22,12 @@ internal static class MovedTabs
     public const string Diagnostics = "/rc diagnostics";
 
     /// <summary>
+    /// RynthAi Settings (Advanced Settings): RynthCore's "Settings" panel (SettingsFace.Title), opened
+    /// by name through "/rc ui open &lt;Panel&gt;" (RynthCoreChatCommands, the generic panel verb).
+    /// </summary>
+    public const string Settings = "/rc ui open Settings";
+
+    /// <summary>
     /// The chat command that opens where tab <paramref name="tab"/> lives now, or null when it is
     /// still a Mini Remote tab (or not a tab at all). Case and padding don't matter.
     /// </summary>
@@ -36,6 +42,7 @@ internal static class MovedTabs
     {
         OracleCharacter => "RynthOracle's Character tab",
         Diagnostics => "RynthCore Options > Diagnostics",
+        Settings => "RynthAi Settings (Advanced Settings)",
         _ => command,
     };
 }

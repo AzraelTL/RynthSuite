@@ -18,8 +18,8 @@ namespace RynthCore.Plugin.RynthOracle;
 /// </summary>
 public sealed class RynthOraclePlugin : RynthPluginBase
 {
-    // Previous release: 0.2.0.
-    public const string Version = "0.2.1";
+    // Previous release: 0.2.1.
+    public const string Version = "0.2.2";
 
     private const long QuestReadDelayMs = 6000;   // after login, before the hidden /myquests
     private const long CharacterReadMs = 1000;
@@ -33,6 +33,7 @@ public sealed class RynthOraclePlugin : RynthPluginBase
     private OracleView? _mainView;
     private VoidView? _voidView;
     private QuestTimersView? _timersView;
+    private SkillsEmbed? _skills;
     private int _seenBookRevision = -1;
 
     private readonly ConcurrentQueue<string> _commands = new();
@@ -57,11 +58,16 @@ public sealed class RynthOraclePlugin : RynthPluginBase
         _c.Host = Host;
         _c.Settings.Load();
         _c.RequestQuests = RequestQuests;
+        _c.RereadCharacter = RereadCharacter;
+        _c.RereadTitles = RereadTitles;
+        _c.ReloadQuestList = ReloadQuestList;
         _c.Send = cmd => _c.InWorld && Host.InvokeChatParser(cmd);
         _c.RunCommand = cmd => _c.InWorld && Host.InvokeChatParser(cmd);
         _ui.Log = msg => Host.Log(msg);
 
         _mainView = new OracleView(_c);
+        // The Skills / Attributes / Progress tabs: RynthCore draws its Skills panel body in the window.
+        _skills = new SkillsEmbed(cmd => Host.InvokeChatParser(cmd));
         _voidView = new VoidView(_c);
         _timersView = new QuestTimersView(_c);
         _main = _ui.Add(new UiWindow("RynthOracle/Oracle", "Oracle")
@@ -135,6 +141,7 @@ public sealed class RynthOraclePlugin : RynthPluginBase
         if (_void != null) { _void.Visible = false; _void.NeedsPass = true; }
         // The quest book loads once the character's name (and world) are known (TickData).
         _c.Book.Clear();
+        _c.Timers.Reset();
         if (_timers != null) { _timers.Visible = _c.Settings.QuestTimersOpen; _timers.NeedsPass = true; }
     }
 
@@ -146,8 +153,10 @@ public sealed class RynthOraclePlugin : RynthPluginBase
         if (_main != null) { _main.Visible = false; _main.NeedsPass = true; }
         if (_void != null) { _void.Visible = false; _void.NeedsPass = true; }
         if (_timers != null) { _timers.Visible = false; _timers.NeedsPass = true; }
+        _skills?.Update(string.Empty, false, false, Environment.TickCount64);
         _ui.SubmitEmpty(Host);
         _c.Book.Clear();   // saved as it changed
+        _c.Timers.Reset();
         _c.Flags.Clear();
         _c.Void.Clear();
         _c.Conquest.Clear();
@@ -214,6 +223,7 @@ public sealed class RynthOraclePlugin : RynthPluginBase
 
     public override void Shutdown()
     {
+        _skills?.Shutdown();
         _ui.SubmitEmpty(Host);
         _c.Updater.Shutdown();
         _c.Settings.Save();
@@ -315,6 +325,21 @@ public sealed class RynthOraclePlugin : RynthPluginBase
                 // RynthAi, RynthILT and RynthCore's menus link here; it shows, never toggles off.
                 ShowTab(OracleView.TabCharacter);
                 break;
+            case "skills":
+            case "skill":
+                // The Skills tab: RynthCore's skills panel (raise and train) inside this window.
+                ShowTab(OracleView.TabSkills);
+                break;
+            case "attributes":
+            case "attrs":
+            case "attribute":
+            case "vitals":
+                ShowTab(OracleView.TabAttributes);
+                break;
+            case "progress":
+            case "progression":
+                ShowTab(OracleView.TabProgress);
+                break;
             case "status":
                 string pack = _c.Catalog.PackServer.Length > 0 ? $" + {_c.Catalog.ServerCount} {_c.Catalog.PackServer}" : "";
                 string titles = _c.TitlesKnown ? $", {_c.EarnedTitles.Count} titles held" : "";
@@ -327,12 +352,14 @@ public sealed class RynthOraclePlugin : RynthPluginBase
                 ShowTab(OracleView.TabAbout);
                 break;
             default:
-                _c.Print("Commands: /ro (window), /ro character (Character tab: status, session), /ro void (Void window), "
+                _c.Print("Commands: /ro (window), /ro character (Character tab: status, session), "
+                         + "/ro skills|attributes|progress (those tabs), /ro void (Void window), "
                          + "/ro timers (Quest Timers window), /ro fellowship (Fellowship tab), /ro quests (read quest flags), /ro status, "
                          + "/ro about (About tab: settings, server)");
                 break;
         }
         if (arg is "" or "void" or "timers" or "timer" or "fellowship" or "fellow" or "fship" or "character" or "char"
+                or "skills" or "skill" or "attributes" or "attrs" or "attribute" or "vitals" or "progress" or "progression"
                 or "about" && !Host.HasUi && !_noUiLogged)
         {
             _noUiLogged = true;
@@ -340,11 +367,54 @@ public sealed class RynthOraclePlugin : RynthPluginBase
         }
     }
 
-    private void RequestQuests()
+    /// <summary>Sends /myquests; false when nothing went out (not in the world, or one was sent moments ago).</summary>
+    private bool RequestQuests()
+    {
+        if (!_c.InWorld) return false;
+        bool sent = _c.Flags.Request(cmd => Host.InvokeChatParser(cmd), Environment.TickCount64);
+        if (!sent) Host.Log("[RynthOracle] /myquests was sent moments ago; waiting for that reply.");
+        if (_main != null) _main.NeedsPass = true;
+        return sent;
+    }
+
+    // ── The Oracle window's Refresh buttons (the data side; Views\RefreshBar.cs has the rest) ──
+
+    /// <summary>Reads the character's stats, buffs and (on the Character tab) RynthAi's session now, not at the next timer.</summary>
+    private void RereadCharacter()
     {
         if (!_c.InWorld) return;
-        if (!_c.Flags.Request(cmd => Host.InvokeChatParser(cmd), Environment.TickCount64))
-            Host.Log("[RynthOracle] /myquests was sent moments ago; waiting for that reply.");
+        long now = Environment.TickCount64;
+        _c.Character.Read(Host);
+        _c.Void.RemoveExpired(now);
+        _nextCharacterReadMs = now + CharacterReadMs;
+        _nextCharacterExtrasMs = 0;
+        ReadCharacterExtras(now);
+        if (_main != null) _main.NeedsPass = true;
+        if (_void != null) _void.NeedsPass = true;
+    }
+
+    /// <summary>Asks the engine for the character's titles again (it keeps them from the login events).</summary>
+    private void RereadTitles()
+    {
+        _titleCount = -2;
+        ReadTitles();
+        if (_main != null) _main.NeedsPass = true;
+    }
+
+    /// <summary>
+    /// Reloads the quest list and the server's pack from their files (a downloaded list, or a pack
+    /// dropped into %APPDATA%\RynthCore\RynthOracle\packs) and asks RynthCore which server this is.
+    /// </summary>
+    private void ReloadQuestList()
+    {
+        long now = Environment.TickCount64;
+        _c.ServerState.Poll(Host, now, force: true);
+        _seenServerStateRevision = _c.ServerState.Revision;
+        _c.Server.Refresh(Host, _c.Character.PlayerId != 0 ? _c.Character.PlayerId : Host.GetPlayerId(), _c.ServerState.State);
+        try { _c.Catalog.Load(_c.Server.Tag, msg => Host.Log(msg)); }
+        catch (Exception ex) { Host.Log($"[RynthOracle] Couldn't load the quest list: {ex.Message}"); }
+        _c.Catalog.SyncDiscoveries(_c.Flags);
+        ApplyServer();
         if (_main != null) _main.NeedsPass = true;
     }
 
@@ -362,6 +432,9 @@ public sealed class RynthOraclePlugin : RynthPluginBase
         TickData(now);
 
         if (!Host.HasUi) return;
+        // After the poll, so a tab clicked this tick is already selected.
+        if (_skills != null && _main != null && _mainView != null)
+            _skills.Update(_mainView.Tab, _main.Visible, _c.InWorld, now);
         RecordWindows(now);
         _ui.Submit(Host, now);
 
@@ -454,6 +527,7 @@ public sealed class RynthOraclePlugin : RynthPluginBase
             _c.Server.Refresh(Host, _c.Character.PlayerId, _c.ServerState.State);
             ApplyServer();
             LoadQuestBook(now);
+            AnnounceTimers();
             ReadTitles();
             TickConquest(now);
             if (!_voidAutoDecided && _c.Character.Valid)
@@ -473,6 +547,15 @@ public sealed class RynthOraclePlugin : RynthPluginBase
             if (_void != null) _void.NeedsPass = true;
             if (_main != null && _mainView != null && _mainView.Tab == OracleView.TabVoid) _main.NeedsPass = true;
         }
+    }
+
+    /// <summary>Says in chat which watched quest timers came up: tracked quests, or every held quest if so set.</summary>
+    private void AnnounceTimers()
+    {
+        if (!_c.Settings.AlertTimers || !_c.Book.Loaded) { _c.Timers.Reset(); return; }
+        var ready = _c.Timers.Check(_c.Flags, _c.Catalog, _c.Settings.AlertAllTimers ? null : _c.Book.Tracked, _c.UtcNow);
+        foreach (Quest q in ready)
+            _c.Print($"Quest ready again: {q.Label}");
     }
 
     /// <summary>

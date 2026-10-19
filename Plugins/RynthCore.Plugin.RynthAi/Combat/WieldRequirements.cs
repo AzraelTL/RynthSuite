@@ -66,7 +66,7 @@ internal static class WieldRequirements
     private static AcSkillType? SkillOf(uint stype)
     {
         if (stype == 0) return null;
-        foreach (AcSkillType k in Enum.GetValues(typeof(AcSkillType)))
+        foreach (AcSkillType k in Enum.GetValues<AcSkillType>())
             if (CharacterSkills.AcSkillTypeToSTypeSkill(k) == stype) return k;
         return null;
     }

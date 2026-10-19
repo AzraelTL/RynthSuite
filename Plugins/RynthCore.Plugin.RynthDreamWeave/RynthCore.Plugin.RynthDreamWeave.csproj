@@ -9,7 +9,7 @@
     <RynthPluginServerName>DreamWeave</RynthPluginServerName>
     <RynthPluginServerHosts>play.acdreamweave.com</RynthPluginServerHosts>
     <RynthPluginServerWorldNames>DreamWeave|Dream Weave</RynthPluginServerWorldNames>
-    <RynthPluginDescription>DreamWeave only: the server card (rules, account limits, botting policy, links, account setup) in the Mini Remote.</RynthPluginDescription>
+    <RynthPluginDescription>DreamWeave only: the server card (rules, server features, player commands, links, account setup) in the Mini Remote.</RynthPluginDescription>
   </PropertyGroup>
 
   <Import Project="..\Shared\ServerPack\ServerPlugin.props" />

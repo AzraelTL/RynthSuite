@@ -1033,6 +1033,9 @@ public partial class CombatManager : IDisposable
             // A ghost (the server doesn't have it for us): skipped until it shows it is real.
             if (Ghosts.IsGhost(wo.Id)) { _ghostsSkippedInScan++; continue; }
 
+            // Left for hitting the environment (New target): skipped for EnvironmentSkipSec.
+            if (IsEnvironmentSkipped(wo.Id)) continue;
+
             // Just killed (KillerNotification) but not yet a corpse — skip so we
             // don't re-lock and cast at it during its death animation.
             if (_recentlyKilled.ContainsKey(wo.Id)) continue;
@@ -1135,6 +1138,7 @@ public partial class CombatManager : IDisposable
         _hitAt.Remove(id);
         _blacklistManager.ForgetTarget(id);
         Ghosts.NoteDeleted(id);
+        OnEnvironmentObjectDeleted(objectId);
 
         if (id == activeTargetId || id == _lockedTargetId || id == _lastAttackedTargetId)
             _awaitingCastResolution = false;
@@ -1436,13 +1440,15 @@ public partial class CombatManager : IDisposable
             _damageStore!.RecordTaken(src, name, ElementFromWord(m.Groups["type"].Value), amount);
     }
 
-    /// <summary>A chat line for the damage meter and the stall watchdog.
+    /// <summary>A chat line for the damage meter, the stall watchdog and the environment throttle.
     /// <paramref name="chatType"/> is the line's eChatTypes (-1 = not known).</summary>
     public void HandleChatForDamage(string text, int chatType = -1)
     {
         if (string.IsNullOrEmpty(text)) return;
         // Combat lines come from the server; one in a player's chat type is someone's imitation.
         if (RynthCore.Plugin.Shared.ChatSource.IsPlayerAuthored(chatType)) return;
+        // An arrow into a wall: the environment-impact throttle's missile signal.
+        if (NoteMissileEnvironmentChat(text)) return;
         // A miss is a swing too (stall watchdog). "You evaded X!" is the monster's miss, not ours.
         if (text.IndexOf(" evaded your attack", StringComparison.OrdinalIgnoreCase) > 0)
             NoteSwingEvidence("miss");
@@ -1455,6 +1461,7 @@ public partial class CombatManager : IDisposable
         if (critLine) _lastCritChatAt = now;
 
         if (!CombatText.TryParseOutgoingHit(text, out string victim, out int amount)) return;
+        NoteEnvironmentEvidence();   // a cast that hit something didn't only hit the environment
         bool crit = critLine || (now - _lastCritChatAt).TotalMilliseconds <= CRIT_WINDOW_MS;
 
         // Which monster the line is about. One spell can hurt several (rings, walls, blasts,
@@ -1878,12 +1885,214 @@ public partial class CombatManager : IDisposable
     /// <summary>Test seam: one judged magic cast with no damage.</summary>
     internal void MagicMissForTest(int tid) => NoteMagicMissForResync(tid);
 
+    // ── Empyrean Handler lethal-ring evade (chat-triggered back-jump) ─────────
+    // ACECustom Handler emote: "The handler briefly channels infused Empyrean hatred
+    // to release a lethal ring." The ring can't be melee-evaded — if the character is
+    // inside its cast radius they die. On that line, when still in range of a Handler,
+    // cancel the current swing/cast and back-jump away, then resume combat (target kept).
+    private const string HandlerRingChannelHint = "channels infused Empyrean hatred to release a lethal ring";
+    private const string HandlerRingChannelStart = "The handler briefly channels";
+    private const string HandlerNameHint = "Empyrean Handler";
+    /// <summary>Yards: Handler lethal ring is treated as at least this wide (RingRange when larger).</summary>
+    internal const double HandlerRingDangerYards = 12.0;
+    /// <summary>Back-jump charge (ms) — run-back + jump must clear ~ring radius.</summary>
+    private const int HandlerRingJumpHoldMs = 750;
+    private const double HandlerRingEvadeCooldownMs = 4_000;
+
+    private DateTime _handlerRingEvadeAt = DateTime.MinValue;
+    private DateTime _handlerRingEvadeUntil = DateTime.MinValue;
+    private int _handlerRingEvadeId;
+    private bool _handlerRingJumpStarted;
+
+    /// <summary>
+    /// Plugin wires this to <c>Jumper.Start("xs", faceHeading, ms)</c> — face the Handler
+    /// then run-back jump (x+s) so the body moves away. Returns false if the jumper refused.
+    /// </summary>
+    public Func<float, int, bool>? RequestBackJump { get; set; }
+
+    /// <summary>True while the wired jumper is mid-turn / charge / settle.</summary>
+    public Func<bool>? JumpBusy { get; set; }
+
+    /// <summary>True while a Handler-ring evade is holding combat (jump or settle).</summary>
+    public bool RingEvadeActive =>
+        _handlerRingEvadeUntil != DateTime.MinValue && DateTime.Now < _handlerRingEvadeUntil;
+
+    /// <summary>
+    /// Chat line from RynthAiPlugin.OnChatWindowText. Starts a back-jump evade when the
+    /// Handler channels its lethal ring and the character is still inside ring range.
+    /// </summary>
+    public void HandleChatForRingEvade(string? text, int chatType = -1)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        // Gate: only while the macro is running with combat on, and only if the setting allows it.
+        // Otherwise a Handler line heard while the character is idle or being driven by hand (or by a
+        // meta) would take over the keyboard for a back-jump.
+        if (!_settings.HandlerRingEvade || !_settings.IsMacroRunning || !_settings.EnableCombat) return;
+        // Handler channel is an Emote (0x0C). ChatSource.IsPlayerAuthored treats Emote as
+        // player speech, which would skip every real Handler line — anchor on the unique
+        // phrase starting the line instead (player copies are "Name says, \"...\").
+        bool anchored =
+            RynthCore.Plugin.Shared.ChatSource.StartsWithMarker(text, HandlerRingChannelStart, StringComparison.OrdinalIgnoreCase)
+            || (RynthCore.Plugin.Shared.ChatSource.StartsWithMarker(text, "The handler", StringComparison.OrdinalIgnoreCase)
+                && text.IndexOf(HandlerRingChannelHint, StringComparison.OrdinalIgnoreCase) >= 0);
+        if (!anchored)
+        {
+            // Mid-line only when the type is clearly not player speech (some clients strip "The ").
+            if (chatType is RynthCore.Plugin.Shared.ChatSource.Speech
+                or RynthCore.Plugin.Shared.ChatSource.Tell
+                or RynthCore.Plugin.Shared.ChatSource.OutgoingTell
+                or RynthCore.Plugin.Shared.ChatSource.Channel
+                or RynthCore.Plugin.Shared.ChatSource.ChannelSend
+                or RynthCore.Plugin.Shared.ChatSource.Allegiance
+                or RynthCore.Plugin.Shared.ChatSource.Fellowship)
+                return;
+            if (text.IndexOf(HandlerRingChannelHint, StringComparison.OrdinalIgnoreCase) < 0) return;
+            if (text.IndexOf(" says,", StringComparison.OrdinalIgnoreCase) >= 0
+                || text.IndexOf(" tells you,", StringComparison.OrdinalIgnoreCase) >= 0)
+                return;
+        }
+
+        DateTime now = DateTime.Now;
+        if (_handlerRingEvadeAt != DateTime.MinValue
+            && (now - _handlerRingEvadeAt).TotalMilliseconds < HandlerRingEvadeCooldownMs)
+            return;
+
+        if (!TryFindHandlerForRingEvade(out int handlerId, out double dist, out string name))
+        {
+            _host.Log("[CombatEvade] Handler lethal-ring channel heard, but no Empyrean Handler is nearby — no jump.");
+            return;
+        }
+
+        double danger = Math.Max(HandlerRingDangerYards, Math.Max(1, _settings.RingRange));
+        if (dist > danger)
+        {
+            _host.Log($"[CombatEvade] Handler lethal-ring channel; '{name}' at {dist:0.0} m (outside {danger:0.#} m) — staying put.");
+            return;
+        }
+
+        // Face the Handler, then Jumper "xs" (back + run) moves the body away from it.
+        // Facing away + back-jump would leap into the ring.
+        float faceHandler = 0f;
+        if (TryGetHeadingTo(handlerId, out double toHandler, out _))
+            faceHandler = (float)(toHandler % 360.0);
+        else if (_host.TryGetPlayerHeading(out float curr))
+            faceHandler = curr;
+
+        _handlerRingEvadeAt = now;
+        _handlerRingEvadeId = handlerId;
+        _handlerRingJumpStarted = false;
+        // Hold combat long enough for turn + charge + land + one re-engage tick.
+        _handlerRingEvadeUntil = now.AddMilliseconds(HandlerRingJumpHoldMs + 2_200);
+
+        // Stop the bound melee/missile attack so the jump isn't eaten by the swing servo.
+        try
+        {
+            if (_host.HasCancelAttack) _host.CancelAttack();
+            ReleaseHeldTurn();
+        }
+        catch { }
+
+        bool started = RequestBackJump?.Invoke(faceHandler, HandlerRingJumpHoldMs) == true;
+        if (started)
+        {
+            _handlerRingJumpStarted = true;
+            _host.Log($"[CombatEvade] Empyrean Handler lethal ring — back-jump away from '{name}' " +
+                      $"at {dist:0.0} m (danger {danger:0.#} m), face {faceHandler:0}° then xs.");
+        }
+        else
+        {
+            _handlerRingEvadeUntil = DateTime.MinValue;
+            _handlerRingEvadeId = 0;
+            _host.Log("[CombatEvade] Empyrean Handler lethal ring heard in range, but the back-jump did not start.");
+        }
+    }
+
+    /// <summary>
+    /// Holds Think from attacking while the Handler-ring back-jump runs. Keeps the target
+    /// so combat re-engages as soon as the jumper settles.
+    /// </summary>
+    private bool TickRingEvade()
+    {
+        if (_handlerRingEvadeUntil == DateTime.MinValue) return false;
+        DateTime now = DateTime.Now;
+        bool jumperBusy = JumpBusy?.Invoke() == true;
+
+        // Jump never started / failed: clear early.
+        if (_handlerRingJumpStarted && !jumperBusy && now >= _handlerRingEvadeUntil)
+        {
+            _handlerRingEvadeUntil = DateTime.MinValue;
+            _handlerRingEvadeId = 0;
+            _handlerRingJumpStarted = false;
+            _host.Log("[CombatEvade] Handler ring evade done — re-engaging.");
+            return false;
+        }
+
+        if (jumperBusy || now < _handlerRingEvadeUntil)
+        {
+            LastCombatSkipReason = "handler-ring-evade";
+            _tickWait = CombatLatencyTracker.Wait.Other;
+            return true;
+        }
+
+        _handlerRingEvadeUntil = DateTime.MinValue;
+        _handlerRingEvadeId = 0;
+        _handlerRingJumpStarted = false;
+        _host.Log("[CombatEvade] Handler ring evade done — re-engaging.");
+        return false;
+    }
+
+    /// <summary>Nearest Empyrean Handler (active target preferred when it is one).</summary>
+    private bool TryFindHandlerForRingEvade(out int handlerId, out double dist, out string name)
+    {
+        handlerId = 0; dist = double.MaxValue; name = "";
+        int me = _host.GetPlayerId() == 0 ? 0 : (int)_host.GetPlayerId();
+        if (me == 0) return false;
+
+        int bestId = 0;
+        double bestDist = double.MaxValue;
+        string bestName = "";
+
+        void Consider(int id, string? nm)
+        {
+            if (id == 0 || string.IsNullOrEmpty(nm)) return;
+            if (nm.IndexOf(HandlerNameHint, StringComparison.OrdinalIgnoreCase) < 0) return;
+            double d = _worldFilter.Distance(me, id);
+            if (d < 0 || d >= bestDist) return;
+            bestDist = d; bestId = id; bestName = nm;
+        }
+
+        if (activeTargetId != 0)
+            Consider(activeTargetId, _worldFilter[activeTargetId]?.Name);
+
+        foreach (var s in _scannedTargets)
+            Consider(s.Id, s.Name);
+
+        // Landscape fallback when the scan hasn't listed it yet (channel can land mid-approach).
+        if (bestId == 0)
+        {
+            try
+            {
+                foreach (WorldObject wo in _worldFilter.GetLandscape())
+                {
+                    if ((int)wo.ObjectClass != (int)AcObjectClass.Monster) continue;
+                    Consider(wo.Id, wo.Name);
+                }
+            }
+            catch { }
+        }
+
+        if (bestId == 0) return false;
+        handlerId = bestId; dist = bestDist; name = bestName;
+        return true;
+    }
+
     public void ReportDamageOnTarget(int targetId)
     {
         _magicMissesSinceHit = 0;   // something we cast landed: the server's position is fine
         // Damage / health change on the cast we're judging → that cast HIT.
         if (targetId == _pendingJudgeTargetId)
             _damageSincePendingCast = true;
+        NoteEnvironmentEvidence();
         // Immediate positive feedback on the engaged target clears the streak.
         if (targetId == _lastAttackedTargetId)
             _consecutiveCastMisses = 0;
@@ -1904,6 +2113,7 @@ public partial class CombatManager : IDisposable
         int i = text.IndexOf(" evaded your attack", StringComparison.OrdinalIgnoreCase);
         if (i < 0) i = text.IndexOf(" resists your spell", StringComparison.OrdinalIgnoreCase);
         if (i <= 0) return;
+        NoteEnvironmentEvidence();   // the spell or swing reached a monster
         string who = text.Substring(0, i).Trim();
         if (who.StartsWith("The ", StringComparison.Ordinal)) who = who.Substring(4);
         if (who.Length == 0) return;
@@ -2225,6 +2435,9 @@ public partial class CombatManager : IDisposable
             _host.Log($"[RynthAi] DropTarget 0x{activeTargetId:X8}: {reason} [{DescribeTargetPos(activeTargetId)}]");
         activeTargetId = 0;
         _lockedTargetId = 0;
+        EndKite("target dropped");
+        EndEnvironmentApproach("target dropped");
+        _envPendingTargetId = 0;
         // A turn held toward the dropped target must be let go, or the character keeps
         // spinning until something else happens to release it.
         if (_facingTarget) ClearCombatTurnMotions();
@@ -2675,9 +2888,15 @@ public partial class CombatManager : IDisposable
         // one busy-count tick; only the first encounter of a wcid pays it.
         if (!_fightAppraiseRequested)
         {
-            _fightAppraiseRequested = true;
-            try { if (_host.HasRequestId)  _host.RequestId((uint)_fightTargetId); }  catch { }
-            try { if (_host.HasQueryHealth) _host.QueryHealth((uint)_fightTargetId); } catch { }
+            // Done only once the engine took the request (it refuses around a death or a portal; a refused one
+            // is asked again next tick). No RequestId at all: nothing to wait for.
+            bool idTaken = true;
+            try { if (_host.HasRequestId) idTaken = _host.RequestId((uint)_fightTargetId); } catch { }
+            if (idTaken)
+            {
+                _fightAppraiseRequested = true;
+                try { if (_host.HasQueryHealth) _host.QueryHealth((uint)_fightTargetId); } catch { }
+            }
         }
     }
 
@@ -2727,6 +2946,7 @@ public partial class CombatManager : IDisposable
             int id = _scannedTargets[i].Id;
             if (id == excludeId) continue;
             if (_recentlyKilled.ContainsKey(id)) continue;
+            if (IsEnvironmentSkipped(id)) continue;
             return true;
         }
         return false;
@@ -2878,6 +3098,11 @@ public partial class CombatManager : IDisposable
             return true;
         }
 
+        // Empyrean Handler lethal-ring back-jump: hold casts/swings until the jump settles,
+        // then fall through and re-engage the same target.
+        if (TickRingEvade())
+            return true;
+
         double acDistanceLimit = _settings.MonsterRange;
         // Hysteresis: a locked target is retained (and kept under attack) out to
         // the larger disengage distance, while new targets are still only
@@ -2977,7 +3202,7 @@ public partial class CombatManager : IDisposable
                 ForgetScanned(activeTargetId);
                 DropTarget("hp=0");
             }
-            else if (target != null &&
+            else if (target != null && !KiteActive &&
                      _worldFilter.Distance(_host.GetPlayerId() == 0 ? 0 : (int)_host.GetPlayerId(), activeTargetId) > disengageLimit)
                 DropTarget("out of range");
             // If target == null here it's a transient world-filter miss — keep the lock,
@@ -3098,7 +3323,16 @@ public partial class CombatManager : IDisposable
         // step-back — instead of dropping to peace and restarting the approach.
         double currentDist = _worldFilter.Distance(
             _host.GetPlayerId() == 0 ? 0 : (int)_host.GetPlayerId(), activeTargetId);
+        // Pull-away kite runs before the disengage gate: fleeing intentionally stretches
+        // range, and the kite itself waits for catch-up rather than idling here.
+        if (RunKite(targetObj, currentDist))
+            return true;
         if (currentDist > disengageLimit)
+            return true;
+
+        // Environment-impact throttle: too many missiles/spells into walls short of this target
+        // stop the attack and move closer or switch target (CombatManager.EnvironmentImpact.cs).
+        if (RunEnvironmentImpact(targetObj, currentDist))
             return true;
 
         // Melee/missile stall safety net (see CombatStallWatchdog). Holds the attack while
@@ -3929,12 +4163,22 @@ public partial class CombatManager : IDisposable
             {
                 _wasMacroRunning = false;
                 ClearCombatTurnMotions();
+                ResetEnvironmentImpact("macro stopped");
+                ResetKite("macro stopped");
             }
             return;
         }
         _wasMacroRunning = true;
 
+        NotePriorityZeroRules();
         LogCombatStateIfChanged();
+
+        // Environment-impact throttle: follow our spell projectiles, judge finished casts, and
+        // let go of an approach Think stopped driving.
+        try { PollEnvironmentImpact(); }
+        catch (Exception ex) { _host.Log($"[EnvImpact] poll crashed: {ex.Message}"); }
+        try { PollKite(); }
+        catch (Exception ex) { _host.Log($"[Kite] poll crashed: {ex.Message}"); }
 
         // A combat mode change ends the server's attack (HandleActionChangeCombatMode →
         // HandleActionCancelAttack), so out of Melee/Missile there is nothing bound to release.
@@ -4016,6 +4260,8 @@ public partial class CombatManager : IDisposable
     {
         if (_scannedTargets.Count == 0) return;
         if (TryLockForcedTarget()) return;   // Target lock (/ra targetlock): CombatManager.TargetLock.cs
+        // Pull-away in progress: keep the incumbent until the kite ends (do not switch mid-flee).
+        if (KiteActive && _lockedTargetId != 0) return;
         // Boost Loot Priority: the next target waits for the last kill's corpse. Without this the
         // next lock went out a few ms after each kill, 1-3 s before ACE creates the corpse, so the
         // arbiter always saw combat engaged and corpses were looted in batches (2026-10-14).
@@ -4234,6 +4480,35 @@ public partial class CombatManager : IDisposable
         if (_lastDamageDealtAt != DateTime.MinValue && _lastDamageDealtAt >= _lastAttackedAt) return false;   // it landed
         DateTime progress = _lastDamageDealtAt != DateTime.MinValue ? _lastDamageDealtAt : _targetLockedAt;
         return progress != DateTime.MinValue && (now - progress).TotalMilliseconds <= UndamagedCommitmentMaxMs;
+    }
+
+    private List<MonsterRule>? _priorityZeroNoticeRules;
+    private string _priorityZeroNoticeKey = "";
+
+    /// <summary>
+    /// Priority 0 on a monster rule now means "never attacked or tracked" (before, it was a lowest
+    /// priority that still fought back). A profile written under the old meaning would silently stop
+    /// fighting those monsters, so the first time a rule list holds any, one log line and one chat
+    /// notice say what it does now (again only if the set of Priority 0 rules changes, e.g. another
+    /// profile loads). Behavior is not changed.
+    /// </summary>
+    internal void NotePriorityZeroRules()
+    {
+        var rules = _settings.MonsterRules;
+        if (ReferenceEquals(rules, _priorityZeroNoticeRules)) return;
+        _priorityZeroNoticeRules = rules;
+        List<string>? zero = null;
+        foreach (var rule in rules)
+            if (rule.Priority <= 0) (zero ??= new List<string>()).Add(string.IsNullOrWhiteSpace(rule.Name) ? "(unnamed)" : rule.Name);
+        if (zero == null) { _priorityZeroNoticeKey = ""; return; }
+        string key = string.Join("|", zero).ToLowerInvariant();
+        if (key == _priorityZeroNoticeKey) return;
+        _priorityZeroNoticeKey = key;
+        string names = zero.Count <= 5 ? string.Join(", ", zero) : string.Join(", ", zero.GetRange(0, 5)) + $" and {zero.Count - 5} more";
+        string line = $"[RynthAi] Monsters: Priority 0 now means 'never attacked or tracked', even if the monster attacks you " +
+                      $"(rows with Priority 0: {names}). Raise the row's Priority to fight it.";
+        _host.Log(line);
+        _host.WriteToChat(line, 2);
     }
 
     /// <summary>True when the monster rule for <paramref name="id"/> says Priority 0 (never attacked).</summary>
@@ -6101,17 +6376,26 @@ public partial class CombatManager : IDisposable
                 return false;
             }
 
-            float power;
+            // Power: the monster rule's Attack Power (High / Reckless / Variable / Reckless +
+            // Variable), else the global Melee/Missile Power (AttackPowerPlanner.cs).
             int powerPct = isMissile ? _settings.MissileAttackPower : _settings.MeleeAttackPower;
-            if (powerPct < 0)
+            bool recklessTrained = _charSkills == null || _charSkills[AcSkillType.Recklessness].Training >= 2;
+            // No rule asking for a power (every rule on Default, as saved before this existed):
+            // the rule lookup is skipped, the global setting applies exactly as it always did.
+            WorldObject? powerTarget = null;
+            string powerMode = AttackPowerModes.Default;
+            if (AnyAttackPowerRule())
             {
-                power = 1.0f;
-                if (_settings.UseRecklessness && (_charSkills == null || _charSkills[AcSkillType.Recklessness].Training >= 2))
-                    power = 0.8f;
+                powerTarget = _worldFilter[activeTargetId];
+                powerMode = AttackPowerModes.Effective(GetRuleForTarget(powerTarget), DefaultMonsterRule());
             }
-            else
+            float power = AttackPowerModes.Resolve(powerMode, powerPct, _settings.UseRecklessness, recklessTrained,
+                _settings.VariablePowerMin, _settings.VariablePowerMax, PowerRandom);
+            if (powerMode != AttackPowerModes.Default && _powerLoggedTargetId != activeTargetId)
             {
-                power = powerPct / 100f;
+                _powerLoggedTargetId = activeTargetId;
+                _host.Log($"[AttackPower] 0x{targetId:X8} '{powerTarget?.Name}': {powerMode}" +
+                          (recklessTrained ? "" : " (Recklessness untrained: no reckless band)") + $", first attack at {power * 100:0}%");
             }
 
             int uiHeight = isMissile ? _settings.MissileAttackHeight : _settings.MeleeAttackHeight;
@@ -6173,9 +6457,24 @@ public partial class CombatManager : IDisposable
             if (matches) return r;
         }
 
-        return _settings.MonsterRules.FirstOrDefault(
-            m => m.Name.Equals("Default", StringComparison.OrdinalIgnoreCase));
+        return DefaultMonsterRule();
     }
+
+    /// <summary>The Monsters tab's DEFAULT line (the catch-all rule), or null.</summary>
+    private MonsterRule? DefaultMonsterRule() => _settings.MonsterRules.FirstOrDefault(
+        m => m.Name.Equals("Default", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>True when some monster rule has an Attack Power other than Default.</summary>
+    private bool AnyAttackPowerRule()
+    {
+        foreach (MonsterRule r in _settings.MonsterRules)
+            if (AttackPowerModes.Normalize(r.AttackPower) != AttackPowerModes.Default) return true;
+        return false;
+    }
+
+    /// <summary>Random source for Variable attack power, [0, 1); tests replace it.</summary>
+    internal Func<double> PowerRandom { get; set; } = Random.Shared.NextDouble;
+    private int _powerLoggedTargetId;
 
     private void AttackWithMagic(WorldObject target)
     {
@@ -6282,17 +6581,19 @@ public partial class CombatManager : IDisposable
             }
         }
 
-        // A script chooses this cast (RynthAi.Combat, CombatManager.ScriptHook.cs): ask it, wait for
-        // its answer (held, not an attack yet), cast what it chose; a decline, a bad answer or no
-        // answer in time falls through to RynthAi's own choice below, this same tick.
-        if (TryScriptAttack(target, element)) return;
-
+        // A rule with no attack shape on means no offensive cast at this monster: a script's choice
+        // is no exception (it used to be asked first, and cast at a monster the owner turned casting off for).
         if (rule != null && PickBaseShape(rule) < 0)
         {
             _host.Log($"[CombatCast] rule '{rule.Name}' has no attack shapes enabled (UseArc/Ring/Streak/Bolt/Blast/Wall all false) — no offensive cast");
             LastCombatSkipReason = "no-attack-shapes"; // D4 record-only
             return;
         }
+
+        // A script chooses this cast (RynthAi.Combat, CombatManager.ScriptHook.cs): ask it, wait for
+        // its answer (held, not an attack yet), cast what it chose; a decline, a bad answer or no
+        // answer in time falls through to RynthAi's own choice below, this same tick.
+        if (TryScriptAttack(target, element)) return;
 
         int warTier  = _spellManager?.GetHighestSpellTier(AcSkillType.WarMagic)  ?? 0;
         int voidTier = _spellManager?.GetHighestSpellTier(AcSkillType.VoidMagic) ?? 0;
@@ -6353,6 +6654,10 @@ public partial class CombatManager : IDisposable
                 _pendingOffensiveCastAt    = DateTime.Now;
                 _pendingOffensiveTargetId  = activeTargetId;
                 NoteOffensiveSeq();
+                // Environment-impact throttle: follow this cast's projectiles (rings and walls
+                // don't fly at the target, so they aren't judged).
+                if (!multiTarget)
+                    RegisterCastWatch(activeTargetId, SpellTableStub.GetById(offensiveSpellId)?.Name ?? $"spell {offensiveSpellId}");
 
                 // Tag this cast's weapon + element + tier so the pushed damage event
                 // can be attributed to it, count it for casts-to-kill learning, then

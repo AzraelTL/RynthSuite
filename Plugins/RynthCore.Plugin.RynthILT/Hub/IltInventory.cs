@@ -36,8 +36,18 @@ internal sealed class IltInventory
     public const uint WcidSummonRefillCharm = 78780030;
     public const uint WcidUniversalMasteryCharm = 78780031;
     public static readonly uint[] WcidInfiniteCastingStone = { 777700019, 777700055 };
-    public const uint WcidRedAetheriaChunk = 42636;
-    public const uint WcidBlueAetheriaChunk = 42635;
+    // Aetheria (ACECustom Aetheria.cs / PlayerCommands /clap). The Coalesced WCIDs stay the same once
+    // revealed (name "Aetheria", equipment set given), and /clap takes only unrevealed level 1-3 ones.
+    public const uint WcidBlueCoalescedAetheria = 42635;
+    public const uint WcidRedCoalescedAetheria = 42636;
+    public const uint WcidYellowCoalescedAetheria = 42637;
+    public const uint WcidRedAetheriaChunk = 310147;
+    public const uint WcidBlueAetheriaChunk = 310149;
+    public const uint WcidYellowAetheriaChunk = 310150;
+    public const uint WcidRedAetheriaPowder = 42644;
+    public const uint WcidBlueAetheriaPowder = 300019;
+    public const uint WcidEmpyreanTrinket = 34276;
+    public const uint WcidFalatacotTrinket = 34277;
 
     // ── Property ids used by several features ───────────────────────────────
     public const uint IntStackSize = 12;
@@ -48,6 +58,27 @@ internal sealed class IltInventory
     public const uint IntNumTimesTinkered = 171;
     public const uint IntImbuedEffect = 179;
     public const uint IntCleaving = 292;
+    // Corrupted-weapon chunk rules (ub-IT Leaftide.IsValidCorruptedWep / CorruptedChunkGuard).
+    /// <summary>ACE PropertyInt.Damage — a weapon's max damage.</summary>
+    public const uint IntDamage = 44;
+    /// <summary>ACE PropertyInt.AttackType — 2 = thrust; 160 / 166 / 486 are the multi-strike masks.</summary>
+    public const uint IntAttackType = 47;
+    /// <summary>ACE PropertyInt.ItemWorkmanship — loot-gen Craft (salvage-bag workmanship is not on weapons).</summary>
+    public const uint IntItemWorkmanship = 105;
+    /// <summary>ACE PropertyInt.WieldSkillType — 41 (Two Handed Combat) for two-handed weapons.</summary>
+    public const uint IntWieldSkillType = 159;
+    /// <summary>ACE PropertyInt.SlayerCreatureType.</summary>
+    public const uint IntSlayerCreatureType = 166;
+    /// <summary>ACE PropertyInt.ElementalDamageBonus.</summary>
+    public const uint IntElementalDamageBonus = 204;
+    /// <summary>ACE PropertyInt.WeaponType — 11 = TwoHanded.</summary>
+    public const uint IntWeaponType = 353;
+    /// <summary>ACE PropertyFloat.CriticalMultiplier — Biting Strike.</summary>
+    public const uint FloatCriticalMultiplier = 136;
+    /// <summary>ACE PropertyFloat.CriticalFrequency — Crushing Blow.</summary>
+    public const uint FloatCriticalFrequency = 147;
+    /// <summary>ACE PropertyFloat.IgnoreArmor — Armor Cleaving.</summary>
+    public const uint FloatIgnoreArmor = 155;
     public const uint IntItemMaxLevel = 319;
     /// <summary>Highest aetheria level on Infinite Leaftide (ACECustom AetheriaChance rolls up to 10; retail stops at 5).</summary>
     public const int AetheriaMaxLevel = 10;
@@ -176,6 +207,22 @@ internal sealed class IltInventory
     public long Quad(WorldObject wo, uint stype)
         => _host.HasGetObjectQuadProperty && _host.TryGetObjectQuadProperty(unchecked((uint)wo.Id), stype, out long v) ? v : 0;
 
+    /// <summary>A float (PropertyFloat) value; 0 when the host cannot read it or the item has none.</summary>
+    public double Double(WorldObject wo, uint stype)
+        => _host.HasGetObjectDoubleProperty && _host.TryGetObjectDoubleProperty(unchecked((uint)wo.Id), stype, out double v) ? v : 0;
+
+    /// <summary>The spell ids on an item (empty when none or the host cannot read them).</summary>
+    public IReadOnlyList<int> SpellIds(WorldObject wo)
+    {
+        if (!_host.HasGetObjectSpellIds) return Array.Empty<int>();
+        var buf = new uint[64];
+        int n = _host.GetObjectSpellIds(unchecked((uint)wo.Id), buf, buf.Length);
+        if (n <= 0) return Array.Empty<int>();
+        var ids = new int[Math.Min(n, buf.Length)];
+        for (int i = 0; i < ids.Length; i++) ids[i] = unchecked((int)buf[i]);
+        return ids;
+    }
+
     public string Str(WorldObject wo, uint stype)
         => _host.HasGetObjectStringProperty && _host.TryGetObjectStringProperty(unchecked((uint)wo.Id), stype, out string v) ? v ?? string.Empty : string.Empty;
 
@@ -190,6 +237,25 @@ internal sealed class IltInventory
 
     public bool HasAppraisal(WorldObject wo)
         => !_host.HasHasAppraisalData || _host.HasAppraisalData(unchecked((uint)wo.Id));
+
+    /// <summary>
+    /// Why an item's property reads cannot be trusted (null = they can). Every property read here
+    /// answers 0 / false both for "the item has none" and for "the host cannot read it", so a chunk
+    /// rule that acts on a 0 must first know the read was real: the host must expose the readers
+    /// and confirm the item's appraisal arrived. <paramref name="quads"/> adds the 64-bit reads
+    /// (item XP), <paramref name="doubles"/> the float reads and <paramref name="spells"/> the
+    /// spell list, for the rules that use them.
+    /// </summary>
+    public string? ReadGap(WorldObject wo, bool quads = false, bool doubles = false, bool spells = false)
+    {
+        if (!_host.HasGetObjectIntProperty) return "int properties";
+        if (!_host.HasGetObjectBoolProperty) return "bool properties";
+        if (quads && !_host.HasGetObjectQuadProperty) return "item XP";
+        if (doubles && !_host.HasGetObjectDoubleProperty) return "float properties";
+        if (spells && !_host.HasGetObjectSpellIds) return "spells";
+        if (!_host.HasHasAppraisalData || !_host.HasAppraisalData(unchecked((uint)wo.Id))) return "appraisal";
+        return null;
+    }
 
     /// <summary>Requests appraisal data, throttled per object. Returns true if a request was sent.</summary>
     public bool RequestAppraisal(WorldObject wo)

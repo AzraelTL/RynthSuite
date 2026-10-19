@@ -90,9 +90,12 @@ public sealed class RynthInventoryPlugin : RynthPluginBase
         _vault = new VaultFeed(text => Host.InvokeChatParser(text));
 
         _view = new InventoryView(_c);
+        // No bar button of its own: opened from the engine Inventory window's GInv button, the
+        // Scripts menu or /ginv.
         _window = _ui.Add(new UiWindow("RynthInventory/Main", "Global Inventory")
         {
             DefaultWidth = 640f, DefaultHeight = 600f, MinWidth = 420f, MinHeight = 300f,
+            BarButton = false,
         });
 
         Host.Log($"[RynthInventory] {Version} initialized. /ginv opens the window. Files: {_c.Store.Root}");

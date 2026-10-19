@@ -21,6 +21,9 @@ internal sealed partial class OracleView
         w.Checkbox("Hide the replies to RynthOracle's own requests", "o.hide", s.HideOwnQuestReplies, v => { s.HideOwnQuestReplies = v; s.Save(); });
         w.Tooltip("/myquests, and on their servers /b, /augs, /top and the like. A command you type yourself always shows its reply.");
         w.Checkbox("Show the Void window for characters with Void Magic", "o.void", s.AutoShowVoidWindow, v => { s.AutoShowVoidWindow = v; s.Save(); });
+        w.Checkbox("Say in chat when a quest timer comes up", "o.alert", s.AlertTimers, v => { s.AlertTimers = v; s.Save(); });
+        w.Tooltip("Watches the quests you track (the * on the Quests tab) and prints a line the moment a cooldown ends.");
+        w.Checkbox("...for every quest you hold, not just tracked ones", "o.alertall", s.AlertAllTimers, v => { s.AlertAllTimers = v; s.Save(); });
         w.Checkbox("Check once a day for a newer quest list", "o.daily", s.CheckQuestListDaily, v => { s.CheckQuestListDaily = v; s.Save(); });
         w.Tooltip("Downloads Oracle of Dereth's master quest list from GitHub, as the original plugin does.");
 
@@ -64,6 +67,7 @@ internal sealed partial class OracleView
         w.SeparatorText("Commands");
         w.BulletText("/ro  open or close this window");
         w.BulletText("/ro character  the Character tab (status, session)");
+        w.BulletText("/ro skills  the Skills tab (raise and train); /ro attributes, /ro progress likewise");
         w.BulletText("/ro timers  open or close the Quest Timers window");
         w.BulletText("/ro fellowship  the Fellowship tab");
         w.BulletText("/ro about  this tab (settings, server)");

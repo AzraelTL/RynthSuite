@@ -64,6 +64,8 @@ internal sealed class IltHubController
     public IltCharms CharmsTab { get; }
     /// <summary>Temple guardians: riddle translator, hand-in, attribute turn-in tracker.</summary>
     public IltGuardian Guardian { get; }
+    /// <summary>Vaulted Dungeons keeper (Mini Remote tab). ILT-only and behind RynthAi's master switch, off by default.</summary>
+    public IltVaultedDungeons VaultedDungeons { get; }
 
     /// <param name="writesBlocked">True while this character's copy from RynthAi is unfinished (IltHubStore.WritesBlocked).</param>
     /// <param name="legacyFolder">The character's RynthAi folder while that copy is unfinished (read-only fallback).</param>
@@ -92,7 +94,8 @@ internal sealed class IltHubController
         Charms = new IltCharmTracker(_ctx);
         CharmsTab = new IltCharms(_ctx, Charms);
         Guardian = new IltGuardian(_ctx, QuestBonus);
-        _features.AddRange(new IIltFeature[] { Banking, PetLogs, Breeding, Rates, QuestBonus, Progression, Gear, CharmsTab, Games, Guardian });
+        VaultedDungeons = new IltVaultedDungeons(_ctx);
+        _features.AddRange(new IIltFeature[] { Banking, PetLogs, Breeding, Rates, QuestBonus, Progression, Gear, CharmsTab, Games, VaultedDungeons, Guardian });
 
         Banking.BalanceChanged += Rates.OnBankBalanceChanged;
         Rates.MovingMoney = () => Banking.MovingMoney;
@@ -192,6 +195,8 @@ internal sealed class IltHubController
         IltSection.Character => true,
         IltSection.Banking => Available && !_ctx.Options.IsOff(IltFeature.Bank),
         IltSection.Games => Available && Games.AnyGameAvailable,
+        // Content, not a server feature bit: an ILT world and the master switch (RynthAi's setting).
+        IltSection.VaultedDungeons => _ctx.Options.IsIltLikeWorld && VaultedDungeons.MasterEnabled(),
         _ => Available,
     };
 
@@ -320,6 +325,14 @@ internal sealed class IltHubController
         }
     }
 
+    /// <summary>The server's killer notification (pump thread): restarts the Vaulted Dungeons no-kill timer, on ILT only.</summary>
+    public void OnKillNotification()
+    {
+        if (!_ctx.Options.IsIltLikeWorld) return;
+        try { VaultedDungeons.OnKillNotification(); }
+        catch (Exception ex) { RynthLog.Exception(LogCat.IltHub, ex, "VaultedDungeons.OnKillNotification"); }
+    }
+
     /// <summary>Pump-thread chat line. Returns true when the line should be hidden.</summary>
     public bool OnChat(string text)
     {
@@ -346,6 +359,7 @@ internal sealed class IltHubController
         IltProgression => LogCat.IltProgression,
         IltGear or IltCharms => LogCat.IltGear,
         IltGames => LogCat.IltGames,
+        IltVaultedDungeons => LogCat.IltHub,
         _ => LogCat.IltHub,
     };
 
@@ -390,7 +404,11 @@ internal sealed class IltHubController
         if (r.Lines.Count == 0) return;
         switch (key)
         {
-            case IltFeature.Aug: Progression.ApplyAugLines(r.Lines); break;
+            case IltFeature.Aug:
+                Progression.ApplyAugLines(r.Lines);
+                // Probe's OnComplete is not RequestAugs' — drain a queued Refresh current / empty retry.
+                Progression.AfterExternalAugCapture();
+                break;
             case IltFeature.Pets: PetLogs.ApplyRoster(false, r.Lines); break;
             case IltFeature.Shinies: PetLogs.ApplyRoster(true, r.Lines); break;
             case IltFeature.Qb: QuestBonus.ApplyQbProbe(r.Lines); break;
@@ -456,7 +474,7 @@ internal sealed class IltHubController
                 {
                     // Quests and Pets are RynthAi's tabs: not ours to open.
                     if (args.Length >= 2 && IltSections.IsUniversalTabName(args[1])) return false;
-                    _ctx.Chat("[Mini Remote] Usage: /ra hub open pets|banking|gear|charms|games|guardian|bounties [show|hide|toggle]  (character: /ro character, quests: /ro)");
+                    _ctx.Chat("[Mini Remote] Usage: /ra hub open pets|banking|gear|charms|games|vaulted|guardian|bounties [show|hide|toggle]  (character: /ro character, quests: /ro)");
                     break;
                 }
                 OpenSection(section, args.Length > 2 ? args[2] : "toggle");
@@ -494,7 +512,8 @@ internal sealed class IltHubController
                 break;
             default:
                 _ctx.Chat("[Mini Remote] /ra hub [show|hide|toggle] (Mini Remote)|refresh|bank|status|features|force on|off|servers [list]|clap|confirm|cancel");
-                _ctx.Chat("[Mini Remote] /ra hub open pets|banking|gear|charms|games [show|hide|toggle]  (Mini Remote tabs; character: /ro character, quests: /ro)");
+                _ctx.Chat("[Mini Remote] /ra hub open pets|banking|gear|charms|games|vaulted [show|hide|toggle]  (Mini Remote tabs; character: /ro character, quests: /ro)");
+                _ctx.Chat("[Mini Remote] /ilt vaulted [on|off|toggle|status]  (Vaulted Dungeons; master switch: Settings > Navigation > Vaulted Dungeons)");
                 _ctx.Chat("[Mini Remote] /ra hub profile list|save <name> [shared]|load <name>   /ra hub suit list|test|load [name]");
                 _ctx.Chat("[Mini Remote] /ra hub attr run|stop|costs|status|auto on|off|every <min>|raise <stat> <n>  (Skills panel > Progression)");
                 _ctx.Chat("[Mini Remote] /ra quests refresh (quiet /myquests)   /ra pets [show|hide]   /ilt qb (the quest bonus list)");
@@ -578,6 +597,13 @@ internal sealed class IltHubController
         if (!IltSections.IsTab(section))
         {
             OpenEnginePanel(IltSections.TabId(section), IltSections.Label(section), mode);
+            return;
+        }
+        if (section == IltSection.VaultedDungeons && !SectionAvailable(section))
+        {
+            _ctx.Chat(_ctx.Options.IsIltLikeWorld
+                ? "[Mini Remote] The Vaulted Dungeons tab is off: turn on \"Vaulted Dungeons\" in Settings > Navigation (the master switch, off by default)."
+                : "[Mini Remote] Vaulted Dungeons is not available on this server (Infinite Leaftide / ACECustom only).");
             return;
         }
         string reply = _ctx.Ai.MiniRemoteTab(IltSections.TabId(section), mode);

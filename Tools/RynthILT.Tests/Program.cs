@@ -45,7 +45,9 @@ internal static class Program
         IltSettingsTests.Register(runner);
         FellowshipCommandTests.Register(runner);
         AetheriaChunkTests.Register(runner);
+        ChunkTargetTests.Register(runner);
         RingChainTests.Register(runner);
+        VaultedDungeonsTests.Register(runner);
         // Before DataApiTests: its last test releases the RynthILT.Data table, which the breeding version test queries.
         BreedingTests.Register(runner);
         DataApiTests.Register(runner);

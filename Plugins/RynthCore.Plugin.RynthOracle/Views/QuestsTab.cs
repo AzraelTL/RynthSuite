@@ -51,9 +51,6 @@ internal sealed partial class OracleView
         else
             w.Text($"{flags.Flags.Count} quest flags on this character, read at {flags.LastReadUtc.ToLocalTime():HH:mm}.");
 
-        w.Button("Refresh", "q.refresh", _c.RequestQuests);
-        w.Tooltip("Sends /myquests to the server and reads the reply.");
-        w.SameLine();
         bool timersShown = _c.QuestTimersWindowVisible();
         w.Button(timersShown ? "Hide quest timers" : "Show quest timers", "q.timers", () => _c.SetQuestTimersWindow(!timersShown));
         w.Tooltip("A small window with the quests you track (the * column) and the time left on each.");
@@ -125,7 +122,7 @@ internal sealed partial class OracleView
             w.SameLine(72f);
             Quest row = q;
             w.Selectable(Cut(q.Label, 44), "q.r." + flag, flag == _questSel, () => SelectQuest(row), 290f);
-            w.Tooltip(flag);
+            w.Tooltip(flag + "\nClick: opens it below and prints its texts in chat.");
             w.SameLine(370f);
             TimerText(w, q, flags, now, done);
             string solves = q.SolvesText(flags);
@@ -163,9 +160,14 @@ internal sealed partial class OracleView
 
     // ── The opened quest and its rewards ──────────────────────────────────
 
+    /// <summary>
+    /// A click opens the quest below the list (a second click closes it) and, as upstream's list
+    /// does, prints its texts in chat: the info and hint, the wiki link and the flag's history.
+    /// </summary>
     private void SelectQuest(Quest q)
     {
-        if (_questSel == q.Flag) { _questSel = ""; return; }   // a second click closes it
+        _c.PrintQuest(q);
+        if (_questSel == q.Flag) { _questSel = ""; return; }
         _questSel = q.Flag;
         _rewardMsg = "";
         LoadRewardEdit(q.Flag);
@@ -208,7 +210,7 @@ internal sealed partial class OracleView
         w.Tooltip("List this quest in the Quest Timers window.");
         w.SameLine();
         Quest print = q;
-        w.Button("Print in chat", "q.sel.print", () => PrintQuest(print));
+        w.Button("Print in chat", "q.sel.print", () => _c.PrintQuest(print));
         w.SameLine();
         w.Button("Close", "q.sel.close", () => _questSel = "");
 
@@ -270,13 +272,6 @@ internal sealed partial class OracleView
         _c.Book.SetReward(flag, r);
         LoadRewardEdit(flag);
         _rewardMsg = r.IsEmpty ? "Cleared." : "Saved: " + r.ShortSummary();
-    }
-
-    private void PrintQuest(Quest q)
-    {
-        string status = q.IsComplete(_c.Flags) ? q.Status(_c.Flags, _c.UtcNow) : "not done";
-        PrintEntry(q.IsNew ? (q.Name.Length > 0 ? q.Name : "Not in the quest list") : q.DisplayName, q.Flag, status, q.Details(), q.Url);
-        if (_c.Book.TryGetReward(q.Flag, out QuestReward r)) _c.Print("Rewards: " + r.LongSummary());
     }
 
     // ── Rows ──────────────────────────────────────────────────────────────

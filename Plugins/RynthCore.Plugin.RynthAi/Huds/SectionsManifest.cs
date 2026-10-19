@@ -71,6 +71,10 @@ internal static class SectionsManifest
             ["charms"] = ("inventory", "Charms", 220, "ILT charms and Guardian Hands: acquired, status, tier, toggles (RynthILT)."),
             ["banking"] = ("inventory", "Banking", 230, "Your ILT bank: balances, deposits, withdrawals and transfers (RynthILT)."),
             ["games"] = ("games", "Games", 100, "ILT games (RynthILT)."),
+            // Listed only while RynthILT shows the tab: the Vaulted Dungeons master switch (RynthAi
+            // Settings > Navigation) is on, on an ILT world.
+            ["vaulted"] = ("nav", "Vaulted Dungeons", 220,
+                "Keep the character in one Vaulted Dungeon (RynthILT; Settings > Navigation > Vaulted Dungeons)."),
         };
 
     /// <summary>The surface name of a tab's view ("section:gear").</summary>

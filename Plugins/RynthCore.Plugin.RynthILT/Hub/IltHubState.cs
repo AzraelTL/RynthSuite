@@ -204,7 +204,7 @@ public sealed class IltGearState
     public bool ChunkInCombat;
     public int ChunkIntervalMs = 2000;
     /// <summary>
-    /// Only chunk aetheria whose max level is below this (Coalesced always chunks). Infinite Leaftide
+    /// Only chunk aetheria whose max level is below this (Coalesced Aetheria too). Infinite Leaftide
     /// aetheria goes up to level <see cref="IltInventory.AetheriaMaxLevel"/>, so the cap runs to one past it.
     /// </summary>
     public int ChunkAetheriaUnderLevel = 4;
@@ -214,6 +214,32 @@ public sealed class IltGearState
     public bool KeepAetheriaWithCritDamage = true;
     /// <summary>Never chunk aetheria carrying a Crit Damage Resist rating (CDR, GearCritDamageResist 375).</summary>
     public bool KeepAetheriaWithCritDamageResist = true;
+    /// <summary>
+    /// Rating level for the C / CD / CDR keep switches: a rating at or above this keeps the piece,
+    /// a lower one does not protect it (it chunks if the other rules allow). 1 = any rating keeps.
+    /// </summary>
+    public int KeepAetheriaRatingAtLeast = 1;
+
+    // Corrupted-weapon keep rules (ub-IT IdleActs > Corr Chunk). All off by default, as in ub-IT:
+    // the hard rules (unmodified, workmanship, cleaving, never-chunk) always apply on top.
+    /// <summary>Never chunk a corrupted weapon with Crushing Blow (CriticalFrequency float 147 &gt; 0).</summary>
+    public bool KeepCorruptedCrushingBlow;
+    /// <summary>Never chunk a corrupted weapon with Biting Strike (CriticalMultiplier float 136 &gt; 0).</summary>
+    public bool KeepCorruptedBitingStrike;
+    /// <summary>Never chunk a corrupted weapon with Armor Cleaving (IgnoreArmor float 155 &gt; 0).</summary>
+    public bool KeepCorruptedArmorCleaving;
+    /// <summary>Never chunk a corrupted weapon with any slayer (SlayerCreatureType int 166 &gt; 0).</summary>
+    public bool KeepCorruptedAnySlayer;
+    /// <summary>Never chunk a multi-strike corrupted weapon (AttackType int 47 = 160 / 166 / 486).</summary>
+    public bool KeepCorruptedMultiStrike;
+    /// <summary>Never chunk a corrupted weapon with an elemental damage bonus (int 204 &gt; 0).</summary>
+    public bool KeepCorruptedElementalBonus;
+    /// <summary>Never chunk a corrupted weapon with any spell on it.</summary>
+    public bool KeepCorruptedAnySpell;
+    /// <summary>Never chunk a corrupted weapon whose max damage (int 44) is at least this. 0 = off.</summary>
+    public int KeepCorruptedMaxDamageAtLeast;
+    /// <summary>Spell ids (comma / space separated): never chunk a corrupted weapon carrying any of them.</summary>
+    public string KeepCorruptedSpellIds = "";
 
     // Auto-clap (/clap all)
     public bool AutoClap;

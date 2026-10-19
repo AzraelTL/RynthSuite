@@ -367,9 +367,13 @@ internal static class MoveTests
         Check.Eq(sizeof(RynthIltHubApiV1), 8 + 9 * IntPtr.Size, "RynthIltHubApiV1: header + 9 functions");
         // SessionStatsMore was appended (2026-10-13); readers accept any table at least
         // BaseStructSize long, so an older RynthAi still connects.
-        Check.Eq(sizeof(RynthAiHubApiV1), 8 + 11 * IntPtr.Size, "RynthAiHubApiV1: header + 11 functions");
+        // VaultedDungeonsEnabled was appended (2026-10-18): the Vaulted Dungeons master switch.
+        Check.Eq(sizeof(RynthAiHubApiV1), 8 + 12 * IntPtr.Size, "RynthAiHubApiV1: header + 12 functions");
         Check.Eq((int)RynthAiHubApiV1.BaseStructSize, 8 + 10 * IntPtr.Size, "RynthAiHubApiV1.BaseStructSize: the first release's 10 functions");
         Check.Eq(RynthAiHubApiV1.SessionStatsMoreOffset, (int)RynthAiHubApiV1.BaseStructSize, "SessionStatsMore right after the base table");
+        Check.Eq(RynthAiHubApiV1.VaultedDungeonsEnabledOffset, 8 + 11 * IntPtr.Size, "VaultedDungeonsEnabled right after SessionStatsMore");
+        Check.Eq((int)Marshal.OffsetOf<RynthAiHubApiV1>(nameof(RynthAiHubApiV1.VaultedDungeonsEnabled)), RynthAiHubApiV1.VaultedDungeonsEnabledOffset,
+            "VaultedDungeonsEnabledOffset is where the field really is");
         Check.Eq(sizeof(QuestFlagV1), 24, "QuestFlagV1");
         Check.Eq(sizeof(QuestStatusV1), 16, "QuestStatusV1");
         Check.Eq(RynthIltHubApiV1.InterfaceName, "RynthILT.Hub", "interface name");
@@ -437,8 +441,10 @@ internal static class MoveTests
             Check.True(IltSections.MovedCommand(kept) == null, $"{IltSections.Label(kept)} is still RynthILT's");
             Check.True(IltSections.IsTab(kept), $"{IltSections.Label(kept)} is a Mini Remote tab");
         }
-        Check.True(IltSections.Tabs.SequenceEqual(new[] { IltSection.Banking, IltSection.Gear, IltSection.Charms, IltSection.Games }),
-                   "the tab list is Banking, Gear, Charms, Games");
+        Check.True(IltSections.MovedCommand(IltSection.VaultedDungeons) == null && IltSections.IsTab(IltSection.VaultedDungeons),
+                   "Vaulted Dungeons is a RynthILT tab (shown only with the master switch, VaultedDungeonsTests)");
+        Check.True(IltSections.Tabs.SequenceEqual(new[] { IltSection.Banking, IltSection.Gear, IltSection.Charms, IltSection.Games, IltSection.VaultedDungeons }),
+                   "the tab list is Banking, Gear, Charms, Games, Vaulted Dungeons");
         Check.False(IltSections.IsTab(IltSection.Character) || IltSections.IsTab(IltSection.Guardian), "Character and the Guardian aren't tabs");
         Check.True(IltSections.TryParse("char", out IltSection c) && c == IltSection.Character, "old Character names still parse (for the redirect)");
         Check.Eq(IltSections.OracleCharacterCommand, "/ro character", "Oracle command");
