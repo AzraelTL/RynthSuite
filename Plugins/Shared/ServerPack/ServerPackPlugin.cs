@@ -85,6 +85,10 @@ public sealed partial class ServerPackPlugin : RynthPluginBase
     public override int Initialize()
     {
         Host.Log($"[{RynthPluginInfo.Name}] Plugin initialized for {Info.Name} ({Info.Id}).");
+        // The server card draws through the engine's cimgui (and so in its current context, a popped-out
+        // Mini Remote's included), never a second copy of ImGui (ImGuiNativeBinding.cs). Found and fixed
+        // by SilentKelpie (rynth PR #12); re-implemented here.
+        RynthCore.Plugin.Shared.ImGuiNativeBinding.Ensure(msg => Host.Log($"[{RynthPluginInfo.Name}] {msg}"));
         ServerInitialize();
         return 0;
     }
