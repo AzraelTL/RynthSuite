@@ -8,12 +8,12 @@ namespace RynthCore.Plugin.RynthInventory.Views;
 
 /// <summary>
 /// The Global Inventory window: a search page (every character on every server, filters,
-/// totals, results, details) and a characters page (snapshot ages, forget). Recorded on the
-/// pump thread, replayed by the engine.
+/// totals, results, details), a characters page (snapshot ages, forget) and, with RynthILT, a
+/// Banking page (Views\BankingTab.cs). Recorded on the pump thread, replayed by the engine.
 /// </summary>
-internal sealed class InventoryView
+internal sealed partial class InventoryView
 {
-    public const int TabSearch = 0, TabCharacters = 1;
+    public const int TabSearch = 0, TabCharacters = 1, TabBanking = 2;
     private const int PageSize = 100;
     private const float RowIcon = 18f, DetailIcon = 32f, DetailsHeight = 190f;
 
@@ -58,10 +58,21 @@ internal sealed class InventoryView
         w.SameLine();
         int chars = _c.Index?.Characters.Count ?? 0;
         w.ToggleButton($"Characters ({chars})", "tab.chars", Tab == TabCharacters, () => Tab = TabCharacters, small: true);
+        if (BankingShown)
+        {
+            w.SameLine();
+            w.ToggleButton("Banking", "tab.bank", Tab == TabBanking, () => Tab = TabBanking, small: true);
+        }
         w.SameLine();
         w.TextDisabled(StatusLine());
         w.Separator();
 
+        // The bank comes from RynthILT, not the inventory files: it draws before they are read.
+        if (Tab == TabBanking)
+        {
+            DrawBanking(w);
+            return;
+        }
         if (_c.Index == null)
         {
             w.TextDisabled(_c.Loading ? "Reading the inventory files..." : "No inventory read yet.");
@@ -222,6 +233,17 @@ internal sealed class InventoryView
 
     private void Select(string key) => _selectedKey = _selectedKey == key ? null : key;
 
+    /// <summary>
+    /// Clicking one of the logged-in character's own items also selects it in the game (the bag and
+    /// the selection panel), as clicking it in the pack would. Another character's item can't be.
+    /// A problem report asked for this (R-20261016-213300-1737).
+    /// </summary>
+    private void SelectInGame(InventoryRow? r)
+    {
+        if (r == null || !r.Owner.IsCurrentCharacter || r.Item.Id == 0 || !_c.Host.HasSelectItem) return;
+        _c.Host.SelectItem(r.Item.Id);
+    }
+
     private void DrawRow(UiWindow w, InventoryRow r)
     {
         ItemRecord it = r.Item;
@@ -234,7 +256,7 @@ internal sealed class InventoryView
         string key = RowKey(r);
         uint? color = !r.Owner.IsCurrentServer ? UiColors.OtherServer : IsStale(r.SeenUtc) ? UiColors.Stale : null;
         if (color != null) w.PushStyleColor(UiFormat.ColText, color.Value);
-        w.Selectable(label, "r." + key, _selectedKey == key, () => Select(key), 0f, icons ? RowIcon : 0f);
+        w.Selectable(label, "r." + key, _selectedKey == key, () => { Select(key); SelectInGame(r); }, 0f, icons ? RowIcon : 0f);
         if (color != null) w.PopStyleColor();
     }
 
@@ -245,7 +267,9 @@ internal sealed class InventoryView
         string label = $"{t.Name}  x{t.Count.ToString("N0", CultureInfo.InvariantCulture)}  -  {t.Characters} character{(t.Characters == 1 ? "" : "s")}";
         if (t.Servers > 1) label += $", {t.Servers} servers";
         string key = GroupKey(t);
-        w.Selectable(label, "g." + key, _selectedKey == key, () => Select(key), 0f, icons ? RowIcon : 0f);
+        // A total across characters: select the logged-in character's own stack, if it has one.
+        w.Selectable(label, "g." + key, _selectedKey == key,
+            () => { Select(key); SelectInGame(t.Holders.Find(h => h.Owner.IsCurrentCharacter)); }, 0f, icons ? RowIcon : 0f);
     }
 
     /// <summary>

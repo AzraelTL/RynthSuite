@@ -7,6 +7,7 @@ using RynthCore.Plugin.RynthInventory.Data;
 using RynthCore.Plugin.RynthInventory.Scanning;
 using RynthCore.Plugin.RynthInventory.Ui;
 using RynthCore.Plugin.RynthInventory.Views;
+using RynthCore.Plugin.Shared;
 using RynthCore.PluginCore;
 using RynthCore.PluginSdk;
 
@@ -17,7 +18,9 @@ namespace RynthCore.Plugin.RynthInventory;
 /// (like Virindi Global Inventory). Each client scans the character it is logged into (a full
 /// scan after login, then whenever the inventory changes, debounced) and writes one file per
 /// character per server; storage the character opens (house storage, banks, vaults) is
-/// recorded when it is opened. /ginv opens a window that merges every file.
+/// recorded when it is opened, and storage another plugin reads for it (a server plugin's
+/// server-side store, through Plugins/Shared/StorageFeed.cs) when that arrives. /ginv opens a
+/// window that merges every file.
 ///
 /// Everything runs on the plugin pump (OnTick and the events the engine drains into it)
 /// except OnChatBarEnter, which the engine may call on AC's thread: it only queues the
@@ -26,7 +29,14 @@ namespace RynthCore.Plugin.RynthInventory;
 /// </summary>
 public sealed class RynthInventoryPlugin : RynthPluginBase
 {
-    public const string Version = "0.1.0";
+    // Previous release: 0.1.0. Keep in step with PluginExports.GetVersion.
+    public const string Version = "0.1.1";
+
+    // RynthILT's bank JSON: every BankTabReadMs on the Banking tab, every BankIdleReadMs with the
+    // window on another tab (so the Banking button appears on ILT worlds), never with it closed.
+    private const long BankTabReadMs = 2000, BankIdleReadMs = 10_000;
+    private long _nextBankReadMs;
+    private string _bankJson = string.Empty;
 
     private const long IdentityRetryMs = 1000;
     private const long AccountWaitMs = 15_000;
@@ -47,10 +57,12 @@ public sealed class RynthInventoryPlugin : RynthPluginBase
     private InventoryView? _view;
     private readonly ConcurrentQueue<string> _commands = new();
 
-    // The Aelrynth account vault (/mule-data), read a few seconds after login and every VaultRefreshMs.
-    private const long VaultFirstAskMs = 8_000, VaultRefreshMs = 10 * 60_000;
-    private VaultFeed? _vault;
-    private long _nextVaultAskMs;
+    // Storage other plugins read for us ("storage" plugin commands, StorageFeed.cs): queued by
+    // ApplyRemoteCommand (any thread), filed on the tick once the character is known. Aelrynth's
+    // account vault comes this way from RynthAelrynth (it was read here until 2026-10-20).
+    private readonly ConcurrentQueue<string> _storagePushes = new();
+    private const int MaxQueuedPushes = 8;
+    private string _lastPush = string.Empty;
 
     private bool _identityKnown;
     private long _loginMs;
@@ -86,8 +98,8 @@ public sealed class RynthInventoryPlugin : RynthPluginBase
         _c.RequestRescan = () => { _scheduler.RequestFullScan(); _forceWrite = true; };
         _c.RequestReload = () => { _reloadWanted = true; _files.Clear(); };
         _c.Forget = ForgetCharacter;
+        _c.BankCommand = SendBankVerb;
         _ui.Log = msg => Host.Log(msg);
-        _vault = new VaultFeed(text => Host.InvokeChatParser(text));
 
         _view = new InventoryView(_c);
         // No bar button of its own: opened from the engine Inventory window's GInv button, the
@@ -115,15 +127,48 @@ public sealed class RynthInventoryPlugin : RynthPluginBase
         _c.LastSavedUtc = default;
         _c.LastSaveError = string.Empty;
         _scanner.Reset();
-        _vault?.Reset();
-        _nextVaultAskMs = 0;
         CloseStorage();
         _lastViewed = 0;
         _lastWriteMs = 0;
         _carriedIds.Clear();
         _carriedPacks.Clear();
         RefreshIconSupport();
+        ClearBank();
         if (_window != null) { _window.Visible = _c.Settings.MainWindowOpen; _window.NeedsPass = true; }
+    }
+
+    /// <summary>Forgets the last bank read (login, logout): the next character's comes fresh.</summary>
+    private void ClearBank()
+    {
+        _c.Bank = Shared.IltBankView.None;
+        _bankJson = string.Empty;
+        _nextBankReadMs = 0;
+    }
+
+    /// <summary>The Banking tab's actions: a verb line for RynthILT, then a quick re-read for its reply.</summary>
+    private bool SendBankVerb(string verb)
+    {
+        long now = Environment.TickCount64;
+        bool ok = _c.InWorld && _c.IltData.BankCommand(Host, now, verb);
+        _nextBankReadMs = now + 500;
+        if (_window != null) _window.NeedsPass = true;
+        return ok;
+    }
+
+    /// <summary>
+    /// Reads RynthILT's bank JSON while the window is open (more often on the Banking tab) and
+    /// redraws when it changed. Reading is what tells RynthILT someone is looking.
+    /// </summary>
+    private void TickBank(long now)
+    {
+        if (!_c.InWorld || _window == null || _view == null || !_window.Visible) return;
+        if (now < _nextBankReadMs) return;
+        _nextBankReadMs = now + (_view.Tab == InventoryView.TabBanking ? BankTabReadMs : BankIdleReadMs);
+        string json = _c.IltData.ReadBank(Host, now);
+        if (string.Equals(json, _bankJson, StringComparison.Ordinal)) return;
+        _bankJson = json;
+        _c.Bank = Shared.IltBankView.Parse(json);
+        _window.NeedsPass = true;
     }
 
     public override void OnLogout()
@@ -138,6 +183,9 @@ public sealed class RynthInventoryPlugin : RynthPluginBase
         _ui.SubmitEmpty(Host);
         _c.Live = null;
         _indexDirty = true;
+        ClearBank();
+        while (_storagePushes.TryDequeue(out _)) { }   // the next character's come fresh
+        _lastPush = string.Empty;
     }
 
     public override void Shutdown()
@@ -226,11 +274,6 @@ public sealed class RynthInventoryPlugin : RynthPluginBase
             case "keep":
                 KeepOpenContainer();
                 break;
-            case "vault":
-                if (_vault == null || !Host.HasInvokeChatParser) { _c.Print("This engine can't send commands for the plugin, so the vault can't be read."); break; }
-                _nextVaultAskMs = Environment.TickCount64 + VaultRefreshMs;
-                _c.Print(_vault.Ask(Environment.TickCount64, force: true) ? "Reading the vault (/mule-data)..." : "The vault is already being read: " + _vault.Describe());
-                break;
             case "reload":
                 _reloadWanted = true;
                 _files.Clear();
@@ -239,9 +282,16 @@ public sealed class RynthInventoryPlugin : RynthPluginBase
             case "status":
                 PrintStatus();
                 break;
+            case "bank":
+            case "banking":
+                // The Banking tab: every character's Infinite Leaftide bank (RynthILT's data). Shows, never toggles off.
+                _view?.ShowBanking();
+                _nextBankReadMs = 0;
+                if (_window != null) { _window.Visible = true; _window.NeedsPass = true; }
+                break;
             case "help":
             case "?":
-                _c.Print("/ginv (window), /ginv <text> (search), /ginv scan (rescan and save now), /ginv keep (record the open container as storage), /ginv vault (read the Aelrynth account vault now), /ginv reload, /ginv status");
+                _c.Print("/ginv (window), /ginv <text> (search), /ginv bank (every character's Infinite Leaftide bank), /ginv scan (rescan and save now), /ginv keep (record the open container as storage), /ginv reload, /ginv status");
                 break;
             default:
                 _view?.SetSearch(arg);
@@ -261,7 +311,7 @@ public sealed class RynthInventoryPlugin : RynthPluginBase
         int items = _c.Live?.Items.Count ?? 0, storage = _c.Live?.Storage.Count ?? 0;
         string saved = _c.LastSavedUtc == default ? "not saved yet" : "saved " + InventoryIndex.Age(_c.LastSavedUtc, DateTime.UtcNow);
         _c.Print($"{who}: {items} items carried, {storage} storage container(s), {saved}. {_c.Index?.Characters.Count ?? 0} characters in {_c.Store.Root}.");
-        if (_vault != null) _c.Print("Aelrynth vault: " + _vault.Describe() + ".");
+        if (_lastPush.Length > 0) _c.Print("From other plugins: " + _lastPush + ".");
         if (_c.LastSaveError.Length > 0) _c.Print("Last save failed: " + _c.LastSaveError);
     }
 
@@ -309,6 +359,7 @@ public sealed class RynthInventoryPlugin : RynthPluginBase
         }
         TickWrite(now);
         TickIndex(now);
+        TickBank(now);
 
         if (!Host.HasUi || _window == null || _view == null) return;
         Record(_window, now, 2000, _view.Draw);
@@ -345,48 +396,42 @@ public sealed class RynthInventoryPlugin : RynthPluginBase
         if (_openStorage != 0 && now >= _nextStorageScanMs)
             ScanStorage(now, final: false);
 
-        TickVault(now);
+        TickStoragePushes(now);
     }
 
-    // ── The account vault ───────────────────────────────────────────────────
+    // ── Storage from other plugins ──────────────────────────────────────────
 
     /// <summary>
-    /// Asks the server for the vault after login and now and then, and files what comes back with the
-    /// character's storage (one record, the same id on every character of the account).
+    /// RynthPluginApplyRemoteCommand: "storage" (StorageFeed.Action) carries a whole store another
+    /// plugin read. Any thread: the payload is only queued (the newest few).
     /// </summary>
-    private void TickVault(long now)
+    internal void ApplyRemoteCommand(string action, string value)
     {
-        VaultFeed? v = _vault;
-        if (v == null || _c.Live == null || !Host.HasInvokeChatParser) return;
-
-        if (_nextVaultAskMs == 0) _nextVaultAskMs = now + VaultFirstAskMs;
-        else if (now >= _nextVaultAskMs && v.Status != VaultFeed.State.Unsupported)
-        {
-            _nextVaultAskMs = now + VaultRefreshMs;
-            v.Ask(now);
-        }
-
-        v.Tick(now, _c.Account);
-        if (v.TakeChanged() && v.Record != null) FileVault(v.Record, now);
+        if (!action.Equals(StorageFeed.Action, StringComparison.OrdinalIgnoreCase) || value.Length == 0 || value.Length > StorageFeed.MaxJsonLength) return;
+        _storagePushes.Enqueue(value);
+        while (_storagePushes.Count > MaxQueuedPushes && _storagePushes.TryDequeue(out _)) { }
     }
 
-    private void FileVault(StorageRecord vault, long now)
+    /// <summary>Files what other plugins sent, once the character (and so its storage) is known. Plugin tick.</summary>
+    private void TickStoragePushes(long now)
     {
         if (_c.Live == null) return;
-        var storage = new List<StorageRecord>(_c.Live.Storage);
-        int i = storage.FindIndex(s => s.Id == vault.Id);
-        if (i >= 0) storage[i] = vault; else storage.Add(vault);
-        CharacterSnapshot snap = NewSnapshot(_c.Live.Items, storage);
-        snap.ScannedUtc = _c.Live.ScannedUtc;
-        _c.Live = snap;
-        _indexDirty = true;
-        _scheduler.ContentChanged(now, snap.ContentHash());
-    }
-
-    // May run on AC's thread: the feed only queues.
-    public override void OnChatWindowText(string? text, int chatType, ref int eat)
-    {
-        if (eat == 0 && _vault != null && _vault.ShouldEat(text, chatType)) eat = 1;
+        while (_storagePushes.TryDequeue(out string? json))
+        {
+            StorageFeedRecord? feed = StorageFeed.Parse(json, out string error);
+            if (feed == null)
+            {
+                Host.Log("[RynthInventory] storage from another plugin refused: " + error);
+                continue;
+            }
+            StorageRecord record = ExternalStorage.ToRecord(feed, DateTime.UtcNow);
+            CharacterSnapshot snap = NewSnapshot(_c.Live.Items, ExternalStorage.FileInto(_c.Live.Storage, record));
+            snap.ScannedUtc = _c.Live.ScannedUtc;
+            _c.Live = snap;
+            _indexDirty = true;
+            _scheduler.ContentChanged(now, snap.ContentHash());
+            _lastPush = $"{record.Label} ({record.Items.Count} item(s)) at {DateTime.Now:HH:mm}";
+        }
     }
 
     private void StartCharacter(long now, uint player, string server, string account, string character)

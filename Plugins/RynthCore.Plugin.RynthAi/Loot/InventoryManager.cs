@@ -425,7 +425,7 @@ public sealed class InventoryManager
     internal static bool MergeProgressed(int targetBefore, int sourceBefore, int targetNow, int sourceNow)
         => targetBefore > 0 && sourceBefore > 0 && (targetNow > targetBefore || sourceNow < sourceBefore);
 
-    private static int GetMaxStackSize(WorldObject item)
+    internal static int GetMaxStackSize(WorldObject item)
     {
         int max = item.Values(LongValueKey.MaxStackSize, 0);
         if (max > 1) return max;

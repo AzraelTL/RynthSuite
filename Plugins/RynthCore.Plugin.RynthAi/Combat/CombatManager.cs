@@ -1147,6 +1147,7 @@ public partial class CombatManager : IDisposable
             _waitingForDebuffResult = false;
             _pendingDebuffTargetId = 0;
         }
+        _debuffs.Forget(id);
     }
     public void SetPlayerId(uint playerId)
     {
@@ -1181,14 +1182,13 @@ public partial class CombatManager : IDisposable
     private uint _playerId;
     private MonsterMatchEvaluator? _monsterMatchEval;
 
-    private readonly HashSet<string> _confirmedDebuffs = new();
-    // Failed tries (fizzle/resist/refusal) per "{target}_{debuff}", cleared with _confirmedDebuffs.
-    private readonly Dictionary<string, int> _debuffFailures = new();
-    private const int DebuffMaxFailures = 3;
+    // The rule's debuffs per target: landed ones renewed before they wear off, failed tries counted.
+    private readonly DebuffTimers _debuffs = new();
     private int _lastDebuffTargetId = 0;
 
     private string? _pendingDebuffKey = null;
     private int _pendingDebuffTargetId = 0;
+    private int _pendingDebuffSpellId = 0;
     private int _pendingDebuffTier = 0;
     private bool _waitingForDebuffResult = false;
     private DateTime _pendingDebuffCastTime = DateTime.MinValue;
@@ -1749,8 +1749,7 @@ public partial class CombatManager : IDisposable
         // "ou cast …". IndexOf matches both "You cast" and "ou cast".
         if (text.IndexOf("ou cast ", StringComparison.OrdinalIgnoreCase) >= 0)
         {
-            string key = $"{_pendingDebuffTargetId}_{_pendingDebuffKey}";
-            _confirmedDebuffs.Add(key);
+            NoteDebuffLanded();
             _waitingForDebuffResult = false;
             _lastSpellCast = DateTime.Now;
             return;
@@ -1780,19 +1779,15 @@ public partial class CombatManager : IDisposable
 
     /// <summary>
     /// A debuff didn't land (fizzle, resist, refusal). Recast it, but only up to
-    /// DebuffMaxFailures times per target: a mob the character's Creature Magic can't land
+    /// DebuffTimers.MaxFailures times per target: a mob the character's Creature Magic can't land
     /// on used to get the same debuff forever, and the bot never reached its attack spells
     /// (debuffs don't feed the no-damage blacklist either).
     /// </summary>
     private void NoteDebuffFailed(string what)
     {
-        string key = $"{_pendingDebuffTargetId}_{_pendingDebuffKey}";
-        _debuffFailures.TryGetValue(key, out int n);
-        _debuffFailures[key] = ++n;
-        if (n >= DebuffMaxFailures)
+        if (_debuffs.Failed(_pendingDebuffTargetId, _pendingDebuffKey ?? ""))   // skip it for this target
         {
-            _confirmedDebuffs.Add(key);   // skip it for this target
-            _host.WriteToChat($"[RynthAi] {what}: {_pendingDebuffKey} — {n} tries on this target, skipping it", 2);
+            _host.WriteToChat($"[RynthAi] {what}: {_pendingDebuffKey} — {DebuffTimers.MaxFailures} tries on this target, skipping it", 2);
         }
         else
         {
@@ -1800,6 +1795,20 @@ public partial class CombatManager : IDisposable
         }
         _waitingForDebuffResult = false;
         _lastSpellCast = DateTime.Now;
+    }
+
+    /// <summary>
+    /// The pending debuff landed (or its result never came, taken as landed): timed by the
+    /// spell's duration so it is cast again just before it wears off; a spell with no duration
+    /// is cast once per target, as all of them were before 2026-10-20. Archmage's Endurance
+    /// isn't counted, so with it a renewal comes early rather than late.
+    /// </summary>
+    private void NoteDebuffLanded()
+    {
+        int seconds = SpellDatabase.DurationSeconds(_pendingDebuffSpellId);
+        _debuffs.Landed(_pendingDebuffTargetId, _pendingDebuffKey ?? "", seconds, DateTime.Now);
+        if (seconds > 0)
+            _host.Log($"[CombatCast] debuff {_pendingDebuffKey} on 0x{(uint)_pendingDebuffTargetId:X8}: lasts {seconds} s, renewed in {seconds - DebuffTimers.Lead(seconds):0} s");
     }
 
     // ── Position re-sync after casts that land nothing (2026-10-12) ──────────────────────────
@@ -1885,104 +1894,80 @@ public partial class CombatManager : IDisposable
     /// <summary>Test seam: one judged magic cast with no damage.</summary>
     internal void MagicMissForTest(int tid) => NoteMagicMissForResync(tid);
 
-    // ── Empyrean Handler lethal-ring evade (chat-triggered back-jump) ─────────
-    // ACECustom Handler emote: "The handler briefly channels infused Empyrean hatred
-    // to release a lethal ring." The ring can't be melee-evaded — if the character is
-    // inside its cast radius they die. On that line, when still in range of a Handler,
-    // cancel the current swing/cast and back-jump away, then resume combat (target kept).
-    private const string HandlerRingChannelHint = "channels infused Empyrean hatred to release a lethal ring";
-    private const string HandlerRingChannelStart = "The handler briefly channels";
-    private const string HandlerNameHint = "Empyrean Handler";
-    /// <summary>Yards: Handler lethal ring is treated as at least this wide (RingRange when larger).</summary>
-    internal const double HandlerRingDangerYards = 12.0;
-    /// <summary>Back-jump charge (ms) — run-back + jump must clear ~ring radius.</summary>
-    private const int HandlerRingJumpHoldMs = 750;
-    private const double HandlerRingEvadeCooldownMs = 4_000;
+    // ── Back away from a danger point (RynthAi.Hub BackAwayFrom) ──────────────
+    // A generic "get out of this radius now", asked for by a server plugin that knows its server's
+    // dangers: face the object, run-back jump away from it (Jumper "xs"; facing away and jumping back
+    // would leap into it), hold attacks until the jump settles, then re-engage the same target.
+    // RynthILT asks for it when Infinite Leaftide's Empyrean Handler channels its lethal ring (the
+    // detection and its setting moved there 2026-10-20; Silentkelpie's PR 12). Only while the macro is
+    // running with combat on: an idle character, or one driven by hand or by a meta, never has the
+    // keyboard taken.
 
-    private DateTime _handlerRingEvadeAt = DateTime.MinValue;
-    private DateTime _handlerRingEvadeUntil = DateTime.MinValue;
-    private int _handlerRingEvadeId;
-    private bool _handlerRingJumpStarted;
+    /// <summary>BackAwayFrom results (RynthAi.Hub BackAwayFrom passes them on as they are).</summary>
+    internal const int BackAwayStarted = 1, BackAwayNotNow = 0, BackAwayOutside = 2, BackAwayUnknownObject = 3, BackAwayJumpRefused = -1;
+
+    /// <summary>The jump charge range a caller may ask for (ms).</summary>
+    internal const int BackAwayMinHoldMs = 100, BackAwayMaxHoldMs = 3000;
+
+    /// <summary>After the jump: turn, land and one re-engage tick before attacks resume (ms).</summary>
+    private const int BackAwaySettleMs = 2_200;
+
+    private DateTime _backAwayUntil = DateTime.MinValue;
+    private bool _backAwayJumpStarted;
 
     /// <summary>
-    /// Plugin wires this to <c>Jumper.Start("xs", faceHeading, ms)</c> — face the Handler
-    /// then run-back jump (x+s) so the body moves away. Returns false if the jumper refused.
+    /// Plugin wires this to <c>Jumper.Start("xs", faceHeading, ms)</c> — face the danger, then
+    /// run-back jump (x+s) so the body moves away. Returns false if the jumper refused.
     /// </summary>
     public Func<float, int, bool>? RequestBackJump { get; set; }
 
     /// <summary>True while the wired jumper is mid-turn / charge / settle.</summary>
     public Func<bool>? JumpBusy { get; set; }
 
-    /// <summary>True while a Handler-ring evade is holding combat (jump or settle).</summary>
-    public bool RingEvadeActive =>
-        _handlerRingEvadeUntil != DateTime.MinValue && DateTime.Now < _handlerRingEvadeUntil;
+    /// <summary>True while a back-away is holding combat (jump or settle).</summary>
+    public bool BackAwayActive =>
+        _backAwayUntil != DateTime.MinValue && DateTime.Now < _backAwayUntil;
 
     /// <summary>
-    /// Chat line from RynthAiPlugin.OnChatWindowText. Starts a back-jump evade when the
-    /// Handler channels its lethal ring and the character is still inside ring range.
+    /// Backs the character away from <paramref name="objectId"/> when it is within the danger radius:
+    /// <paramref name="radiusYards"/>, or Ring Range when that is larger (anything a ring reaches).
+    /// <paramref name="holdMs"/> is the jump's charge (clamped to 100-3000 ms). Cancels the swing or
+    /// cast in progress, keeps the target. <paramref name="reason"/> is only for the log. Returns a
+    /// BackAway* result: started, not now (macro stopped, combat off, already backing away), outside
+    /// the radius, unknown object (no position), or the jump didn't start. Pump thread.
     /// </summary>
-    public void HandleChatForRingEvade(string? text, int chatType = -1)
+    public int BackAwayFrom(int objectId, double radiusYards, int holdMs, string reason)
     {
-        if (string.IsNullOrEmpty(text)) return;
-        // Gate: only while the macro is running with combat on, and only if the setting allows it.
-        // Otherwise a Handler line heard while the character is idle or being driven by hand (or by a
-        // meta) would take over the keyboard for a back-jump.
-        if (!_settings.HandlerRingEvade || !_settings.IsMacroRunning || !_settings.EnableCombat) return;
-        // Handler channel is an Emote (0x0C). ChatSource.IsPlayerAuthored treats Emote as
-        // player speech, which would skip every real Handler line — anchor on the unique
-        // phrase starting the line instead (player copies are "Name says, \"...\").
-        bool anchored =
-            RynthCore.Plugin.Shared.ChatSource.StartsWithMarker(text, HandlerRingChannelStart, StringComparison.OrdinalIgnoreCase)
-            || (RynthCore.Plugin.Shared.ChatSource.StartsWithMarker(text, "The handler", StringComparison.OrdinalIgnoreCase)
-                && text.IndexOf(HandlerRingChannelHint, StringComparison.OrdinalIgnoreCase) >= 0);
-        if (!anchored)
+        string why = string.IsNullOrWhiteSpace(reason) ? "a server plugin's request" : reason.Trim();
+        if (!_settings.IsMacroRunning || !_settings.EnableCombat) return BackAwayNotNow;
+        if (BackAwayActive) return BackAwayNotNow;
+        uint me = _host.GetPlayerId();
+        if (me == 0 || objectId == 0) return BackAwayUnknownObject;
+        double dist = _worldFilter.Distance(unchecked((int)me), objectId);
+        if (dist < 0 || dist == double.MaxValue || double.IsNaN(dist))
         {
-            // Mid-line only when the type is clearly not player speech (some clients strip "The ").
-            if (chatType is RynthCore.Plugin.Shared.ChatSource.Speech
-                or RynthCore.Plugin.Shared.ChatSource.Tell
-                or RynthCore.Plugin.Shared.ChatSource.OutgoingTell
-                or RynthCore.Plugin.Shared.ChatSource.Channel
-                or RynthCore.Plugin.Shared.ChatSource.ChannelSend
-                or RynthCore.Plugin.Shared.ChatSource.Allegiance
-                or RynthCore.Plugin.Shared.ChatSource.Fellowship)
-                return;
-            if (text.IndexOf(HandlerRingChannelHint, StringComparison.OrdinalIgnoreCase) < 0) return;
-            if (text.IndexOf(" says,", StringComparison.OrdinalIgnoreCase) >= 0
-                || text.IndexOf(" tells you,", StringComparison.OrdinalIgnoreCase) >= 0)
-                return;
+            _host.Log($"[CombatEvade] Back away ({why}): 0x{objectId:X8} has no position - no jump.");
+            return BackAwayUnknownObject;
         }
-
-        DateTime now = DateTime.Now;
-        if (_handlerRingEvadeAt != DateTime.MinValue
-            && (now - _handlerRingEvadeAt).TotalMilliseconds < HandlerRingEvadeCooldownMs)
-            return;
-
-        if (!TryFindHandlerForRingEvade(out int handlerId, out double dist, out string name))
-        {
-            _host.Log("[CombatEvade] Handler lethal-ring channel heard, but no Empyrean Handler is nearby — no jump.");
-            return;
-        }
-
-        double danger = Math.Max(HandlerRingDangerYards, Math.Max(1, _settings.RingRange));
+        string name = _worldFilter[objectId]?.Name ?? $"0x{objectId:X8}";
+        double danger = Math.Max(double.IsNaN(radiusYards) ? 0 : radiusYards, Math.Max(1, _settings.RingRange));
         if (dist > danger)
         {
-            _host.Log($"[CombatEvade] Handler lethal-ring channel; '{name}' at {dist:0.0} m (outside {danger:0.#} m) — staying put.");
-            return;
+            _host.Log($"[CombatEvade] Back away ({why}): '{name}' at {dist:0.0} m (outside {danger:0.#} m) - staying put.");
+            return BackAwayOutside;
         }
 
-        // Face the Handler, then Jumper "xs" (back + run) moves the body away from it.
-        // Facing away + back-jump would leap into the ring.
-        float faceHandler = 0f;
-        if (TryGetHeadingTo(handlerId, out double toHandler, out _))
-            faceHandler = (float)(toHandler % 360.0);
-        else if (_host.TryGetPlayerHeading(out float curr))
-            faceHandler = curr;
+        // Face the danger, then Jumper "xs" (back + run) moves the body away from it.
+        float face = 0f;
+        if (TryGetHeadingTo(objectId, out double toIt, out _))
+            face = (float)(toIt % 360.0);
+        else if (PlayerCompass.TryGet(_host, out float curr))
+            face = curr;
 
-        _handlerRingEvadeAt = now;
-        _handlerRingEvadeId = handlerId;
-        _handlerRingJumpStarted = false;
+        int hold = Math.Clamp(holdMs, BackAwayMinHoldMs, BackAwayMaxHoldMs);
+        _backAwayJumpStarted = false;
         // Hold combat long enough for turn + charge + land + one re-engage tick.
-        _handlerRingEvadeUntil = now.AddMilliseconds(HandlerRingJumpHoldMs + 2_200);
+        _backAwayUntil = DateTime.Now.AddMilliseconds(hold + BackAwaySettleMs);
 
         // Stop the bound melee/missile attack so the jump isn't eaten by the swing servo.
         try
@@ -1992,98 +1977,48 @@ public partial class CombatManager : IDisposable
         }
         catch { }
 
-        bool started = RequestBackJump?.Invoke(faceHandler, HandlerRingJumpHoldMs) == true;
-        if (started)
+        if (RequestBackJump?.Invoke(face, hold) == true)
         {
-            _handlerRingJumpStarted = true;
-            _host.Log($"[CombatEvade] Empyrean Handler lethal ring — back-jump away from '{name}' " +
-                      $"at {dist:0.0} m (danger {danger:0.#} m), face {faceHandler:0}° then xs.");
+            _backAwayJumpStarted = true;
+            _host.Log($"[CombatEvade] Back away ({why}): back-jump away from '{name}' " +
+                      $"at {dist:0.0} m (danger {danger:0.#} m), face {face:0} then xs.");
+            return BackAwayStarted;
         }
-        else
-        {
-            _handlerRingEvadeUntil = DateTime.MinValue;
-            _handlerRingEvadeId = 0;
-            _host.Log("[CombatEvade] Empyrean Handler lethal ring heard in range, but the back-jump did not start.");
-        }
+        _backAwayUntil = DateTime.MinValue;
+        _host.Log($"[CombatEvade] Back away ({why}): '{name}' in range, but the back-jump did not start.");
+        return BackAwayJumpRefused;
     }
 
     /// <summary>
-    /// Holds Think from attacking while the Handler-ring back-jump runs. Keeps the target
-    /// so combat re-engages as soon as the jumper settles.
+    /// Holds Think from attacking while a back-away jump runs. Keeps the target so combat
+    /// re-engages as soon as the jumper settles.
     /// </summary>
-    private bool TickRingEvade()
+    private bool TickBackAway()
     {
-        if (_handlerRingEvadeUntil == DateTime.MinValue) return false;
+        if (_backAwayUntil == DateTime.MinValue) return false;
         DateTime now = DateTime.Now;
         bool jumperBusy = JumpBusy?.Invoke() == true;
 
         // Jump never started / failed: clear early.
-        if (_handlerRingJumpStarted && !jumperBusy && now >= _handlerRingEvadeUntil)
+        if (_backAwayJumpStarted && !jumperBusy && now >= _backAwayUntil)
         {
-            _handlerRingEvadeUntil = DateTime.MinValue;
-            _handlerRingEvadeId = 0;
-            _handlerRingJumpStarted = false;
-            _host.Log("[CombatEvade] Handler ring evade done — re-engaging.");
+            _backAwayUntil = DateTime.MinValue;
+            _backAwayJumpStarted = false;
+            _host.Log("[CombatEvade] Back away done - re-engaging.");
             return false;
         }
 
-        if (jumperBusy || now < _handlerRingEvadeUntil)
+        if (jumperBusy || now < _backAwayUntil)
         {
-            LastCombatSkipReason = "handler-ring-evade";
+            LastCombatSkipReason = "back-away";
             _tickWait = CombatLatencyTracker.Wait.Other;
             return true;
         }
 
-        _handlerRingEvadeUntil = DateTime.MinValue;
-        _handlerRingEvadeId = 0;
-        _handlerRingJumpStarted = false;
-        _host.Log("[CombatEvade] Handler ring evade done — re-engaging.");
+        _backAwayUntil = DateTime.MinValue;
+        _backAwayJumpStarted = false;
+        _host.Log("[CombatEvade] Back away done - re-engaging.");
         return false;
-    }
-
-    /// <summary>Nearest Empyrean Handler (active target preferred when it is one).</summary>
-    private bool TryFindHandlerForRingEvade(out int handlerId, out double dist, out string name)
-    {
-        handlerId = 0; dist = double.MaxValue; name = "";
-        int me = _host.GetPlayerId() == 0 ? 0 : (int)_host.GetPlayerId();
-        if (me == 0) return false;
-
-        int bestId = 0;
-        double bestDist = double.MaxValue;
-        string bestName = "";
-
-        void Consider(int id, string? nm)
-        {
-            if (id == 0 || string.IsNullOrEmpty(nm)) return;
-            if (nm.IndexOf(HandlerNameHint, StringComparison.OrdinalIgnoreCase) < 0) return;
-            double d = _worldFilter.Distance(me, id);
-            if (d < 0 || d >= bestDist) return;
-            bestDist = d; bestId = id; bestName = nm;
-        }
-
-        if (activeTargetId != 0)
-            Consider(activeTargetId, _worldFilter[activeTargetId]?.Name);
-
-        foreach (var s in _scannedTargets)
-            Consider(s.Id, s.Name);
-
-        // Landscape fallback when the scan hasn't listed it yet (channel can land mid-approach).
-        if (bestId == 0)
-        {
-            try
-            {
-                foreach (WorldObject wo in _worldFilter.GetLandscape())
-                {
-                    if ((int)wo.ObjectClass != (int)AcObjectClass.Monster) continue;
-                    Consider(wo.Id, wo.Name);
-                }
-            }
-            catch { }
-        }
-
-        if (bestId == 0) return false;
-        handlerId = bestId; dist = bestDist; name = bestName;
-        return true;
     }
 
     public void ReportDamageOnTarget(int targetId)
@@ -3098,9 +3033,9 @@ public partial class CombatManager : IDisposable
             return true;
         }
 
-        // Empyrean Handler lethal-ring back-jump: hold casts/swings until the jump settles,
-        // then fall through and re-engage the same target.
-        if (TickRingEvade())
+        // A back-away (a server plugin's danger, e.g. RynthILT's Empyrean Handler ring): hold
+        // casts/swings until the jump settles, then fall through and re-engage the same target.
+        if (TickBackAway())
             return true;
 
         double acDistanceLimit = _settings.MonsterRange;
@@ -6522,7 +6457,7 @@ public partial class CombatManager : IDisposable
         {
             if ((DateTime.Now - _pendingDebuffCastTime).TotalMilliseconds > DEBUFF_RESULT_TIMEOUT_MS)
             {
-                _confirmedDebuffs.Add($"{_pendingDebuffTargetId}_{_pendingDebuffKey}");
+                NoteDebuffLanded();
                 _waitingForDebuffResult = false;
             }
             else
@@ -6534,8 +6469,7 @@ public partial class CombatManager : IDisposable
 
         if (activeTargetId != _lastDebuffTargetId)
         {
-            _confirmedDebuffs.Clear();
-            _debuffFailures.Clear();
+            _debuffs.NewTarget(DateTime.Now);
             _lastDebuffTargetId = activeTargetId;
         }
 
@@ -6545,10 +6479,11 @@ public partial class CombatManager : IDisposable
         if (rule != null)
         {
             var pendingDebuffs = BuildDebuffList(rule, element);
+            DateTime now = DateTime.Now;
             foreach (var debuffKey in pendingDebuffs)
             {
-                string key = $"{activeTargetId}_{debuffKey}";
-                if (_confirmedDebuffs.Contains(key)) continue;
+                if (_debuffs.IsOn(activeTargetId, debuffKey, now)) continue;
+                bool renewal = _debuffs.RenewAt(activeTargetId, debuffKey) != null;
 
                 int spellId = 0;
                 int castTier = 0;
@@ -6571,10 +6506,11 @@ public partial class CombatManager : IDisposable
                     _lastCastWasRing = false;
                     _pendingDebuffKey = debuffKey;
                     _pendingDebuffTargetId = activeTargetId;
+                    _pendingDebuffSpellId = spellId;
                     _pendingDebuffTier = castTier;
                     _waitingForDebuffResult = true;
                     _pendingDebuffCastTime = DateTime.Now;
-                    _host.WriteToChat($"[RynthAi] Casting: {debuffKey} (T{castTier}) on {target.Name}", 5);
+                    _host.WriteToChat($"[RynthAi] {(renewal ? "Renewing" : "Casting")}: {debuffKey} (T{castTier}) on {target.Name}", 5);
                 }
                 catch { }
                 return;
@@ -6768,8 +6704,9 @@ public partial class CombatManager : IDisposable
     private bool HasPendingDebuffs(MonsterRule rule, string element)
     {
         if (rule == null) return false;
+        DateTime now = DateTime.Now;
         foreach (var debuffKey in BuildDebuffList(rule, element))
-            if (!_confirmedDebuffs.Contains($"{activeTargetId}_{debuffKey}")) return true;
+            if (!_debuffs.IsOn(activeTargetId, debuffKey, now)) return true;
         return false;
     }
 

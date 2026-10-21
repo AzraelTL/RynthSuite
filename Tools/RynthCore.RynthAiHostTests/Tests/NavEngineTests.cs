@@ -32,6 +32,7 @@ internal static class NavEngineTests
         r.Add("nav engine: a Once route ends, turns nav off, and re-runs from [0]", OnceCompletes);
         r.Add("nav engine: closest approach counts as arriving; a pause forgets it", SweepPass);
         r.Add("nav engine: a pause point waits its time on the clock", PausePoint);
+        r.Add("nav engine: standing still through a pause, the stop is sent once and then once a second (not every tick)", PauseStopsOnce);
         r.Add("nav engine: a chat point sends its text once and moves on", ChatPoint);
         r.Add("nav engine: a jump point jumps on arrival (heading and power clamped)", JumpPoint);
         r.Add("nav engine: a recall that teleports moves on after the settle", RecallTeleports);
@@ -261,6 +262,26 @@ internal static class NavEngineTests
         Check.Eq(nav.Idx, 0, "2.9 s: still pausing");
         nav.Run(0.2);
         Check.Eq(nav.Idx, 1, "3.1 s: on to [1]");
+    }
+
+    /// <summary>
+    /// Standing still through a pause, nav sends its stop once and then a reminder a second, not every
+    /// tick: in portal space the game thread takes none of them and 137 ran 12.7 s late, against the
+    /// next leg (Dargoth Hera, 2026-10-19).
+    /// </summary>
+    private static void PauseStopsOnce()
+    {
+        FakeHost.Reset(); At(0, 0);
+        var pause = Pt(0, 0, T.Pause); pause.PauseTimeMs = 5000;
+        var nav = new Nav(Route(RT.Circular, pause, Pt(20, 0)));
+        nav.Tick(100);
+        int before = FakeHost.AutoRunCalls.Count(on => !on);
+        nav.Run(4.5);
+        int during = FakeHost.AutoRunCalls.Count(on => !on) - before;
+        Check.True(nav.E.GetStateSnapshot().InPause, "still pausing");
+        Check.True(during <= 5, $"4.5 s of pause: {during} autorun-off sends (a reminder a second at most)");
+        Check.True(during >= 3, $"but the reminders keep coming ({during})");
+        Check.False(FakeHost.AutoRun, "standing still");
     }
 
     private static void ChatPoint()

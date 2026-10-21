@@ -39,8 +39,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Server signal vs a player's copy of it (VaultFeed). Also linked by RynthInventory.Tests. -->
-    <Compile Include="..\Shared\ChatSource.cs" Link="Shared\ChatSource.cs" />
+    <!-- Storage another plugin reads for us ("storage" commands: Aelrynth's vault from RynthAelrynth). Also linked by RynthInventory.Tests. -->
+    <Compile Include="..\Shared\StorageFeed.cs" Link="Shared\StorageFeed.cs" />
+    <!-- RynthILT's "RynthILT.Data" interface: the Banking tab's balances for every character on the server. -->
+    <Compile Include="..\Shared\RynthIltDataApi.cs" Link="Shared\RynthIltDataApi.cs" />
   </ItemGroup>
 
 </Project>

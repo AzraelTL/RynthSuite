@@ -34,6 +34,8 @@ internal sealed class IltHubController
     private int _questGeneration;        // RynthAi's /myquests refreshes seen (NoteQuestTrackerOutcome)
     private bool _availabilityAnnounced; // "open the Mini Remote" hint printed this session
     private volatile int _forceRequest = -1; // SetForceIlt from another thread, applied on the next tick
+    private long _tabDrawnAt = long.MinValue / 2; // a tab drawn as RynthCore's section view (render thread)
+    private const long TabDrawnMs = 2000;
 
     // "RynthILT.Data" (Plugins/Shared/RynthIltDataApi.cs): the charms and bank snapshots, rebuilt on
     // the pump every DataRebuildMs only while a reader has asked within DataWatchMs.
@@ -45,6 +47,11 @@ internal sealed class IltHubController
     private long _charmsBuiltAt, _bankBuiltAt, _siblingsReadAt;
     private volatile string _charmsJson = string.Empty;
     private volatile string _bankJson = string.Empty;
+
+    // "RynthILT.Server" profile JSON (RynthOracle: feature states, fellowship rules, the /qb list). Rebuilt ~1 s.
+    private const long ProfileRebuildMs = 1000;
+    private long _profileBuiltAt;
+    private volatile string _profileJson = string.Empty;
     private List<IltBankExport.Row> _siblings = new();
 
     public IltBanking Banking { get; }
@@ -55,6 +62,8 @@ internal sealed class IltHubController
     public IltPetLogs PetLogs { get; }
     /// <summary>The pet breeding tracker (the Pets tab's Breeding sub-tab, and the "RynthILT.Data" breeding JSON).</summary>
     public IltPetBreeding Breeding { get; }
+    /// <summary>The Pets tab's ACECustom sections: pet charms, the summon-from-empty refill path, siphon auto-capture.</summary>
+    public IltPetAutomation PetAutomation { get; }
     public IltProgression Progression { get; }
     public IltGear Gear { get; }
     public IltGames Games { get; }
@@ -64,8 +73,12 @@ internal sealed class IltHubController
     public IltCharms CharmsTab { get; }
     /// <summary>Temple guardians: riddle translator, hand-in, attribute turn-in tracker.</summary>
     public IltGuardian Guardian { get; }
-    /// <summary>Vaulted Dungeons keeper (Mini Remote tab). ILT-only and behind RynthAi's master switch, off by default.</summary>
+    /// <summary>Vaulted Dungeons keeper (Mini Remote tab). ILT-only and behind its master switch (State.VaultedDungeonsEnabled), off by default.</summary>
     public IltVaultedDungeons VaultedDungeons { get; }
+    /// <summary>The Empyrean Handler's lethal ring: asks RynthAi to back away (RynthAi.Hub BackAwayFrom).</summary>
+    public IltRingEvade RingEvade { get; }
+    /// <summary>T11 gear: the "/aug" wield counters for RynthAi's loot rules, "/ilt t11".</summary>
+    public IltT11 T11 { get; }
 
     /// <param name="writesBlocked">True while this character's copy from RynthAi is unfinished (IltHubStore.WritesBlocked).</param>
     /// <param name="legacyFolder">The character's RynthAi folder while that copy is unfinished (read-only fallback).</param>
@@ -86,6 +99,7 @@ internal sealed class IltHubController
         Banking = new IltBanking(_ctx);
         PetLogs = new IltPetLogs(_ctx);
         Breeding = new IltPetBreeding(_ctx);
+        PetAutomation = new IltPetAutomation(_ctx);
         Rates = new IltSessionRates(_ctx);
         QuestBonus = new IltQuestBonus(_ctx);
         Progression = new IltProgression(_ctx);
@@ -95,13 +109,33 @@ internal sealed class IltHubController
         CharmsTab = new IltCharms(_ctx, Charms);
         Guardian = new IltGuardian(_ctx, QuestBonus);
         VaultedDungeons = new IltVaultedDungeons(_ctx);
-        _features.AddRange(new IIltFeature[] { Banking, PetLogs, Breeding, Rates, QuestBonus, Progression, Gear, CharmsTab, Games, VaultedDungeons, Guardian });
+        RingEvade = new IltRingEvade(_ctx);
+        T11 = new IltT11(_ctx);
+        _features.AddRange(new IIltFeature[] { Banking, PetLogs, Breeding, PetAutomation, Rates, QuestBonus, Progression, Gear, CharmsTab, Games, VaultedDungeons, Guardian, RingEvade, T11 });
 
         Banking.BalanceChanged += Rates.OnBankBalanceChanged;
         Rates.MovingMoney = () => Banking.MovingMoney;
         options.ProbeReplyTap = OnProbeReply;
         _ui = new IltHubUi(this, _ctx);
         _ctx.ShowTab = section => _ctx.Ai.MiniRemoteTab(IltSections.TabId(section), "show");
+        RebuildProfile();
+    }
+
+    /// <summary>
+    /// The latest "RynthILT.Server" profile JSON: Leaftide features, fellowship rules and the /qb
+    /// list (Plugins/Shared/RynthIltServerApi.cs). Rebuilt on the pump about once a second so any
+    /// thread (ServerInterface) may read it.
+    /// </summary>
+    public string ProfileJson => _profileJson;
+
+    /// <summary>Rebuilds <see cref="ProfileJson"/> from the current server options. Pump thread.</summary>
+    private void RebuildProfile()
+    {
+        IltServerOptions o = _ctx.Options;
+        _profileJson = IltFeatureCatalog.BuildProfileJson(
+            o.IsIltLikeWorld, o.WorldName, _ctx.State.ForceLeaftideFeatures,
+            o.Source ?? string.Empty, o.LastRefreshUtc, o.Get,
+            QuestBonus.Snapshot());
     }
 
     /// <summary>
@@ -142,6 +176,20 @@ internal sealed class IltHubController
         {
             if (!_ctx.Options.IsIltLikeWorld) return;
             Breeding.RunVerb(line);
+        });
+
+    /// <summary>
+    /// The Temple guardian JSON ("RynthILT.Data" GetGuardianJson): switches, last answer, hand-in
+    /// status and attribute turn-ins. "" off an ILT world. Any thread.
+    /// </summary>
+    public string GuardianJson => _ctx.Options.IsIltLikeWorld ? Guardian.ReaderJson(_ctx.Options.WorldName) : string.Empty;
+
+    /// <summary>A reader's guardian verb line, posted to the pump (IltGuardian.RunVerb). Any thread.</summary>
+    public void RequestGuardianVerb(string line)
+        => _ctx.Post(() =>
+        {
+            if (!_ctx.Options.IsIltLikeWorld) return;
+            Guardian.RunVerb(line);
         });
 
     /// <summary>A reader's bank verb line, posted to the pump (IltBanking.RunVerb). Any thread.</summary>
@@ -195,7 +243,7 @@ internal sealed class IltHubController
         IltSection.Character => true,
         IltSection.Banking => Available && !_ctx.Options.IsOff(IltFeature.Bank),
         IltSection.Games => Available && Games.AnyGameAvailable,
-        // Content, not a server feature bit: an ILT world and the master switch (RynthAi's setting).
+        // Content, not a server feature bit: an ILT world and the master switch.
         IltSection.VaultedDungeons => _ctx.Options.IsIltLikeWorld && VaultedDungeons.MasterEnabled(),
         _ => Available,
     };
@@ -211,6 +259,9 @@ internal sealed class IltHubController
 
     /// <summary>Render thread: one Mini Remote ILT tab's body (RynthAi's MiniRemoteHud draws the tab bar).</summary>
     public void RenderTab(IltSection section) => _ui.RenderTab(section);
+
+    /// <summary>Render thread: a tab was just drawn as RynthCore's section view (it counts as the Mini Remote on screen).</summary>
+    public void NoteTabDrawn() => System.Threading.Interlocked.Exchange(ref _tabDrawnAt, IltHubContext.NowMs);
 
     /// <summary>
     /// Render thread: the ILT session extras (coins, pyreals, item conversions) in RynthCore's Mini
@@ -288,8 +339,18 @@ internal sealed class IltHubController
         try { RebuildReaderData(now); }
         catch (Exception ex) { RynthLog.Exception(LogCat.IltHub, ex, "RebuildReaderData"); }
 
-        // "Mini Remote on screen" gates bank auto-refresh and the gear / split-arrow scans.
-        _ctx.State.WindowVisible = _ctx.Ai.MiniRemoteVisible;
+        // The profile other plugins read ("RynthILT.Server"): world, feature states, fellowship, /qb.
+        if (now - _profileBuiltAt >= ProfileRebuildMs)
+        {
+            _profileBuiltAt = now;
+            try { RebuildProfile(); }
+            catch (Exception ex) { RynthLog.Exception(LogCat.IltHub, ex, "RebuildProfile"); }
+        }
+
+        // "Mini Remote on screen" gates bank auto-refresh and the gear / split-arrow scans: RynthAi's Mini
+        // Remote, or one of the tabs drawn as RynthCore's section view in the last couple of seconds.
+        _ctx.State.WindowVisible = _ctx.Ai.MiniRemoteVisible
+                                   || now - System.Threading.Interlocked.Read(ref _tabDrawnAt) < TabDrawnMs;
 
         // One hint per session once the server confirms ILT features. The Mini Remote is separate
         // from the main RynthAi panel, so say how to open it.
@@ -325,6 +386,59 @@ internal sealed class IltHubController
         }
     }
 
+    /// <summary>A creature's health update from the server (RynthPluginOnUpdateHealth): auto-capture's fallback health read.</summary>
+    public void OnUpdateHealth(uint objectId, float healthRatio)
+    {
+        if (!_ctx.Options.IsIltLikeWorld) return;
+        PetAutomation.NoteHealth(objectId, healthRatio);
+    }
+
+    /// <summary>
+    /// The sub-tabs RynthILT adds to one of RynthAi's tabs (RynthILT.Hub GetSubTabs): the Pets tab's
+    /// Breeding on an ILT world whose server hasn't reported pet breeding off. (Id, label) pairs; the
+    /// id is a RenderSection id. Any thread.
+    /// </summary>
+    public (string Id, string Label)[] SubTabs(string parent)
+    {
+        if (!string.Equals(parent, RynthCore.Plugin.Shared.RynthIltHub.TabParentPets, StringComparison.OrdinalIgnoreCase)
+            || !_ctx.Options.IsIltLikeWorld || _ctx.Options.IsOff(RynthCore.Plugin.Shared.RynthIltHub.FeaturePetBreeding))
+            return Array.Empty<(string, string)>();
+        return new[] { (RynthCore.Plugin.Shared.RynthIltHub.SectionPetBreeding, "Breeding") };
+    }
+
+    /// <summary>
+    /// RynthILT.Hub GetSetting: a setting another plugin mirrors (RynthIltHub.Setting*), -1 when not offered
+    /// (unknown key, or off an ILT world: the engine row then hides). Any thread.
+    /// </summary>
+    public int GetSetting(string key) => key switch
+    {
+        RynthCore.Plugin.Shared.RynthIltHub.SettingVaultedDungeons when _ctx.Options.IsIltLikeWorld
+            => _ctx.State.VaultedDungeonsEnabled ? 1 : 0,
+        _ => -1,
+    };
+
+    /// <summary>
+    /// RynthILT.Hub GetText: a short text RynthAi shows (RynthIltHub.Text*); "" for an unknown id, and
+    /// the session tail off ILT. Any thread.
+    /// </summary>
+    public string GetText(string id) => id switch
+    {
+        RynthCore.Plugin.Shared.RynthIltHub.TextServerId => IltSectionsManifest.Server,
+        RynthCore.Plugin.Shared.RynthIltHub.TextSessionReport when _ctx.Options.IsIltLikeWorld => _ui.SessionReportTail(),
+        _ => string.Empty,
+    };
+
+    /// <summary>RynthILT.Hub SetSetting: false for an unknown key. Saved with the state (next periodic save). Any thread.</summary>
+    public bool SetSetting(string key, int value)
+    {
+        if (key != RynthCore.Plugin.Shared.RynthIltHub.SettingVaultedDungeons) return false;
+        bool on = value != 0;
+        if (_ctx.State.VaultedDungeonsEnabled != on)
+            RynthLog.Write(LogCat.IltHub, $"Vaulted Dungeons master switch {(on ? "on" : "off")} (Settings window)");
+        _ctx.State.VaultedDungeonsEnabled = on;
+        return true;
+    }
+
     /// <summary>The server's killer notification (pump thread): restarts the Vaulted Dungeons no-kill timer, on ILT only.</summary>
     public void OnKillNotification()
     {
@@ -334,13 +448,16 @@ internal sealed class IltHubController
     }
 
     /// <summary>Pump-thread chat line. Returns true when the line should be hidden.</summary>
-    public bool OnChat(string text)
+    public bool OnChat(string text, int chatType = -1)
     {
         if (string.IsNullOrEmpty(text)) return false;
         string line = text.TrimEnd('\r', '\n');
         _ctx.Options.OnChatLine(line);
         bool eat = _ctx.Capture.OnChatLine(line);
         if (!_ctx.Options.IsIltLikeWorld) return eat;
+        // The ring line needs its chat type (a player repeating it is ignored).
+        try { RingEvade.OnChatLine(line, chatType); }
+        catch (Exception ex) { RynthLog.Exception(LogCat.IltHub, ex, "IltRingEvade.OnChatLine"); }
         foreach (var f in _features)
         {
             try { eat |= f.OnChat(line); }
@@ -353,7 +470,7 @@ internal sealed class IltHubController
     private static LogCat CategoryOf(IIltFeature f) => f switch
     {
         IltBanking => LogCat.IltBanking,
-        IltPetLogs or IltPetBreeding => LogCat.IltPets,
+        IltPetLogs or IltPetBreeding or IltPetAutomation => LogCat.IltPets,
         IltSessionRates => LogCat.IltRates,
         IltQuestBonus => LogCat.IltQuests,
         IltProgression => LogCat.IltProgression,
@@ -513,7 +630,7 @@ internal sealed class IltHubController
             default:
                 _ctx.Chat("[Mini Remote] /ra hub [show|hide|toggle] (Mini Remote)|refresh|bank|status|features|force on|off|servers [list]|clap|confirm|cancel");
                 _ctx.Chat("[Mini Remote] /ra hub open pets|banking|gear|charms|games|vaulted [show|hide|toggle]  (Mini Remote tabs; character: /ro character, quests: /ro)");
-                _ctx.Chat("[Mini Remote] /ilt vaulted [on|off|toggle|status]  (Vaulted Dungeons; master switch: Settings > Navigation > Vaulted Dungeons)");
+                _ctx.Chat("[Mini Remote] /ilt vaulted [on|off|toggle|status]  (Vaulted Dungeons; master switch: /ilt settings or Settings > Navigation > Vaulted Dungeons)");
                 _ctx.Chat("[Mini Remote] /ra hub profile list|save <name> [shared]|load <name>   /ra hub suit list|test|load [name]");
                 _ctx.Chat("[Mini Remote] /ra hub attr run|stop|costs|status|auto on|off|every <min>|raise <stat> <n>  (Skills panel > Progression)");
                 _ctx.Chat("[Mini Remote] /ra quests refresh (quiet /myquests)   /ra pets [show|hide]   /ilt qb (the quest bonus list)");
@@ -602,7 +719,7 @@ internal sealed class IltHubController
         if (section == IltSection.VaultedDungeons && !SectionAvailable(section))
         {
             _ctx.Chat(_ctx.Options.IsIltLikeWorld
-                ? "[Mini Remote] The Vaulted Dungeons tab is off: turn on \"Vaulted Dungeons\" in Settings > Navigation (the master switch, off by default)."
+                ? "[Mini Remote] The Vaulted Dungeons tab is off: turn on \"Vaulted Dungeons\" in the ILT settings (/ilt settings; also Settings > Navigation) (the master switch, off by default)."
                 : "[Mini Remote] Vaulted Dungeons is not available on this server (Infinite Leaftide / ACECustom only).");
             return;
         }

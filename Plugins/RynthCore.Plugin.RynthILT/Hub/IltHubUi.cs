@@ -121,12 +121,20 @@ internal sealed class IltHubUi
         switch (id)
         {
             case RynthIltHub.SectionRemoteBank:
-                if (!o.IsIltLikeWorld || o.IsOff(IltFeature.Bank)) return false;
+                if (!o.IsIltLikeWorld || o.IsOff(IltFeature.Bank) || !_ctx.State.Remote.ShowBank) return false;
                 RenderRemoteBank();
                 return true;
             case RynthIltHub.SectionRemoteGuardian:
-                if (!o.IsIltLikeWorld) return false;
+                if (!o.IsIltLikeWorld || !_ctx.State.Remote.ShowGuardian) return false;
                 _hub.Guardian.RenderRemoteLine();
+                return true;
+            case RynthIltHub.SectionRemoteStats:
+                if (!o.IsIltLikeWorld) return false;
+                RenderRemoteStats();
+                return true;
+            case RynthIltHub.SectionRemoteOptions:
+                if (!o.IsIltLikeWorld) return false;
+                RenderRemoteOptions();
                 return true;
             case RynthIltHub.SectionQuestBonus:
                 if (!o.IsIltLikeWorld) return false;
@@ -139,6 +147,14 @@ internal sealed class IltHubUi
             case RynthIltHub.SectionPetBreeding:
                 if (!o.IsIltLikeWorld) return false;
                 _hub.Breeding.RenderSection();
+                return true;
+            case RynthIltHub.SectionPetCharms:
+                if (!o.IsIltLikeWorld) return false;
+                _hub.PetAutomation.RenderCharms();
+                return true;
+            case RynthIltHub.SectionPetCapture:
+                if (!o.IsIltLikeWorld) return false;
+                _hub.PetAutomation.RenderCapture();
                 return true;
             case RynthIltHub.SectionIltStatus:
                 return RenderIltStatus();
@@ -204,6 +220,34 @@ internal sealed class IltHubUi
         {
             ImGui.TextWrapped("The server did not report any ILT features as enabled. Press Refresh to check again.");
         }
+    }
+
+    // ── RynthAi's Mini Remote: the Remote tab's Stats lines and Options switches ──
+
+    /// <summary>Coins and pyreals per hour under RynthAi's per-hour lines (the Remote tab's Stats).</summary>
+    private void RenderRemoteStats()
+    {
+        var r = _hub.Rates.Summary;
+        Stat("Coins:", Compact(r.CoinsPerHour) + "/h");
+        Stat("Pyr:", Compact(r.PyrealsPerHour) + "/h");
+    }
+
+    /// <summary>The Remote tab's ILT sections' switches, in RynthAi's Options popup.</summary>
+    private void RenderRemoteOptions()
+    {
+        var st = _ctx.State.Remote;
+        bool bank = st.ShowBank, guardian = st.ShowGuardian;
+        if (ImGui.Checkbox("Bank##iltmrbank", ref bank)) st.ShowBank = bank;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Infinite Leaftide bank balances (RynthILT).");
+        if (ImGui.Checkbox("Guardian answer##iltmrguardian", ref guardian)) st.ShowGuardian = guardian;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("The last Temple guardian answer with a Give button (RynthILT).");
+    }
+
+    /// <summary>The tail of RynthAi's one-line session report: the coin / pyreal rates (RynthIltHub.TextSessionReport).</summary>
+    public string SessionReportTail()
+    {
+        var r = _hub.Rates.Summary;
+        return $", Coins {Compact(r.CoinsPerHour)}/h, Pyr {Compact(r.PyrealsPerHour)}/h";
     }
 
     // ── RynthAi's Mini Remote: the Remote tab's Bank section ────────────────

@@ -51,11 +51,23 @@ internal sealed unsafe class RynthAiClient
     private bool _checked;
     private long _checkedAt;
 
+    private bool _pinned;                 // tests: a table handed in, never looked up
+
     public RynthAiClient(RynthCoreHost host) => _host = host;
+
+    /// <summary>Tests only: use <paramref name="table"/> (a fake RynthAi's table) and never look it up.</summary>
+    internal void UseTableForTests(IntPtr table)
+    {
+        _pinned = true;
+        _t = (RynthAiHubApiV1*)table;
+        _checked = true;
+        System.Threading.Volatile.Write(ref _renderTable, table);
+    }
 
     /// <summary>Forget the table; the next call looks it up again (login, logout, RynthAi reload).</summary>
     public void Reset()
     {
+        if (_pinned) return;
         _t = null;
         _checked = false;
         System.Threading.Volatile.Write(ref _renderTable, IntPtr.Zero);
@@ -66,6 +78,7 @@ internal sealed unsafe class RynthAiClient
     {
         get
         {
+            if (_pinned) return _t;
             long now = Environment.TickCount64;
             if (_checked && now - _checkedAt < RecheckMs && (_t == null || _t->Version >= 1)) return _t;
             _checked = true;
@@ -123,22 +136,9 @@ internal sealed unsafe class RynthAiClient
         }
     }
 
-    // ── Vaulted Dungeons (master switch, activity) ──────────────────────────
-
-    /// <summary>
-    /// RynthAi's "Vaulted Dungeons" setting (Settings > Navigation): the master switch of the Vaulted
-    /// Dungeons keeper, and the only place it is stored. False when RynthAi isn't loaded, is older than
-    /// the call, hasn't logged in, or has it off (the default): the keeper then does nothing. Any thread.
-    /// </summary>
-    public bool VaultedDungeonsEnabled
-    {
-        get
-        {
-            var t = AnyThreadTable;
-            return t != null && RynthAiHubApiV1.Has(t, RynthAiHubApiV1.VaultedDungeonsEnabledOffset)
-                   && t->VaultedDungeonsEnabled != null && t->VaultedDungeonsEnabled() != 0;
-        }
-    }
+    // ── Vaulted Dungeons (activity) ─────────────────────────────────────────
+    // The master switch is RynthILT's own since 2026-10-20 (IltHubState.VaultedDungeonsEnabled);
+    // RynthAi.Hub VaultedDungeonsEnabled is no longer read.
 
     /// <summary>
     /// What RynthAi is doing now (its "RynthAi.Activity" interface: combat, buffing, loot, a use or cast
@@ -159,6 +159,31 @@ internal sealed unsafe class RynthAiClient
         {
             return null;   // a RynthAi mid-reload: not there this tick
         }
+    }
+
+    // ── Combat ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Asks RynthAi to back away from <paramref name="objectId"/> (RynthAi.Hub BackAwayFrom): a
+    /// RynthAiHub.BackAway* result, or int.MinValue when RynthAi isn't loaded or is older than the
+    /// call. Pump thread.
+    /// </summary>
+    public int BackAwayFrom(uint objectId, float radiusYards, int holdMs)
+    {
+        var t = Table;
+        if (t == null || !RynthAiHubApiV1.Has(t, RynthAiHubApiV1.BackAwayFromOffset) || t->BackAwayFrom == null) return int.MinValue;
+        return t->BackAwayFrom(objectId, radiusYards, holdMs);
+    }
+
+    /// <summary>
+    /// Reports one player wield counter to RynthAi's loot rules (RynthAi.Hub SetPlayerCounter; the T11
+    /// "Can Wield" key): <paramref name="value"/> &lt; 0 = unknown. False without RynthAi (or an older one). Pump thread.
+    /// </summary>
+    public bool SetPlayerCounter(uint propertyId, long value)
+    {
+        var t = Table;
+        return t != null && RynthAiHubApiV1.Has(t, RynthAiHubApiV1.SetPlayerCounterOffset)
+               && t->SetPlayerCounter != null && t->SetPlayerCounter(propertyId, value) != 0;
     }
 
     // ── Quests (/myquests) ──────────────────────────────────────────────────

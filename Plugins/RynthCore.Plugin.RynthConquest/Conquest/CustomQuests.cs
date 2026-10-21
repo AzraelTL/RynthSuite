@@ -1,14 +1,19 @@
 // Ported from Oracle of Dereth by Advis Eveldan (advis61), MIT. See THIRD_PARTY_NOTICES.md.
+// Moved here from RynthOracle (Data/CustomQuests.cs) on 2026-10-20, with Resources\customquests.csv.
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
+using System.Text;
+using RynthCore.Plugin.RynthOracle.Data;
 
-namespace RynthCore.Plugin.RynthOracle.Data;
+namespace RynthCore.Plugin.RynthConquest;
 
 /// <summary>
-/// A server's custom quest worklist (customquests.csv: Server, Name, QuestFlag, Url, Hint). Each
-/// row carries its server tag, so only the current server's rows show (today: ConquestAC's).
-/// A repeatable counts as done only while on cooldown (upstream's rule).
+/// Conquest's custom quest worklist (customquests.csv: Server, Name, QuestFlag, Url, Hint; every row
+/// is Conquest's), upstream's Custom tab. The status comes from the character's quest flags
+/// (/myquests, read with RynthOracle's parser, linked source). A repeatable counts as done only
+/// while on cooldown (upstream's rule).
 /// </summary>
 internal sealed class CustomQuest
 {
@@ -31,18 +36,17 @@ internal sealed class CustomQuest
 
 internal static class CustomQuestList
 {
-    public static List<CustomQuest> All { get; } = Load();
+    /// <summary>The embedded list's logical name (RynthCore.Plugin.RynthConquest.csproj).</summary>
+    public const string ResourceName = "RynthConquest.customquests.csv";
 
-    public static IEnumerable<CustomQuest> For(ServerIdentity server)
-    {
-        foreach (CustomQuest q in All)
-            if (server.Is(q.Server)) yield return q;
-    }
+    public static List<CustomQuest> All { get; } = Load();
 
     private static List<CustomQuest> Load()
     {
         var list = new List<CustomQuest>();
-        using StreamReader r = Csv.OpenEmbedded("customquests.csv");
+        Stream? stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(ResourceName);
+        if (stream == null) return list;
+        using var r = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
         r.ReadLine(); // Server,Name,QuestFlag,Url,Hint
         while (r.ReadLine() is string line)
         {

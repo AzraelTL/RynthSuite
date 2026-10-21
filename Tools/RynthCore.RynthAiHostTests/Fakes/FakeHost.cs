@@ -230,6 +230,16 @@ internal static unsafe class FakeHost
     public static bool UseOnCalls;
     /// <summary>Every UseObjectOn (source, target), in order (opt-in with <see cref="UseOnCalls"/>).</summary>
     public static readonly List<(uint Source, uint Target)> UsesOn = new();
+    /// <summary>Opt-in (set before Create): the trade window and vendor calls (API v72 / v67). A vendor named
+    /// <see cref="VendorName"/> (id 0x70000001) is open; every trade action and vendor transaction is recorded.</summary>
+    public static bool TradeVendorCalls;
+    public static string VendorName = "Town Vendor";
+    /// <summary>Trade actions in order: "accept", "decline", "reset", "close", "add:<id>".</summary>
+    public static readonly List<string> TradeActions = new();
+    /// <summary>Every VendorSell: the vendor id and the item ids.</summary>
+    public static readonly List<(uint Vendor, uint[] Items)> VendorSells = new();
+    /// <summary>Every VendorBuy: the vendor id and the (object, amount) entries.</summary>
+    public static readonly List<(uint Vendor, (uint Id, int Amount)[] Entries)> VendorBuys = new();
     /// <summary>Opt-in: install SendPluginCommand (the engine's plugin-command broker, API v64).</summary>
     public static bool PluginCommandCalls;
     /// <summary>What SendPluginCommand answers: true = delivered (the target plugin is loaded).</summary>
@@ -256,6 +266,10 @@ internal static unsafe class FakeHost
     public static Action<uint>? OnUseObject;
     /// <summary>Runs inside UseObjectOn, after it is recorded.</summary>
     public static Action<uint, uint>? OnUseObjectOn;
+    /// <summary>Object id -> (health, max health) for GetTargetVitals (opt-in: installed when it has entries at Create()).</summary>
+    public static readonly Dictionary<uint, (uint Hp, uint MaxHp)> TargetVitals = new();
+    /// <summary>Opt-in (set before Create): GetLiveObjectIds (API v69) lists every id in <see cref="Names"/>.</summary>
+    public static bool LiveObjectsCalls;
 
     // ANSI strings handed back to tested code stay alive for the whole run.
     private static readonly Dictionary<string, IntPtr> _ansi = new();
@@ -301,10 +315,12 @@ internal static unsafe class FakeHost
         SelectedItem = 0;
         UseOnCalls = false; UsesOn.Clear();
         PluginCommandCalls = false; PluginCommandDelivered = true; PluginCommands.Clear();
+        TradeVendorCalls = false; TradeActions.Clear(); VendorSells.Clear(); VendorBuys.Clear();
         CombatModeCalls = false; CombatModeRequests.Clear(); CombatModeRefuse = false; CombatModeRefusals = 0;
         BusyCalls = false; ForceResets = 0; BusyStateValue = 0;
         ObjectPropertiesCalls = false; PropertyRecord = null; PropertyQueries.Clear();
         ObjectStates.Clear(); OnUseObject = null; OnUseObjectOn = null;
+        TargetVitals.Clear(); LiveObjectsCalls = false;
     }
 
     /// <summary>
@@ -351,6 +367,7 @@ internal static unsafe class FakeHost
             api.GetObjectInstanceIdPropertyFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint, uint*, int>)&GetObjectInstanceIdProperty;
         api.SetAutoRunFn            = (IntPtr)(delegate* unmanaged[Cdecl]<int, int>)&SetAutoRun;
         api.TurnToHeadingFn         = (IntPtr)(delegate* unmanaged[Cdecl]<float, int>)&TurnToHeading;
+        api.GetPlayerHeadingFn      = (IntPtr)(delegate* unmanaged[Cdecl]<float*, int>)&GetPlayerHeading;
         api.JumpNonAutonomousFn     = (IntPtr)(delegate* unmanaged[Cdecl]<float, int>)&JumpNonAutonomous;
         if (TapJumpCalls)
             api.TapJumpFn           = (IntPtr)(delegate* unmanaged[Cdecl]<int>)&TapJump;
@@ -402,6 +419,13 @@ internal static unsafe class FakeHost
         }
         if (CombatModeCalls)
             api.ChangeCombatModeFn  = (IntPtr)(delegate* unmanaged[Cdecl]<int, int>)&ChangeCombatMode;
+        if (TargetVitals.Count > 0)
+            api.GetTargetVitalsFn   = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint*, uint*, uint*, uint*, uint*, uint*, int>)&GetTargetVitals;
+        if (LiveObjectsCalls)
+        {
+            api.Version = Math.Max(api.Version, 69u);
+            api.GetLiveObjectIdsFn  = (IntPtr)(delegate* unmanaged[Cdecl]<uint*, int, int>)&GetLiveObjectIds;
+        }
         if (BusyCalls)
         {
             api.ForceResetBusyCountFn = (IntPtr)(delegate* unmanaged[Cdecl]<void>)&ForceResetBusyCount;
@@ -409,6 +433,23 @@ internal static unsafe class FakeHost
         }
         if (UseOnCalls)
             api.UseObjectOnFn       = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint, int>)&UseObjectOn;
+        if (TradeVendorCalls)
+        {
+            api.Version = Math.Max(api.Version, 82u);
+            api.GetVendorInfoFn        = (IntPtr)(delegate* unmanaged[Cdecl]<VendorInfoNative*, int>)&GetVendorInfo;
+            api.GetVendorItemsFn       = (IntPtr)(delegate* unmanaged[Cdecl]<VendorItemNative*, int, int>)&GetVendorItems;
+            api.VendorBuyFn            = (IntPtr)(delegate* unmanaged[Cdecl]<uint, VendorTradeEntryNative*, int, uint>)&VendorBuy;
+            api.VendorSellFn           = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint*, int, uint>)&VendorSell;
+            api.GetVendorTradeStatusFn = (IntPtr)(delegate* unmanaged[Cdecl]<VendorTradeStatusNative*, int>)&GetVendorTradeStatus;
+            api.GetTradeStateFn   = (IntPtr)(delegate* unmanaged[Cdecl]<IntPtr, int>)&GetTradeState;
+            api.GetTradeItemsFn   = (IntPtr)(delegate* unmanaged[Cdecl]<int, uint*, int, int>)&GetTradeItems;
+            api.TradeOpenFn       = (IntPtr)(delegate* unmanaged[Cdecl]<uint, int>)&TradeOpen;
+            api.TradeAddFn        = (IntPtr)(delegate* unmanaged[Cdecl]<uint, uint, int>)&TradeAdd;
+            api.TradeAcceptFn     = (IntPtr)(delegate* unmanaged[Cdecl]<int>)&TradeAccept;
+            api.TradeDeclineFn    = (IntPtr)(delegate* unmanaged[Cdecl]<int>)&TradeDecline;
+            api.TradeResetFn      = (IntPtr)(delegate* unmanaged[Cdecl]<int>)&TradeReset;
+            api.TradeCloseFn      = (IntPtr)(delegate* unmanaged[Cdecl]<int>)&TradeClose;
+        }
         if (WieldCalls)
         {
             api.Version     = 73;
@@ -631,6 +672,26 @@ internal static unsafe class FakeHost
     private static int ObjectIsAttackable(uint id) => NotAttackable.Contains(id) ? 0 : 1;
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetTargetVitals(uint id, uint* hp, uint* maxHp, uint* stam, uint* maxStam, uint* mana, uint* maxMana)
+    {
+        if (!TargetVitals.TryGetValue(id, out var v)) return 0;
+        *hp = v.Hp; *maxHp = v.MaxHp; *stam = 0; *maxStam = 0; *mana = 0; *maxMana = 0;
+        return 1;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetLiveObjectIds(uint* buffer, int capacity)
+    {
+        int n = 0;
+        foreach (uint id in Names.Keys)
+        {
+            if (n < capacity) buffer[n] = id;
+            n++;
+        }
+        return n;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int GetObjectIntProperty(uint id, uint key, int* v)
     {
         if (!Ints.TryGetValue((id, key), out int x)) return 0;
@@ -806,6 +867,16 @@ internal static unsafe class FakeHost
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int TurnToHeading(float deg) { HeadingDeg = deg; Turns++; return 1; }
 
+    // What the engine's GetPlayerHeading really returns: 0 = East, counter-clockwise, i.e.
+    // 90 - the compass heading (Freya 2026-10-20: quaternion 13.9, GetPlayerHeading 76.1).
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetPlayerHeading(float* deg)
+    {
+        if (!HasPose) return 0;
+        *deg = (float)(((90.0 - HeadingDeg) % 360.0 + 360.0) % 360.0);
+        return 1;
+    }
+
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int JumpNonAutonomous(float extent) { Jumps++; return 1; }
 
@@ -816,6 +887,51 @@ internal static unsafe class FakeHost
     private static int CastSpell(uint target, int spellId) { if (CastRefused) { CastsRefused++; return 0; } Casts.Add((target, spellId)); Sent.Add($"cast {spellId}"); AfterCastSpell?.Invoke(); return 1; }
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int StopCompletely() { Stops++; Sent.Add("stop"); return 1; }
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetVendorInfo(VendorInfoNative* info)
+    {
+        *info = default;
+        info->VendorId = 0x70000001;
+        byte[] name = System.Text.Encoding.ASCII.GetBytes(VendorName);
+        for (int i = 0; i < name.Length && i < 63; i++) info->Name[i] = name[i];
+        return 1;
+    }
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetVendorItems(VendorItemNative* items, int max) => 0;
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static uint VendorBuy(uint vendor, VendorTradeEntryNative* entries, int count)
+    {
+        var list = new (uint, int)[count];
+        for (int i = 0; i < count; i++) list[i] = (entries[i].ObjectId, entries[i].Amount);
+        VendorBuys.Add((vendor, list));
+        return 1;
+    }
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static uint VendorSell(uint vendor, uint* ids, int count)
+    {
+        var list = new uint[count];
+        for (int i = 0; i < count; i++) list[i] = ids[i];
+        VendorSells.Add((vendor, list));
+        return 1;
+    }
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetVendorTradeStatus(VendorTradeStatusNative* status) => 0;
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetTradeState(IntPtr state) => 0;
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetTradeItems(int side, uint* buffer, int capacity) => 0;
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int TradeOpen(uint target) { TradeActions.Add("open:" + target.ToString("X8")); return 1; }
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int TradeAdd(uint item, uint slot) { TradeActions.Add("add:" + item.ToString("X8")); return 1; }
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int TradeAccept() { TradeActions.Add("accept"); return 1; }
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int TradeDecline() { TradeActions.Add("decline"); return 1; }
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int TradeReset() { TradeActions.Add("reset"); return 1; }
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int TradeClose() { TradeActions.Add("close"); return 1; }
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void ForceResetBusyCount() { ForceResets++; BusyStateValue = 0; }
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]

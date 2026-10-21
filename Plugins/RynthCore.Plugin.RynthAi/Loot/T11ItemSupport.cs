@@ -8,15 +8,17 @@ namespace RynthCore.Plugin.RynthAi.Loot;
 /// T11 (tier 11+ ACECustom) loot support for <see cref="WorldObject.Values(int, int)"/>:
 /// answers the virtual T11 keys (<see cref="T11Keys"/>) and puts back the wield-requirement and
 /// rating properties the server strips from T11 appraisals. Parsed item text is cached per
-/// object and re-parsed only when the text changes. Holds the player's "/aug" counters for
-/// the "Can Wield" key. One character per process, so the state is static.
+/// object and re-parsed only when the text changes. Holds the player's wield counters for the
+/// "Can Wield" key; since 2026-10-20 the server plugin reports them (RynthILT reads ACECustom's
+/// "/aug" reply and applies its item-aug override, then calls RynthAi.Hub SetPlayerCounter), so
+/// without one they stay unknown, as on any retail-like server. One character per process, so
+/// the state is static.
 /// </summary>
 internal static class T11ItemSupport
 {
     /// <summary>The logged-in character's T11 wield counters.</summary>
     public static T11PlayerAugs Player { get; } = new();
 
-    private static readonly T11AugReportParser AugParser = new();
     private static readonly object Gate = new();
     private static readonly Dictionary<int, Entry> Parsed = new();
 
@@ -103,12 +105,19 @@ internal static class T11ItemSupport
         }
     }
 
-    /// <summary>Feeds a chat line to the "/aug" reader. Returns true when a counter changed.</summary>
-    public static bool OnChat(string? text) => AugParser.Feed(text, Environment.TickCount64, Player);
-
-    /// <summary>Applies the saved item-aug override (-1 = automatic). Cheap; called every tick.</summary>
-    public static void SyncOverride(int itemAugsOverride)
-        => Player.ItemAugOverride = itemAugsOverride >= 0 ? itemAugsOverride : null;
+    /// <summary>
+    /// A wield counter from the server plugin (RynthAi.Hub SetPlayerCounter): <paramref name="propertyId"/>
+    /// is the counter's Int64 property id (T11Counter), <paramref name="value"/> &lt; 0 = unknown again.
+    /// False for an id that is no T11 counter. Any thread.
+    /// </summary>
+    public static bool SetCounter(uint propertyId, long value)
+    {
+        if (!Enum.IsDefined(typeof(T11Counter), unchecked((int)propertyId))) return false;
+        var counter = (T11Counter)unchecked((int)propertyId);
+        if (value < 0) Player.Forget(counter);
+        else Player.Set(counter, value);
+        return true;
+    }
 
     /// <summary>Drops the cached parse of a deleted object.</summary>
     public static void Forget(int objectId)

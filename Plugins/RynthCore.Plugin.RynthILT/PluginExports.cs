@@ -15,8 +15,10 @@ public static unsafe class PluginExports
     // sections RynthAi's Mini Remote hosts (Plugins/Shared/RynthIltHubApi.cs, HubInterface.cs), and
     // "RynthServer.Profile" v1, ILT's settings and tinkering salvage for any reader, as every server
     // plugin serves its own (Plugins/Shared/RynthServerProfileApi.cs, ProfileInterface.cs), and
-    // "RynthILT.Data" v1, the charms list and bank balances with their actions
-    // (Plugins/Shared/RynthIltDataApi.cs, DataInterface.cs).
+    // "RynthILT.Data" v1..v3, the charms list and bank balances with their actions, the pet breeding
+    // tracker and the Temple guardians (Plugins/Shared/RynthIltDataApi.cs, DataInterface.cs), and
+    // "RynthILT.Server" v1, the Leaftide feature / fellowship / quest bonus profile RynthOracle reads
+    // (Plugins/Shared/RynthIltServerApi.cs, ServerInterface.cs).
     // Fixed signature: void* (const char* iface, uint version).
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginQueryInterface", CallConvs = new[] { typeof(CallConvCdecl) })]
     private static IntPtr QueryInterface(IntPtr ifaceAnsi, uint version)
@@ -25,6 +27,8 @@ public static unsafe class PluginExports
         {
             string iface = ifaceAnsi == IntPtr.Zero ? "" : Marshal.PtrToStringAnsi(ifaceAnsi) ?? "";
             IntPtr table = HubInterface.Query(iface, version);
+            if (table != IntPtr.Zero) return table;
+            table = ServerInterface.Query(iface, version);
             if (table != IntPtr.Zero) return table;
             table = ProfileInterface.Query(iface, version);
             return table != IntPtr.Zero ? table : DataInterface.Query(iface, version);
@@ -44,6 +48,7 @@ public static unsafe class PluginExports
         // An exception escaping an UnmanagedCallersOnly export fail-fasts the client under NativeAOT.
         try { Runtime.Shutdown(); } catch { }
         try { HubInterface.Release(); } catch { }
+        try { ServerInterface.Release(); } catch { }
         try { ProfileInterface.Release(); } catch { }
         try { DataInterface.Release(); } catch { }
         foreach (IntPtr p in new[] { Interlocked.Exchange(ref _bountiesPtr, IntPtr.Zero), Interlocked.Exchange(ref _progressionPtr, IntPtr.Zero),
@@ -92,7 +97,9 @@ public static unsafe class PluginExports
     /// still asks) are RynthCore's Mini Remote sections. ":popout" is added when one is popped out
     /// into a window of its own, and RynthILT draws in the engine's current context either way. The
     /// Guardian panel is user-sized (want echoes the size given); a section reports the height it
-    /// used. 1 = drawn, 0 = not ready / unknown surface.
+    /// used. "section:gear|charms|banking|games|vaulted" are the Mini Remote ILT tabs as RynthCore's
+    /// section views (RynthILT lists them since 2026-10-20; RynthAi did before), sized to the tab.
+    /// 1 = drawn, 0 = not ready / unknown surface.
     /// </summary>
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginRenderEmbed", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static int RenderEmbed(byte* surface, float width, float height, float* wantWidth, float* wantHeight)
@@ -116,7 +123,16 @@ public static unsafe class PluginExports
                          : name.SequenceEqual("section:ilt-rates"u8) ? RynthILTPlugin.RatesSurface
                          : name.SequenceEqual("section:ilt-questbonus"u8) ? RynthILTPlugin.QuestBonusSurface
                          : null;
-            if (view == null || !plugin.RenderEmbedded(view, out float wantH)) return 0;
+            if (view == null)
+            {
+                // "section:gear", "section:banking", ...: the Mini Remote ILT tabs RynthILT lists (IltSectionsManifest).
+                if (name.Length > 64 || !name.StartsWith("section:"u8)) return 0;
+                if (!plugin.RenderEmbeddedTab(System.Text.Encoding.UTF8.GetString(name), out float tabW, out float tabH)) return 0;
+                if (wantWidth != null) *wantWidth = tabW > 0 ? tabW : width;
+                if (wantHeight != null) *wantHeight = tabH > 0 ? tabH : height;
+                return 1;
+            }
+            if (!plugin.RenderEmbedded(view, out float wantH)) return 0;
             if (wantWidth != null) *wantWidth = width;
             if (wantHeight != null) *wantHeight = wantH;
             return 1;
@@ -131,6 +147,11 @@ public static unsafe class PluginExports
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnChatBarEnter", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnChatBarEnter(IntPtr textUtf16, IntPtr eatFlag)
         => Runtime.OnChatBarEnter(textUtf16, eatFlag);
+
+    // Creatures' health from the server (siphon auto-capture's fallback health read, IltPetAutomation).
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnUpdateHealth", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void OnUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth)
+        => Runtime.OnUpdateHealth(targetId, healthRatio, currentHealth, maxHealth);
 
     // This character's kills re-read the bounty list (while the Bounties window is open).
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnKillNotification", CallConvs = new[] { typeof(CallConvCdecl) })]

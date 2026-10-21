@@ -1,7 +1,7 @@
 // MiniRemoteContext.cs — Shared services for the Mini Remote's universal tabs (Quests, Pets) and
 // the VTank .usd importer. The universal half of the ILT Hub's IltHubContext (SilentKelpie's ILT
 // Hub; its Infinite Leaftide half went to the RynthILT plugin 2026-10-13, whose feature bits and
-// sections come through Ilt).
+// sections come through ServerHub).
 //
 // Threading contract (as before):
 //   * Tick / OnChat run on the plugin pump thread and may call the host freely.
@@ -34,13 +34,13 @@ internal sealed class MiniRemoteContext
     private readonly Func<LegacyUiSettings?> _settings;
 
     public MiniRemoteContext(RynthCoreHost host, MiniRemoteState state, MiniRemoteStore store, MiniRemoteInventory inventory,
-                             IltClient ilt, Func<LegacyUiSettings?> settings)
+                             ServerHubClient serverHub, Func<LegacyUiSettings?> settings)
     {
         Host = host;
         State = state;
         Store = store;
         Inventory = inventory;
-        Ilt = ilt;
+        ServerHub = serverHub;
         _settings = settings;
     }
 
@@ -50,7 +50,7 @@ internal sealed class MiniRemoteContext
     public MiniRemoteInventory Inventory { get; }
 
     /// <summary>RynthILT's view (ILT world, feature bits, ILT sections); "not ILT" without RynthILT.</summary>
-    public IltClient Ilt { get; }
+    public ServerHubClient ServerHub { get; }
 
     /// <summary>The live combat settings (rule lists the Pets tab / USD importer edit). Null before login.</summary>
     public LegacyUiSettings? Settings => _settings();
@@ -68,9 +68,9 @@ internal sealed class MiniRemoteContext
     // ── Active server (RynthCore's verdict and its server plugin's profile) ─────────────────────
 
     /// <summary>What the render thread reads about the active server: replaced whole, never edited.</summary>
-    private sealed record ServerView(string Name, IReadOnlyList<ServerSalvageView> Salvage)
+    private sealed record ServerView(string Name, IReadOnlyList<ServerSalvageView> Salvage, ServerTrinketRule Trinkets)
     {
-        public static readonly ServerView None = new(string.Empty, Array.Empty<ServerSalvageView>());
+        public static readonly ServerView None = new(string.Empty, Array.Empty<ServerSalvageView>(), ServerTrinketRule.None);
     }
 
     private readonly ServerStateClient _server = new();
@@ -83,6 +83,9 @@ internal sealed class MiniRemoteContext
     /// <summary>The active server plugin's own tinkering salvage (empty when it defines none). Any thread.</summary>
     public IReadOnlyList<ServerSalvageView> ServerSalvage => _serverView.Salvage;
 
+    /// <summary>Which jewelry the active server plugin calls a trinket (none without one). Any thread.</summary>
+    public ServerTrinketRule ServerTrinkets => _serverView.Trinkets;
+
     /// <summary>Pump thread: polls RynthCore's server state (cheap until due) and rebuilds the view when it changed.</summary>
     public void PollServer(long now)
     {
@@ -91,7 +94,7 @@ internal sealed class MiniRemoteContext
         _serverRevision = _server.Revision;
         EngineServerState? st = _server.State;
         string name = st != null && st.HasActive ? st.ActiveName : string.Empty;
-        _serverView = new ServerView(name, ServerSalvageView.ParseList(_server.ProfileJson));
+        _serverView = new ServerView(name, ServerSalvageView.ParseList(_server.ProfileJson), ServerTrinketRule.Parse(_server.ProfileJson));
     }
 
     /// <summary>Logout: forget the server; the next login polls fresh.</summary>

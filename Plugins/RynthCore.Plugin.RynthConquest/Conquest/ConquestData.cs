@@ -1,11 +1,13 @@
 // Ported from Oracle of Dereth by Advis Eveldan (advis61), MIT. See THIRD_PARTY_NOTICES.md.
+// Moved here from RynthOracle (Data/Conquest.cs) on 2026-10-20: Conquest-only features live in RynthConquest.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
+using RynthCore.Plugin.ServerPack;
 
-namespace RynthCore.Plugin.RynthOracle.Data;
+namespace RynthCore.Plugin.RynthConquest;
 
 /// <summary>A labelled value from a server reply ("Pyreals" = "1,039,678,533 (4,158 MMDs)").</summary>
 internal sealed class NamedValue
@@ -110,11 +112,11 @@ internal sealed class ConquestBoard
 }
 
 /// <summary>
-/// Everything ConquestAC-only (tag Conquest): bank balances and bank commands ("/b", "/bank"),
+/// Everything Conquest-only: bank balances and bank commands ("/b", "/bank"),
 /// advanced augmentations ("/augs"), enlightenment augmentations ("/enl augs"), the XP bonus
 /// breakdown ("/bonus"), fellowships looking for members ("/fship list"), the /top boards, and
-/// the void damage-over-time duration scaling. The plugin only feeds it chat and only shows it
-/// while the server is ConquestAC; every reply regex is anchored at the start of the line (after
+/// the void damage-over-time duration scaling. RynthConquest only feeds it chat while the server is
+/// Conquest (and only loads there); every reply regex is anchored at the start of the line (after
 /// an optional chat timestamp), as upstream does, so a pasted copy in a chat channel can't
 /// overwrite your values.
 /// </summary>
@@ -185,7 +187,7 @@ internal sealed class ConquestData
         BonusUtc = DateTime.MinValue, FshipUtc = DateTime.MinValue;
     public int Revision { get; private set; }
 
-    private readonly ChatRequest _bankReq = new(), _augReq = new(), _enlReq = new(), _bonusReq = new(), _fshipReq = new(),
+    private readonly ServerChatRequest _bankReq = new(), _augReq = new(), _enlReq = new(), _bonusReq = new(), _fshipReq = new(),
         _topReq = new(), _depositReq = new();
     private ConquestBoard? _collecting;
     private long _collectingMs;
@@ -230,7 +232,7 @@ internal sealed class ConquestData
 
     /// <summary>
     /// A chat line: true when it was a reply this module reads; <paramref name="ours"/> = it
-    /// answers a request RynthOracle sent (eligible to be hidden).
+    /// answers a request RynthConquest sent (eligible to be hidden).
     /// </summary>
     public bool OnChatLine(string text, long now, out bool ours)
     {
@@ -337,7 +339,7 @@ internal sealed class ConquestData
         return false;
     }
 
-    private bool Done(ChatRequest req, long now, out bool ours)
+    private bool Done(ServerChatRequest req, long now, out bool ours)
     {
         ours = req.Awaiting(now);
         req.Extend(now);

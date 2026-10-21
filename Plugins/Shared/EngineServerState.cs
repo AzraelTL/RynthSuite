@@ -187,6 +187,31 @@ internal sealed record ServerProfileView(string Id, string Name, string Plugin, 
         }
     }
 
+    /// <summary>
+    /// A live number from the profile's "values" (a server plugin's ServerPackPlugin.SetProfileValue,
+    /// e.g. "voidDotDurationScale"), or <paramref name="fallback"/> when the profile, the value or a
+    /// finite number isn't there (an older plugin, another server, a server without the rule).
+    /// </summary>
+    public static double Value(string? json, string key, double fallback)
+    {
+        if (string.IsNullOrWhiteSpace(json) || string.IsNullOrEmpty(key)) return fallback;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            JsonElement root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("values", out JsonElement values) || values.ValueKind != JsonValueKind.Object
+                || !values.TryGetProperty(key, out JsonElement v) || v.ValueKind != JsonValueKind.Number
+                || !v.TryGetDouble(out double d) || !double.IsFinite(d))
+                return fallback;
+            return d;
+        }
+        catch (JsonException)
+        {
+            return fallback;
+        }
+    }
+
     /// <summary>One plain-ASCII line for a status report ("PvE, ACE; botting forbidden - ...").</summary>
     public string Summary()
     {
@@ -211,6 +236,55 @@ internal sealed record ServerProfileView(string Id, string Name, string Plugin, 
 /// <param name="AfterCap">"afterCap": applied last, only once the item's tink slots are full.</param>
 /// <param name="StackGroup">"stackGroup": rows in one group share <paramref name="StackCap"/> per item ("" = none).</param>
 /// <param name="StackCap">"stackCap": the group's combined cap per item.</param>
+/// <summary>
+/// Which jewelry is a trinket on the active server (the profile's "trinkets": name words and words
+/// that rule a name out again). <see cref="None"/> (no server, or one without trinkets): nothing is.
+/// </summary>
+internal sealed record ServerTrinketRule(IReadOnlyList<string> Names, IReadOnlyList<string> Except)
+{
+    public static readonly ServerTrinketRule None = new(Array.Empty<string>(), Array.Empty<string>());
+
+    /// <summary>True when <paramref name="name"/> holds one of the words and none of the exceptions.</summary>
+    public bool IsTrinket(string? name)
+    {
+        string n = name ?? string.Empty;
+        if (n.Length == 0 || Names.Count == 0) return false;
+        foreach (string x in Except)
+            if (x.Length > 0 && n.Contains(x, StringComparison.OrdinalIgnoreCase)) return false;
+        foreach (string w in Names)
+            if (w.Length > 0 && n.Contains(w, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    /// <summary>The profile's rule, read leniently: <see cref="None"/> without one (or for unusable text).</summary>
+    public static ServerTrinketRule Parse(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return None;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object
+                || !doc.RootElement.TryGetProperty("trinkets", out JsonElement t) || t.ValueKind != JsonValueKind.Object)
+                return None;
+            var names = Words(t, "names");
+            return names.Count == 0 ? None : new ServerTrinketRule(names, Words(t, "except"));
+        }
+        catch (JsonException)
+        {
+            return None;
+        }
+    }
+
+    private static List<string> Words(JsonElement e, string name)
+    {
+        var list = new List<string>();
+        if (!e.TryGetProperty(name, out JsonElement a) || a.ValueKind != JsonValueKind.Array) return list;
+        foreach (JsonElement w in a.EnumerateArray())
+            if (w.ValueKind == JsonValueKind.String && w.GetString() is { Length: > 0 and <= 64 } s) list.Add(s.Trim());
+        return list;
+    }
+}
+
 internal sealed record ServerSalvageView(string Bench, int Material, string Kind, string Effect, bool UsesTinkSlot, string NameMatch,
                                          int AppliedInt = 0, bool Prepared = false, int Order = 0, bool AfterCap = false,
                                          string StackGroup = "", int StackCap = 0)

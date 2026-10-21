@@ -19,6 +19,36 @@ internal static class ServerProjectsTests
         r.Add("server projects: ids, plugin names and hosts are unique", Unique);
         r.Add("server projects: no server's host is claimed by another server's list", NoHostOverlap);
         r.Add("server projects: each new server plugin has ServerData.cs and imports the shared props", Layout);
+        r.Add("server projects: RynthOracle and RynthInventory send no server's own commands (they live in its plugin)", SharedPluginsServerFree);
+    }
+
+    /// <summary>
+    /// Since 2026-10-20 a server's own features live in its server plugin (RynthConquest, RynthAelrynth):
+    /// the shared plugins' sources hold none of those servers' commands or chat markers, and use the
+    /// server tags only to pick a quest pack (data, RynthOracle's ServerIdentity.cs).
+    /// </summary>
+    private static void SharedPluginsServerFree()
+    {
+        string[] commands = { "\"/bank", "\"/b\"", "\"/augs", "\"/enl augs", "\"/bonus", "\"/fship list", "\"/top", "\"/trial", "\"/mule-data", "\"~ael1" };
+        foreach (string plugin in new[] { "RynthCore.Plugin.RynthOracle", "RynthCore.Plugin.RynthInventory" })
+        {
+            string dir = Path.Combine(PluginsDir(), plugin);
+            var files = Directory.GetFiles(dir, "*.cs", SearchOption.AllDirectories)
+                .Where(f => !f.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar)
+                            && !f.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar))
+                .ToList();
+            Check.True(files.Count > 10, plugin + ": its sources were found (" + files.Count + ")");
+            foreach (string file in files)
+            {
+                string text = File.ReadAllText(file);
+                string name = plugin + "/" + Path.GetRelativePath(dir, file);
+                foreach (string c in commands)
+                    Check.False(text.Contains(c, StringComparison.Ordinal), $"{name} sends no server command {c.TrimStart('"')}");
+                if (!file.EndsWith("ServerIdentity.cs", StringComparison.Ordinal))
+                    Check.False(text.Contains("ServerTags.Conquest", StringComparison.Ordinal) || text.Contains("ServerTags.Aelrynth", StringComparison.Ordinal),
+                                $"{name} has no Conquest or Aelrynth feature");
+            }
+        }
     }
 
     private sealed record Project(string Dir, string PluginName, string Id, string Name, string[] Hosts, string[] Worlds, bool Shared);

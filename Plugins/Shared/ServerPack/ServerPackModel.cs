@@ -12,6 +12,7 @@
 // with a single reference write, so the render thread always reads a whole one.
 // Pure (no host calls): RynthServerPack.Tests covers it.
 using System;
+using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 
@@ -163,8 +164,10 @@ internal sealed class ServerPackModel
     /// card in the shared "Server" section, shown only while that server is active (detected or
     /// forced in RynthCore Options > Diagnostics). The card left the Char section on 2026-10-13: that
     /// section is Session Stats now, session stats only.
+    /// <paramref name="pages"/> (ServerPackPages, already validated) are the server's own views:
+    /// primary views of the same section, so each gets a sub-tab there, also only on that server.
     /// </summary>
-    public static string BuildSectionsJson(ServerPackInfo info, string pluginName)
+    public static string BuildSectionsJson(ServerPackInfo info, string pluginName, IReadOnlyList<ServerPage>? pages = null)
     {
         var sb = new StringBuilder(512);
         sb.Append("{\"version\":1,\"servers\":[{\"id\":").Append(Q(info.Id)).Append(",\"name\":").Append(Q(info.Name));
@@ -180,7 +183,22 @@ internal sealed class ServerPackModel
         sb.Append(",\"primary\":false,\"height\":320,\"enabled\":true,\"tooltip\":");
         sb.Append(Q("What is known about " + info.Name + ": rules, account limits, botting policy, links and setup ("
                     + pluginName + "; also /rserver)."));
-        sb.Append(",\"order\":130}]}");
+        sb.Append(",\"order\":130}");
+        if (pages != null)
+        {
+            for (int i = 0; i < pages.Count; i++)
+            {
+                ServerPage p = pages[i];
+                sb.Append(",{\"section\":").Append(Q(SectionId));
+                sb.Append(",\"server\":").Append(Q(info.Id));
+                sb.Append(",\"label\":").Append(Q(p.Label));
+                sb.Append(",\"surface\":").Append(Q(ServerPackPages.SurfaceFor(info.Id, p.Id)));
+                sb.Append(",\"primary\":true,\"width\":").Append(ServerPackPages.Width).Append(",\"height\":").Append(ServerPackPages.Height);
+                sb.Append(",\"enabled\":true,\"tooltip\":").Append(Q(p.Tooltip.Length > 0 ? p.Tooltip : p.Label + " (" + pluginName + ")"));
+                sb.Append(",\"order\":").Append(100 + i).Append('}');
+            }
+        }
+        sb.Append("]}");
         return sb.ToString();
     }
 

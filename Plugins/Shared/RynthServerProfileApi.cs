@@ -40,7 +40,10 @@
 //      "afterCap": true,                // last, only once the item's tink slots are full
 //      "stackGroup": "x", "stackCap": 10  // rows of one group share this cap per item
 //    } ],
-//    "discord": "", "website": "", "wiki": "", "source": ""
+//    "discord": "", "website": "", "wiki": "", "source": "",
+//    "values": {                        // live numbers for this character on this server ({} when none;
+//      "voidDotDurationScale": 1.35     //  ServerProfileView.Value reads one): RynthConquest's Void DoT
+//    }                                  //  duration rule, which RynthOracle's Void timers apply
 //  }
 // ============================================================================
 

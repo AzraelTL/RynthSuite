@@ -4,22 +4,15 @@
 // Stats - id "char" -, Map, Skills, Combat, Nav, Inventory, Crafting, Spells, Chat, Friends,
 // Fellowship, Pets) and any a plugin adds. It reads each plugin's optional
 // RynthPluginGetSectionsJson export every couple of seconds (schema: UI/Sections/SectionManifest.cs
-// in RynthCore). RynthAi fills:
-//   every world   Session Stats (the one session: RynthTracker, RynthOracle and RynthILT read the
-//                 same numbers, and RynthCore drops its own overview for it), Pets, Crafting,
-//                 Spells and Fellowship (the views of those core sections)
-//   Infinite      RynthILT's tabs, hosted here as they are in RynthAi's own Mini Remote (RynthILT.Hub,
-//   Leaftide      MiniRemote/IltClient.cs): Gear, Charms and Banking in Inventory, and a Games
-//                 section of RynthAi's own
-// Quests are RynthOracle's (since 2026-10-13), and RynthILT draws its ILT session extras, /fship
-// and /qb views itself (its own manifest), so neither is listed here. RynthILT's Character tab
-// moved out on 2026-10-13 (MovedTabs.cs): RynthOracle's Character tab and the ILT session rates in
-// Session Stats. Charms and Banking stay RynthILT's tabs (Infinite Leaftide's own screens), so the
-// engine's "/rc miniremote tab charms|banking" finds them here as "section:charms|banking".
-// Each view is a surface "section:<name>" RynthCore draws through RynthPluginRenderEmbed. An ILT
-// view whose feature the server hasn't reported is listed but not enabled, with a note.
+// in RynthCore). RynthAi fills, on every world: Session Stats (the one session: RynthTracker,
+// RynthOracle and RynthILT read the same numbers, and RynthCore drops its own overview for it),
+// Pets, Crafting, Spells and Fellowship (the views of those core sections).
+// Nothing server-specific is listed here: a server plugin lists its own views (since 2026-10-20
+// RynthILT lists its Mini Remote tabs, Gear / Charms / Banking / Games / Vaulted Dungeons, and its
+// Games section itself; RynthAi hosted them until then). Quests are RynthOracle's (since 2026-10-13).
+// Each view is a surface "section:<name>" RynthCore draws through RynthPluginRenderEmbed.
 //
-// Pure: RynthILT's tabs come in as a list, so the host tests build it offline.
+// Pure, so the host tests build it offline.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -42,12 +35,6 @@ internal static class SectionsManifest
     /// <summary>The session stats (RynthCore's Session Stats section, "char").</summary>
     public const string SessionSurface = SurfacePrefix + "session";
 
-    /// <summary>RynthCore's id for Infinite Leaftide.</summary>
-    public const string IltServer = "ilt";
-
-    /// <summary>Longest tab id taken from RynthILT (its ids are short ASCII words).</summary>
-    public const int MaxTabIdLength = 32;
-
     /// <summary>One view RynthAi puts in a section.</summary>
     internal sealed record View(string Section, string Server, string Label, string Surface, bool Primary,
                                 Vector2 Size, bool Enabled, string Note, string Tooltip, int Order);
@@ -55,37 +42,14 @@ internal static class SectionsManifest
     /// <summary>A section of RynthAi's own (beyond RynthCore's core twelve).</summary>
     internal sealed record Section(string Id, string Label, int Order);
 
-    /// <summary>RynthAi's own sections: Games (ILT) after Pets.</summary>
-    public static readonly Section[] OwnSections =
-    {
-        new("games", "Games", 1150),
-    };
+    /// <summary>RynthAi's own sections beyond the core ones: none (Games went with RynthILT's tabs, 2026-10-20).</summary>
+    public static readonly Section[] OwnSections = Array.Empty<Section>();
 
-    private const string NotReportedNote = "Shows once the server reports this ILT feature on (RynthILT's ILT settings can ask again).";
-
-    /// <summary>Where each of RynthILT's tabs goes: section, label, order, tooltip. Unknown ids aren't listed.</summary>
-    private static readonly Dictionary<string, (string Section, string Label, int Order, string Tooltip)> IltPlacement =
-        new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["gear"] = ("inventory", "Gear", 210, "ILT gear tools (RynthILT)."),
-            ["charms"] = ("inventory", "Charms", 220, "ILT charms and Guardian Hands: acquired, status, tier, toggles (RynthILT)."),
-            ["banking"] = ("inventory", "Banking", 230, "Your ILT bank: balances, deposits, withdrawals and transfers (RynthILT)."),
-            ["games"] = ("games", "Games", 100, "ILT games (RynthILT)."),
-            // Listed only while RynthILT shows the tab: the Vaulted Dungeons master switch (RynthAi
-            // Settings > Navigation) is on, on an ILT world.
-            ["vaulted"] = ("nav", "Vaulted Dungeons", 220,
-                "Keep the character in one Vaulted Dungeon (RynthILT; Settings > Navigation > Vaulted Dungeons)."),
-        };
-
-    /// <summary>The surface name of a tab's view ("section:gear").</summary>
+    /// <summary>The surface name of a tab's view ("section:pets").</summary>
     public static string SurfaceOf(string tabId) => SurfacePrefix + tabId;
 
-    /// <summary>
-    /// Every view, from what is available now: RynthAi's own (every world) and
-    /// <paramref name="iltTabs"/> (RynthILT's tabs with their sizes and whether the server has
-    /// each feature on; empty without RynthILT or off ILT).
-    /// </summary>
-    public static List<View> Views(IReadOnlyList<IltTabInfo> iltTabs)
+    /// <summary>Every view RynthAi offers (the same on every world).</summary>
+    public static List<View> Views()
     {
         var views = new List<View>
         {
@@ -95,21 +59,12 @@ internal static class SectionsManifest
             new("pets", string.Empty, "Pets", PetsSurface, true, MiniRemoteTabs.Size(MiniRemoteTabs.Pets), true, string.Empty,
                 "Combat pets: the summon out, essences, and the pet picker (RynthAi).", 100),
             new("crafting", string.Empty, "Crafting", CraftingSurface, true, MiniRemoteTabs.Size(MiniRemoteTabs.Crafting), true, string.Empty,
-                "Tinkering benches, chunking / clap and split arrows (RynthAi).", 100),
+                "Tinkering benches: retail tinks, your own rows and the server plugin's salvage (RynthAi).", 100),
             new("spells", string.Empty, "Spells", SpellsSurface, true, new Vector2(900, 560), true, string.Empty,
                 "The spell catalog and buff profiles (RynthAi).", 100),
             new("fellowship", string.Empty, "Fellowship", FellowshipSurface, true, new Vector2(380, 360), true, string.Empty,
                 "Your fellowship: members, leader, XP sharing (RynthAi; also RynthOracle's Fellowship tab).", 100),
         };
-
-        // Infinite Leaftide: RynthILT's tabs that it shows on this world.
-        foreach (IltTabInfo tab in iltTabs)
-        {
-            if (!tab.Shown || !IsTabId(tab.Id) || !IltPlacement.TryGetValue(tab.Id, out var place)) continue;
-            var size = new Vector2(MathF.Max(0f, tab.Width), MathF.Max(0f, tab.Height));
-            views.Add(new View(place.Section, IltServer, place.Label, SurfaceOf(tab.Id.ToLowerInvariant()), true, size,
-                tab.Available, tab.Available ? string.Empty : NotReportedNote, place.Tooltip, place.Order));
-        }
         return views;
     }
 
@@ -166,23 +121,4 @@ internal static class SectionsManifest
         return tabId.Length > 0;
     }
 
-    /// <summary>The RynthILT tab a "section:&lt;tab&gt;" surface draws, if it names one we place.</summary>
-    public static bool TryIltTabOf(string surface, out string tabId)
-    {
-        tabId = string.Empty;
-        if (!surface.StartsWith(SurfacePrefix, StringComparison.Ordinal)) return false;
-        string id = surface.Substring(SurfacePrefix.Length);
-        if (!IsTabId(id) || !IltPlacement.ContainsKey(id)) return false;
-        tabId = id;
-        return true;
-    }
-
-    /// <summary>A short lowercase-ASCII id (letters, digits, '-'): nothing else is spliced into a surface name.</summary>
-    private static bool IsTabId(string? id)
-    {
-        if (string.IsNullOrEmpty(id) || id.Length > MaxTabIdLength) return false;
-        foreach (char c in id)
-            if (!(c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '-')) return false;
-        return true;
-    }
 }

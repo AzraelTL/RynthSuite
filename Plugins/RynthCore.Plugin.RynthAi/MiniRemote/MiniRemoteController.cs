@@ -9,12 +9,12 @@
 //   OnTick → Tick()             (pump thread)
 //   OnChatWindowText → OnChat() (pump thread)
 //   OnRender → Render()         (render thread: confirmations)
-//   /ra hub ..., /ra quests ..., /ra pets ..., /ra guardian ..., /ra bounty ... → HandleCommand()
+//   /ra hub ..., /ra quests ..., /ra pets ... → HandleCommand()
 //   OnLogout / teardown → OnLogout()
 // The Mini Remote's tab bar (MiniRemoteHud) shows Remote, then Pets and Crafting (here, every
-// world), then RynthILT's Infinite Leaftide tabs (IltClient). The ILT verbs ("/ra hub bank",
-// "/ra hub attr ...", "/ra guardian ...", "/ra bounty", "/ra hub open banking", ...) are forwarded
-// to RynthILT (RynthILT.Hub Command); without RynthILT they say so.
+// world), then the active server plugin's tabs (ServerHubClient; RynthILT's on Infinite Leaftide). The
+// "/ra hub" verbs RynthAi doesn't have ("/ra hub bank", "/ra hub open banking", ...) go to that
+// plugin (RynthILT.Hub Command); without one they show the help, as on a retail world.
 using System;
 using System.Linq;
 using System.Numerics;
@@ -50,12 +50,12 @@ internal sealed class MiniRemoteController
     public VTankUsdImporter Usd { get; }
 
     public MiniRemoteController(RynthCoreHost host, string charFolder, Func<WorldObjectCache?> cache,
-                                Func<LegacyUiSettings?> settings, Func<QuestTracker?> quests, Action saveCombatSettings, IltClient ilt)
+                                Func<LegacyUiSettings?> settings, Func<QuestTracker?> quests, Action saveCombatSettings, ServerHubClient serverHub)
     {
         var store = new MiniRemoteStore(charFolder);
         var state = store.Load();
         var inventory = new MiniRemoteInventory(host, cache);
-        _ctx = new MiniRemoteContext(host, state, store, inventory, ilt, settings) { SaveCombatSettings = saveCombatSettings };
+        _ctx = new MiniRemoteContext(host, state, store, inventory, serverHub, settings) { SaveCombatSettings = saveCombatSettings };
         _quests = quests;
         Pets = new PetsTab(_ctx);
         Crafting = new CraftingTab(_ctx);
@@ -65,8 +65,8 @@ internal sealed class MiniRemoteController
 
     public MiniRemoteState State => _ctx.State;
 
-    /// <summary>RynthILT's side (ILT world, tabs, sections, verbs).</summary>
-    public IltClient Ilt => _ctx.Ilt;
+    /// <summary>The server plugin's hub (its world check, tabs, sections, verbs; RynthILT on Infinite Leaftide).</summary>
+    public ServerHubClient ServerHub => _ctx.ServerHub;
 
     /// <summary>Shows / hides / toggles the Mini Remote ("show", "hide", "toggle"). Set by RynthAiPlugin; returns the chat reply.</summary>
     public Func<string, string>? MiniRemoteCommand { get; set; }
@@ -77,8 +77,8 @@ internal sealed class MiniRemoteController
     /// </summary>
     public Func<string, string, string>? MiniRemoteTabCommand { get; set; }
 
-    /// <summary>True when the cached ILT options already say /myquests is off (skip the login refresh).</summary>
-    public bool SkipLoginQuestRefresh => _ctx.Ilt.IsIltWorld && _ctx.Ilt.IsOff(RynthIltHub.FeatureQuests);
+    /// <summary>True when the server plugin already says /myquests is off on its server (skip the login refresh).</summary>
+    public bool SkipLoginQuestRefresh => _ctx.ServerHub.ServerActive && _ctx.ServerHub.IsOff(RynthIltHub.FeatureQuests);
 
     // ── Lifecycle ───────────────────────────────────────────────────────────
 
@@ -144,7 +144,7 @@ internal sealed class MiniRemoteController
         RynthLog.Trace(LogCat.Quests, "RefreshQuests()");
         QuestTracker? t = _quests();
         if (t == null) return "Quest tracker not ready.";
-        if (_ctx.Ilt.IsOff(RynthIltHub.FeatureQuests) || t.Disabled) return "/myquests is disabled on this server.";
+        if (_ctx.ServerHub.IsOff(RynthIltHub.FeatureQuests) || t.Disabled) return "/myquests is disabled on this server.";
         long now = MiniRemoteContext.NowMs;
         if (now - _lastQuestRefreshAt < QuestRefreshCooldownMs)
             return $"Wait {(QuestRefreshCooldownMs - (now - _lastQuestRefreshAt)) / 1000}s (server allows one /myquests per minute).";
@@ -220,12 +220,14 @@ internal sealed class MiniRemoteController
     // ── Commands ────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// "/ra hub [show|hide|toggle|open pets|crafting [show|hide|toggle]|open breeding|tab pets|crafting|breeding|remote]",
-    /// "/ra quests [refresh]", "/ra pets [show|hide|toggle]"; every other "/ra hub ..." verb,
-    /// "/ra guardian ..." and "/ra bounty|bounties|bountys ..." go to RynthILT. The retired quest
-    /// verbs and tab names ("/ra quests window", "/ra hub open quests", ...) say where quests went,
-    /// and "/ra hub open|tab character" opens RynthOracle's Character tab (Huds/MovedTabs.cs).
-    /// Returns false if not handled.
+    /// "/ra hub [show|hide|toggle|open pets|crafting [show|hide|toggle]|open|tab &lt;a server plugin's Pets
+    /// sub-tab&gt;|tab pets|crafting|remote]", "/ra quests [refresh]", "/ra pets [show|hide|toggle]"; every
+    /// other "/ra hub ..." verb goes to the server plugin (RynthILT on Infinite Leaftide: "/ra hub bank",
+    /// "/ra hub open banking", ...), and without one it shows the help. The retired quest verbs and tab
+    /// names ("/ra quests window", "/ra hub open quests", ...) say where quests went, and "/ra hub
+    /// open|tab character" opens RynthOracle's Character tab (Huds/MovedTabs.cs). "/ra guardian",
+    /// "/ra bounty" and the like aren't the Mini Remote's (RynthAiPlugin passes them to the server
+    /// plugin). Returns false if not handled.
     /// </summary>
     public bool HandleCommand(string verb, string[] args)
     {
@@ -242,10 +244,8 @@ internal sealed class MiniRemoteController
             OpenTab(MiniRemoteTabs.Pets, args.Length > 0 ? args[0] : "toggle");
             return true;
         }
-        bool ilt = verb.Equals("guardian", StringComparison.OrdinalIgnoreCase) || IsBountyVerb(verb);
-        if (!ilt && !verb.Equals("hub", StringComparison.OrdinalIgnoreCase)) return false;
+        if (!verb.Equals("hub", StringComparison.OrdinalIgnoreCase)) return false;
 
-        if (!ilt)
         {
             string cmd = args.Length > 0 ? args[0].ToLowerInvariant() : "toggle";
             // "/ra hub open|tab quests": the tab is RynthOracle's window now.
@@ -270,8 +270,8 @@ internal sealed class MiniRemoteController
                     // The Mini Remote is the Hub's main window.
                     _ctx.Chat(MiniRemoteCommand != null ? MiniRemoteCommand(cmd) : "[Mini Remote] The Mini Remote is not available yet.");
                     return true;
-                case "open" or "tab" when args.Length > 1 && IsBreedingTabName(args[1]):
-                    OpenBreeding(cmd);
+                case "open" or "tab" when args.Length > 1 && Pets.FindSubTab(args[1]) is { } subTab:
+                    OpenPetsSubTab(cmd, subTab);
                     return true;
                 case "open" when args.Length > 1 && MiniRemoteTabs.Parse(args[1]) is { } openTab:
                     OpenTab(openTab, args.Length > 2 ? args[2] : "toggle");
@@ -283,50 +283,37 @@ internal sealed class MiniRemoteController
             }
         }
 
-        // Everything else is an Infinite Leaftide verb: RynthILT's.
+        // Everything else is the server plugin's (RynthILT's "/ra hub bank", "/ra hub open banking", ...).
         string line = (verb + " " + string.Join(" ", args)).Trim();
-        if (_ctx.Ilt.Command(line)) return true;
-        if (verb.Equals("hub", StringComparison.OrdinalIgnoreCase) && args.Length > 0 && args[0].Equals("tab", StringComparison.OrdinalIgnoreCase))
+        if (_ctx.ServerHub.Command(line)) return true;
+        if (args.Length > 0 && args[0].Equals("tab", StringComparison.OrdinalIgnoreCase))
         {
-            // A tab RynthILT doesn't offer (not loaded): back to the remote rather than nothing.
+            // A tab no plugin offers (the engine's dashboard): back to the remote rather than nothing.
             MiniRemoteTabCommand?.Invoke(MiniRemoteTabs.Remote, "select");
             return true;
         }
-        if (verb.Equals("hub", StringComparison.OrdinalIgnoreCase)) PrintHelp();
-        _ctx.Chat("[Mini Remote] " + IltClient.NotLoaded);
+        PrintHelp();
         return true;
     }
 
     private void PrintHelp()
     {
-        _ctx.Chat("[Mini Remote] /ra hub [show|hide|toggle] (Mini Remote)   /ra hub open pets|crafting [show|hide|toggle]   /ra hub open breeding (ILT)");
+        _ctx.Chat("[Mini Remote] /ra hub [show|hide|toggle] (Mini Remote)   /ra hub open pets|crafting [show|hide|toggle]");
         _ctx.Chat("[Mini Remote] /ra quests refresh (quiet /myquests)   /ra pets [show|hide]   Quest list, timers and rewards: RynthOracle (/ro).");
-        _ctx.Chat("[Mini Remote] Banking, gear, charms, games, the Guardian, bounties, /ra hub attr ...: Infinite Leaftide, the RynthILT plugin.");
+        _ctx.Chat("[Mini Remote] A server plugin adds its own tabs and /ra hub verbs here once it is loaded for your world.");
         _ctx.Chat("[Mini Remote] Character overview and session: RynthOracle (/ro character). Force a server: /rc diagnostics.");
     }
 
-    /// <summary>"breeding" / "breed": the Pets tab's Breeding sub-tab (RynthILT's tracker, Infinite Leaftide).</summary>
-    private static bool IsBreedingTabName(string text) => text.Trim().ToLowerInvariant() is "breeding" or "breed";
-
     /// <summary>
-    /// "/ra hub open|tab breeding": the Pets tab on its Breeding sub-tab when RynthILT offers it. "open"
-    /// shows the Mini Remote and says why when there is no Breeding sub-tab; "tab" (the engine's
-    /// dashboard) only switches tabs, to the Pets roster when there is none.
+    /// "/ra hub open|tab &lt;sub-tab&gt;": the Pets tab on a sub-tab the server plugin adds (RynthILT's
+    /// Breeding). "open" shows the Mini Remote; "tab" (the engine's dashboard) only switches tabs.
     /// </summary>
-    private void OpenBreeding(string cmd)
+    private void OpenPetsSubTab(string cmd, string subTab)
     {
-        bool offered = Pets.BreedingOffered;
-        if (offered) Pets.SelectBreeding();
+        Pets.SelectSubTab(subTab);
         if (cmd == "tab")
         {
             MiniRemoteTabCommand?.Invoke(MiniRemoteTabs.Pets, "select");
-            return;
-        }
-        if (!offered)
-        {
-            _ctx.Chat("[Mini Remote] " + (!_ctx.Ilt.Loaded ? IltClient.NotLoaded
-                : !_ctx.Ilt.IsIltWorld ? "Pet breeding is an Infinite Leaftide feature; this world isn't Infinite Leaftide."
-                : "This server reports pet breeding off."));
             return;
         }
         OpenTab(MiniRemoteTabs.Pets, "show");
@@ -338,12 +325,6 @@ internal sealed class MiniRemoteController
     /// <summary>"quests" / "quest": the retired Quests tab's names.</summary>
     private static bool IsQuestsName(string text)
         => text.Equals("quests", StringComparison.OrdinalIgnoreCase) || text.Equals("quest", StringComparison.OrdinalIgnoreCase);
-
-    /// <summary>"/ra bounty", "/ra bounties" and the "/ra bountys" spelling (RynthILT's Bounties window).</summary>
-    public static bool IsBountyVerb(string verb)
-        => verb.Equals("bounty", StringComparison.OrdinalIgnoreCase)
-           || verb.Equals("bounties", StringComparison.OrdinalIgnoreCase)
-           || verb.Equals("bountys", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Applies show / hide / toggle to one of the Mini Remote's own tabs. Says what happened.</summary>
     private void OpenTab(string tab, string mode)

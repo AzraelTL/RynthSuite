@@ -21,9 +21,6 @@ internal static class MiniRemoteMoveTests
 {
     private const uint Player = 0x50000E01;
 
-    [System.Runtime.CompilerServices.UnsafeAccessor(System.Runtime.CompilerServices.UnsafeAccessorKind.Field, Name = "_selectBreeding")]
-    private static extern ref bool SelectBreedingPending(PetsTab pets);
-
     private const string LegacyHubJson = """
         {
           "Bank": { "Pyreals": 99 },
@@ -38,9 +35,11 @@ internal static class MiniRemoteMoveTests
     {
         r.Add("mini remote: Pets / Quests settings come over from ilt-hub.json once, which is never rewritten", LegacyState);
         r.Add("mini remote: without RynthILT there are no ILT tabs, bits or verbs", NoRynthIlt);
-        r.Add("mini remote: /ra hub|quests|pets stay RynthAi's; quest windows point to RynthOracle; ILT verbs say RynthILT is needed", Commands);
+        r.Add("mini remote: /ra hub|quests|pets stay RynthAi's; quest windows point to RynthOracle; other hub verbs are a server plugin's", Commands);
         r.Add("mini remote: the pyreal refill path never spends without RynthILT's confirmation", RefillNeedsIlt);
-        r.Add("vaulted dungeons: the master switch is off by default, saved with the profile, and an older engine's save leaves it alone", VaultedMasterSwitch);
+        r.Add("pets: ACECustom's charms, capture, refill gate and Breeding come from the server plugin (none without it)", PetsFromServerPlugin);
+        r.Add("mini remote: the session report's tail and the menu's server come from the server plugin", RemoteTextsFromServerPlugin);
+        r.Add("vaulted dungeons: the master switch is RynthILT's; RynthAi mirrors it for the engine row (none without RynthILT)", VaultedMasterSwitch);
         r.Add("profile: the old Server Features fields still round-trip (RynthILT migrates them)", LegacyProfileFields);
         r.Add("RynthAi.Hub: table, spell names, nothing before login", HubTable);
     }
@@ -85,13 +84,16 @@ internal static class MiniRemoteMoveTests
         Check.False(fresh.Pet.HealingEnabled, "no files at all: defaults");
     }
 
-    private static MiniRemoteController NewController(string folder, out RynthCoreHost host, out LegacyUiSettings settings)
+    private static MiniRemoteController NewController(string folder, out RynthCoreHost host, out LegacyUiSettings settings, bool serverPlugin = false)
     {
         FakeHost.Reset();
+        FakeServerHub.Reset();
         host = FakeHost.Create(Player);
         var s = new LegacyUiSettings();
         settings = s;
-        var c = new MiniRemoteController(host, Folder(folder), () => null, () => s, () => null, () => { }, new IltClient(host));
+        var client = new ServerHubClient(host);
+        if (serverPlugin) client.UseTableForTests(FakeServerHub.Table);
+        var c = new MiniRemoteController(host, Folder(folder), () => null, () => s, () => null, () => { }, client);
         string? lastTab = null;
         c.MiniRemoteCommand = mode => "[Mini Remote] remote " + mode;
         c.MiniRemoteTabCommand = (tab, mode) => { lastTab = tab + ":" + mode; return "tab " + lastTab; };
@@ -101,16 +103,18 @@ internal static class MiniRemoteMoveTests
     private static void NoRynthIlt()
     {
         var c = NewController("noilt", out var host, out _);
-        var ilt = c.Ilt;
+        var ilt = c.ServerHub;
         ilt.Tick();
         Check.False(ilt.Loaded, "no RynthILT (no plugin interfaces on this host)");
-        Check.False(ilt.IsIltWorld, "so never an ILT world");
+        Check.False(ilt.ServerActive, "so never an ILT world");
         Check.Eq(ilt.Feature(RynthIltHub.FeaturePetRefill), -1, "feature bits unknown");
         Check.False(ilt.IsOff(RynthIltHub.FeatureQuests), "unknown is not off (/myquests still refreshes)");
         Check.Eq(ilt.Tabs().Count, 0, "no ILT tabs");
         Check.False(ilt.RenderSection(RynthIltHub.SectionQuestBonus), "no ILT sections");
         Check.False(ilt.Command("hub bank"), "no ILT verbs taken");
-        Check.False(ilt.TryGetRates(out _, out _), "no ILT rates");
+        Check.Eq(ilt.Text(RynthIltHub.TextSessionReport), string.Empty, "no server rates in the session report");
+        Check.Eq(ilt.Text(RynthIltHub.TextServerId), string.Empty, "no server of a plugin's in the menu");
+        Check.Eq(ilt.Setting(RynthIltHub.SettingVaultedDungeons), -1, "no server setting offered");
         Check.False(c.SkipLoginQuestRefresh, "the login /myquests refresh isn't skipped");
     }
 
@@ -128,19 +132,18 @@ internal static class MiniRemoteMoveTests
         Check.True(FakeHost.Chat.Any(x => x.Contains("tab pets:show")), "same tab");
         FakeHost.Chat.Clear();
         // The Pets tab's Breeding sub-tab is RynthILT's (Infinite Leaftide only): without RynthILT there is none.
-        Check.False(c.Pets.BreedingOffered, "no Breeding sub-tab without RynthILT");
+        Check.Eq(c.Pets.SubTabs().Count, 0, "no Pets sub-tabs without a server plugin");
         Check.True(c.HandleCommand("hub", new[] { "open", "breeding" }), "hub open breeding is answered");
-        Check.True(FakeHost.Chat.Any(x => x.Contains(IltClient.NotLoaded)), "it says RynthILT is needed");
         Check.False(FakeHost.Chat.Any(x => x.Contains("tab pets:")), "and opens nothing");
-        Check.False(SelectBreedingPending(c.Pets), "no Breeding sub-tab request");
+        Check.True(c.Pets.PendingSubTab == null, "no sub-tab request");
         FakeHost.Chat.Clear();
         Check.True(c.HandleCommand("hub", new[] { "tab", "Breed" }), "hub tab breed (the dashboard)");
         Check.False(FakeHost.Chat.Any(), "tab switches quietly");
-        Check.False(SelectBreedingPending(c.Pets), "still no Breeding sub-tab request without RynthILT");
+        Check.True(c.Pets.PendingSubTab == null, "still no sub-tab request without a server plugin");
         FakeHost.Chat.Clear();
         Check.True(c.HandleCommand("hub", new[] { "bank" }), "hub bank is handled (answered)");
-        Check.True(FakeHost.Chat.Any(x => x.Contains("RynthILT")), "it says the ILT verbs come with RynthILT");
-        Check.True(FakeHost.Chat.Any(x => x.Contains("/ra hub open pets|crafting [show|hide|toggle]   /ra hub open breeding")), "and lists what RynthAi still has");
+        Check.True(FakeHost.Chat.Any(x => x.Contains("/ra hub open pets|crafting [show|hide|toggle]")), "with the help: what RynthAi has");
+        Check.False(FakeHost.Chat.Any(x => x.Contains("RynthILT") || x.Contains("Leaftide")), "and nothing about ILT (a retail world's answer)");
         FakeHost.Chat.Clear();
         // The Quests tab moved to RynthOracle (2026-10-13): its verbs and tab names say so.
         Check.True(c.HandleCommand("hub", new[] { "open", "quests" }), "hub open quests is answered");
@@ -152,19 +155,71 @@ internal static class MiniRemoteMoveTests
         Check.True(c.HandleCommand("quests", Array.Empty<string>()), "quests (refresh) stays RynthAi's");
         Check.True(FakeHost.Chat.Any(x => x.Contains("Quest tracker not ready")), "the meta tracker's refresh (none in this test)");
         FakeHost.Chat.Clear();
-        Check.True(c.HandleCommand("guardian", new[] { "handin" }), "guardian is answered");
-        Check.True(FakeHost.Chat.Any(x => x.Contains("RynthILT")), "with the RynthILT note");
-        FakeHost.Chat.Clear();
-        Check.True(c.HandleCommand("bountys", Array.Empty<string>()), "the bountys spelling too");
+        Check.False(c.HandleCommand("guardian", new[] { "handin" }), "guardian isn't the Mini Remote's (a server plugin's verb)");
+        Check.False(c.HandleCommand("bountys", Array.Empty<string>()), "nor bounty");
         Check.False(c.HandleCommand("start", Array.Empty<string>()), "other verbs aren't the Mini Remote's");
+        Check.False(FakeHost.Chat.Any(), "and it says nothing about them");
+
+        // With a server plugin, a hub verb RynthAi doesn't have is the plugin's.
+        var ilt = NewController("cmds-ilt", out _, out _, serverPlugin: true);
+        FakeServerHub.TakesCommand = line => line.StartsWith("hub bank", StringComparison.Ordinal);
+        FakeHost.Chat.Clear();
+        Check.True(ilt.HandleCommand("hub", new[] { "bank" }), "hub bank");
+        Check.Eq(FakeServerHub.Commands.Count, 1, "went to the server plugin");
+        Check.False(FakeHost.Chat.Any(), "RynthAi adds nothing (the plugin answers itself)");
     }
 
     private static void RefillNeedsIlt()
     {
         var c = NewController("refill", out _, out _);
-        c.State.Pet.UsePyrealRefillPath = true;
-        FakeHost.Bools[(Player, MiniRemoteInventory.BoolPyrealRefillActive)] = true;   // the server's player bool
+        c.State.Pet.UsePyrealRefillPath = true;            // the old (obsolete) opt-in in miniremote.json
+        FakeHost.Bools[(Player, 9049)] = true;              // ACECustom's refill player bool
         Check.False(c.Pets.AllowSummonOnEmpty(), "not an ILT world (no RynthILT): an empty essence is never summoned on pyreals");
+    }
+
+    /// <summary>
+    /// The Remote tab's server texts with a server plugin (2026-10-20): the session report's tail and the
+    /// server its menu entries belong to come from the plugin, as they are.
+    /// </summary>
+    private static void RemoteTextsFromServerPlugin()
+    {
+        var c = NewController("texts", out _, out _, serverPlugin: true);
+        Check.Eq(c.ServerHub.Text(RynthIltHub.TextSessionReport), string.Empty, "nothing until the plugin says something");
+        FakeServerHub.Texts[RynthIltHub.TextSessionReport] = ", Coins 12/h, Pyr 3.4m/h";
+        FakeServerHub.Texts[RynthIltHub.TextServerId] = "ilt";
+        Check.Eq(c.ServerHub.Text(RynthIltHub.TextSessionReport), ", Coins 12/h, Pyr 3.4m/h", "the report's tail is the plugin's");
+        Check.Eq(c.ServerHub.Text(RynthIltHub.TextServerId), "ilt", "and the server its menu entries belong to");
+    }
+
+    /// <summary>
+    /// The Pets tab with and without a server plugin (2026-10-20): ACECustom's pet charms, siphon
+    /// auto-capture, the summon-from-empty gate and the Breeding sub-tab are RynthILT's. Without it the
+    /// tab asks nothing of the kind; with it the gate is RynthILT's answer and its sub-tab opens by name.
+    /// </summary>
+    private static void PetsFromServerPlugin()
+    {
+        var plain = NewController("pets-plain", out _, out _);
+        Check.False(plain.ServerHub.Loaded, "no server plugin");
+        Check.False(plain.Pets.AllowSummonOnEmpty(), "no summon from empty");
+        Check.Eq(plain.Pets.FindSubTab("breeding"), null, "no Breeding");
+
+        var c = NewController("pets-ilt", out _, out _, serverPlugin: true);
+        FakeServerHub.Active = true;
+        Check.True(c.ServerHub.Loaded && c.ServerHub.ServerActive, "the fake RynthILT is there, on its world");
+        Check.False(c.Pets.AllowSummonOnEmpty(), "RynthILT says no: no summon from empty");
+        FakeServerHub.AllowEmpty = true;
+        Check.True(c.Pets.AllowSummonOnEmpty(), "RynthILT says yes (charm on, opted in, confirmed): summon from empty");
+        Check.Eq(c.Pets.SubTabs().Count, 0, "no sub-tabs until RynthILT offers one");
+        FakeServerHub.SubTabs[RynthIltHub.TabParentPets] = new() { (RynthIltHub.SectionPetBreeding, "Breeding") };
+        Check.Eq(c.Pets.SubTabs().Count, 1, "RynthILT's Breeding sub-tab");
+        Check.Eq(c.Pets.FindSubTab("breeding"), RynthIltHub.SectionPetBreeding, "found by its short id");
+        Check.Eq(c.Pets.FindSubTab("Breed"), RynthIltHub.SectionPetBreeding, "and the 'breed' alias");
+        Check.Eq(c.Pets.FindSubTab("roster"), null, "the roster isn't a server sub-tab");
+        FakeHost.Chat.Clear();
+        Check.True(c.HandleCommand("hub", new[] { "open", "breeding" }), "hub open breeding");
+        Check.True(FakeHost.Chat.Any(x => x.Contains("tab pets:show")), "shows the Pets tab");
+        Check.Eq(c.Pets.PendingSubTab, RynthIltHub.SectionPetBreeding, "on the Breeding sub-tab");
+        Check.Eq(FakeServerHub.Commands.Count, 0, "RynthAi handled it itself (nothing forwarded)");
     }
 
     private static void LegacyProfileFields()
@@ -179,19 +234,17 @@ internal static class MiniRemoteMoveTests
     }
 
     /// <summary>
-    /// "Vaulted Dungeons" (Settings > Navigation) is RynthILT's keeper's master switch and lives only in
-    /// RynthAi's profile: off for a new or older profile, round-tripped through the settings bridge, and
-    /// an engine that predates the row (it sends no such field) never flips it.
+    /// "Vaulted Dungeons" (the engine's Settings > Navigation row) is RynthILT's keeper master switch, and
+    /// since 2026-10-20 RynthILT's own setting (copied once from the profile, whose old field still loads
+    /// and is carried, unused). RynthAi only mirrors it: without a server plugin offering it the row gets
+    /// null (hidden) and a save changes nothing; with one, the row shows its value and a save goes to it.
     /// </summary>
     private static void VaultedMasterSwitch()
     {
-        Check.False(new LegacyUiSettings().EnableVaultedDungeons, "off by default");
-        var oldProfile = JsonSerializer.Deserialize("{\"BoostNavPriority\":true}", RynthAiJsonContext.Default.LegacyUiSettings)!;
-        Check.False(oldProfile.EnableVaultedDungeons, "a profile saved before the switch existed has it off");
-
-        var on = new LegacyUiSettings { EnableVaultedDungeons = true };
-        string json = JsonSerializer.Serialize(on, RynthAiJsonContext.Default.LegacyUiSettings);
-        Check.True(JsonSerializer.Deserialize(json, RynthAiJsonContext.Default.LegacyUiSettings)!.EnableVaultedDungeons, "saved with the profile");
+        var oldProfile = JsonSerializer.Deserialize("{\"EnableVaultedDungeons\":true}", RynthAiJsonContext.Default.LegacyUiSettings)!;
+        Check.True(oldProfile.EnableVaultedDungeons, "an old profile's switch still loads (RynthILT copies it once)");
+        string json = JsonSerializer.Serialize(oldProfile, RynthAiJsonContext.Default.LegacyUiSettings);
+        Check.True(json.Contains("\"EnableVaultedDungeons\": true"), "and is written back unchanged");
 
         var s = new LegacyUiSettings();
         var dash = (LegacyDashboardRenderer)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
@@ -200,15 +253,27 @@ internal static class MiniRemoteMoveTests
         typeof(LegacyDashboardRenderer).GetField("_advancedSettingsUi", flags)!.SetValue(dash, new LegacyAdvancedSettingsUi(s));
 
         var sent = JsonSerializer.Deserialize(dash.BuildSettingsJson(), RynthAiJsonContext.Default.SettingsBridgePayload)!;
-        Check.True(sent.EnableVaultedDungeons == false, "the Settings face is sent the switch (off)");
+        Check.True(sent.EnableVaultedDungeons == null, "no server plugin: the row is sent nothing (it hides)");
         dash.ApplySettingsJson("{\"EnableVaultedDungeons\":true}");
-        Check.True(s.EnableVaultedDungeons, "the Settings checkbox turns it on");
+        Check.False(s.EnableVaultedDungeons, "and a save doesn't touch RynthAi's old field");
+
+        // A server plugin offering the switch (RynthILT, through the Mini Remote's server client).
+        FakeHost.Reset();
+        FakeServerHub.Reset();
+        var client = new ServerHubClient(FakeHost.Create(Player));
+        client.UseTableForTests(FakeServerHub.Table);
+        dash.ServerSettingGet = key => client.Setting(key);
+        dash.ServerSettingSet = (key, value) => client.SetSetting(key, value);
+        sent = JsonSerializer.Deserialize(dash.BuildSettingsJson(), RynthAiJsonContext.Default.SettingsBridgePayload)!;
+        Check.True(sent.EnableVaultedDungeons == null, "RynthILT not offering it (off ILT): still hidden");
+        FakeServerHub.Settings[RynthIltHub.SettingVaultedDungeons] = 0;
+        sent = JsonSerializer.Deserialize(dash.BuildSettingsJson(), RynthAiJsonContext.Default.SettingsBridgePayload)!;
+        Check.True(sent.EnableVaultedDungeons == false, "offered: the row shows RynthILT's value (off)");
+        dash.ApplySettingsJson("{\"EnableVaultedDungeons\":true}");
+        Check.Eq(FakeServerHub.Settings[RynthIltHub.SettingVaultedDungeons], 1, "the checkbox turns RynthILT's switch on");
         dash.ApplySettingsJson("{\"NavRingThickness\":6}");
-        Check.True(s.EnableVaultedDungeons, "an older engine's save (no such field) leaves it on");
-        dash.ApplySettingsJson("{\"EnableVaultedDungeons\":false}");
-        Check.False(s.EnableVaultedDungeons, "the checkbox turns it off");
-        dash.ApplySettingsJson("{\"NavRingThickness\":6}");
-        Check.False(s.EnableVaultedDungeons, "and an older engine's save leaves it off");
+        Check.Eq(FakeServerHub.Settings[RynthIltHub.SettingVaultedDungeons], 1, "an older engine's save (no such field) leaves it alone");
+        Check.False(s.EnableVaultedDungeons, "RynthAi's old field is never written");
     }
 
     private static unsafe void HubTable()
@@ -229,6 +294,14 @@ internal static class MiniRemoteMoveTests
         Check.Eq(t->MiniRemoteVisible(), 0, "no Mini Remote before login");
         Check.True(t->VaultedDungeonsEnabled != null, "the Vaulted Dungeons master switch is served");
         Check.Eq(t->VaultedDungeonsEnabled(), 0, "the master switch is off before login (and by default)");
+        Check.True(RynthAiHubApiV1.Has(t, RynthAiHubApiV1.BackAwayFromOffset) && t->BackAwayFrom != null, "the back-away is served (appended 2026-10-20)");
+        Check.Eq(t->BackAwayFrom(1, 12f, 750), RynthAiHub.BackAwayNotNow, "not now before login");
+        Check.True(RynthAiHubApiV1.Has(t, RynthAiHubApiV1.SetPlayerCounterOffset) && t->SetPlayerCounter != null, "the wield counters are served (appended 2026-10-20)");
+        RynthCore.Plugin.RynthAi.Loot.T11ItemSupport.Reset();
+        Check.Eq(t->SetPlayerCounter(9008, 3100), 1, "item augmentations taken");
+        Check.Eq(RynthCore.Plugin.RynthAi.Loot.T11ItemSupport.Player.Get(RynthCore.Loot.T11.T11Counter.ItemAugmentations), 3100L, "and the loot rules see them");
+        Check.Eq(t->SetPlayerCounter(42, 1), 0, "not a counter: refused");
+        RynthCore.Plugin.RynthAi.Loot.T11ItemSupport.Reset();
         SessionStatsV1 ss;
         Check.Eq(t->SessionStats(&ss), 0, "no session before login");
     }

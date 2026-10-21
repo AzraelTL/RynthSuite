@@ -42,8 +42,12 @@ public sealed partial class RynthNavPlugin
             double next = current + Math.Clamp(error, -maxStep, maxStep);
             Host.TurnToHeading((float)(((next % 360.0) + 360.0) % 360.0));
         }
-        Host.SetAutoRun(!_turnInPlace);
+        AutoRun.Run(!_turnInPlace);
     }
+
+    // SetAutoRun/StopCompletely for the goto, sent when they change (AutoRunGate.cs).
+    private AutoRunGate? _autoRun;
+    private AutoRunGate AutoRun => _autoRun ??= new AutoRunGate(on => Host.SetAutoRun(on), () => Host.StopCompletely(), () => NowMs);
 
     /// <summary>A fresh start for the turn servo (a new goto, a teleport).</summary>
     private void ResetTurn() { _turnInPlace = false; _lastTurnMs = 0; }

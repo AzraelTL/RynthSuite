@@ -203,7 +203,7 @@ internal sealed class TinkerRunner
         foreach (var wo in Inv.Items())
         {
             if (!TinkerCatalog.Targets(bench, wo.ObjectClass)) continue;
-            bool trinket = TinkerCatalog.IsTrinket(wo.Name);
+            bool trinket = TinkerCatalog.IsTrinket(wo.Name, _ctx.ServerTrinkets);
             if (bench == TinkerBench.Jewelry && trinket) continue;
             if (bench == TinkerBench.Trinkets && !trinket) continue;
             if (done.Contains(wo.Id)) { hidden++; continue; }

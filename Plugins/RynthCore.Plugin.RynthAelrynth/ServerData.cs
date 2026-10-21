@@ -16,8 +16,9 @@ internal static class ServerData
             {
                 "Bank mod: Radiance and Luminance banking (RynthCore reads its totals).",
                 "Skill Mastery mod (RynthCore shows mastery progress).",
-                "Account vault for mules (RynthCore reads its contents).",
+                "Account vault for mules (RynthCore reads its contents; RynthAelrynth puts it in Global Inventory, /rserver vault).",
                 "RynthOracle has an Aelrynth quest pack (quests.aelrynth.csv).",
+                "RynthAelrynth's Leaderboards page (Server section, or /rserver): the /top boards and /trial dungeon records.",
                 "The world was named Aeshnidae before; both names count.",
             },
             Website = "https://aelrynth.com",

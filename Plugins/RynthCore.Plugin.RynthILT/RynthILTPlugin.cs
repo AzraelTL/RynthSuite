@@ -22,6 +22,13 @@
 // comes from RynthCore's server list (plugin API v86, polled every 2 s), and the Hub follows it
 // once one arrives (IltEngineVerdict).
 //
+// Moved from RynthAi on 2026-10-20 (Hub/): the Pets tab's ACECustom parts (IltPetAutomation), the
+// Empyrean Handler ring detection (IltRingEvade; RynthAi.Hub BackAwayFrom does the jump), the T11
+// "/aug" counters and "/ilt t11" (IltT11; RynthAi.Hub SetPlayerCounter), the Vaulted Dungeons
+// master switch, the Remote tab's ILT parts, and the Mini Remote ILT tab views on RynthCore's rail
+// (IltSectionsManifest.cs, RenderEmbeddedTab). Their settings were copied once from the
+// character's RynthAi files (IltMigration.ImportRynthAiSettings, at the Hub's start).
+//
 // Third: ILT's fellowship commands (IltFellowship/, ACECustom /fship) as buttons in RynthCore's
 // Fellowship section and their own window ("/ilt fellow"). While ILT is active the list is also
 // sent to RynthAi ("servercommands"), whose Fellowship view draws them; an empty list clears it.
@@ -50,8 +57,8 @@ namespace RynthCore.Plugin.RynthILT;
 public sealed class RynthILTPlugin : RynthPluginBase
 {
     internal static readonly IntPtr NamePointer    = Marshal.StringToHGlobalAnsi("RynthILT");
-    // Previous release: 0.3.1.
-    internal static readonly IntPtr VersionPointer = Marshal.StringToHGlobalAnsi("0.3.2");
+    // Previous release: 0.3.2.
+    internal static readonly IntPtr VersionPointer = Marshal.StringToHGlobalAnsi("0.3.3");
 
     /// <summary>
     /// The settings view's surface. Not in the sections manifest (the force-server override lives
@@ -83,7 +90,7 @@ public sealed class RynthILTPlugin : RynthPluginBase
 
     public RynthILTPlugin()
     {
-        _settingsUi = new IltSettingsUi(_settingsModel, cmd => QueueChatCommand(cmd), RefreshFeatures);
+        _settingsUi = new IltSettingsUi(_settingsModel, cmd => QueueChatCommand(cmd), RefreshFeatures, () => _hub);
         _fellowshipUi = new IltFellowshipUi(QueueChatCommand);
         IltEngineVerdict.Attach(_settingsModel);
     }
@@ -353,27 +360,50 @@ public sealed class RynthILTPlugin : RynthPluginBase
 
     /// <summary>
     /// RynthPluginGetSectionsJson (schema 1, UI/Sections/SectionManifest.cs in RynthCore): the ILT
-    /// session extras in Session Stats ("char"), the fellowship commands in Fellowship and the /qb
-    /// list in a Quests section of RynthILT's own, all Infinite Leaftide areas (shown while RynthCore
-    /// treats this world as ILT). The Mini Remote ILT tabs (Banking, Gear, Charms, Games) are listed
-    /// by RynthAi, which hosts them. Null before login.
+    /// session extras in Session Stats ("char"), the fellowship commands in Fellowship, the /qb list in
+    /// a Quests section of RynthILT's own, and the Mini Remote ILT tabs the Hub shows (Gear, Charms,
+    /// Banking in Inventory, Games in a section of RynthILT's own, Vaulted Dungeons in Nav), all
+    /// Infinite Leaftide areas (shown while RynthCore treats this world as ILT). IltSectionsManifest.cs.
+    /// The tabs were listed by RynthAi, which hosted them, until 2026-10-20. Null before login.
     /// </summary>
-    internal string? BuildSectionsJson() => _loginComplete ? SectionsJson : null;
+    internal string? BuildSectionsJson() => _loginComplete ? IltSectionsManifest.Build(IltSectionsManifest.TabsOf(_hub)) : null;
 
-    internal const string SectionsJson =
-        "{\"version\":1,\"sections\":[{\"id\":\"quests\",\"label\":\"Quests\",\"order\":1160}],\"contributions\":[" +
-        "{\"section\":\"char\",\"server\":\"ilt\"," +
-        "\"label\":\"ILT session rates (RynthILT)\",\"surface\":\"" + RatesSurface + "\",\"primary\":false," +
-        "\"height\":220,\"enabled\":true,\"tooltip\":\"Enlightened Coins, pyreals and item conversions this session, " +
-        "on the same clock as RynthAi's session stats (RynthILT).\",\"order\":120}," +
-        "{\"section\":\"fellowship\",\"server\":\"ilt\"," +
-        "\"label\":\"ILT fellowship (RynthILT)\",\"surface\":\"" + FellowshipSurface + "\",\"primary\":false," +
-        "\"height\":110,\"enabled\":true,\"tooltip\":\"Infinite Leaftide's /fship commands: create, invite, dismiss, " +
-        "invite your landblock, list nearby, leave, disband (RynthILT; also /ilt fellow).\",\"order\":120}," +
-        "{\"section\":\"quests\",\"server\":\"ilt\"," +
-        "\"label\":\"Quest bonus (/qb)\",\"surface\":\"" + QuestBonusSurface + "\",\"primary\":true," +
-        "\"width\":520,\"height\":440,\"enabled\":true,\"tooltip\":\"Infinite Leaftide's quest bonus list: completed and " +
-        "incomplete /qb flags (RynthILT; the quest list, timers and rewards are RynthOracle's, /ro).\",\"order\":100}]}";
+    /// <summary>
+    /// RynthPluginRenderEmbed "section:&lt;tab&gt;": one Mini Remote ILT tab as RynthCore's section view
+    /// (IltSectionsManifest lists them), drawn into the engine's current window and context in the
+    /// dashboard colours. <paramref name="wantWidth"/> / <paramref name="wantHeight"/> are the tab's
+    /// size. False until the Hub exists, or for a surface that is no ILT tab. Render thread.
+    /// </summary>
+    internal bool RenderEmbeddedTab(string surface, out float wantWidth, out float wantHeight)
+    {
+        wantWidth = wantHeight = 0;
+        IltHubController? hub = _hub;
+        if (!_loginComplete || hub == null || !IltSectionsManifest.TryTabOf(surface, out IltSection section)) return false;
+        IntPtr previous = ImGui.GetCurrentContext();
+        IntPtr context = previous != IntPtr.Zero ? previous : Host.ImGuiContext;
+        if (context == IntPtr.Zero) return false;
+        ImGui.SetCurrentContext(context);
+        int pushed = IltStyle.PushDashboardStyle();
+        try
+        {
+            var size = IltSections.TabSize(section);
+            wantWidth = size.X;
+            wantHeight = size.Y;
+            hub.NoteTabDrawn();
+            hub.RenderTab(section);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Exception(LogCat.IltHub, ex, "RenderEmbeddedTab " + surface);
+            return false;
+        }
+        finally
+        {
+            ImGui.PopStyleColor(pushed);
+            ImGui.SetCurrentContext(previous);
+        }
+    }
 
     /// <summary>Plugin tick: runs the settings and fellowship views' chat commands through the engine.</summary>
     private void DrainChatCommands()
@@ -486,7 +516,7 @@ public sealed class RynthILTPlugin : RynthPluginBase
         try
         {
             // The Hub eats its own probe / capture replies (IltChatCapture).
-            if (_hub?.OnChat(text) == true) eat = 1;
+            if (_hub?.OnChat(text, chatType) == true) eat = 1;
         }
         catch (Exception ex) { RynthLog.Exception(LogCat.IltHub, ex, "OnChat"); }
         if (_bounties == null) return;
@@ -517,6 +547,13 @@ public sealed class RynthILTPlugin : RynthPluginBase
             return;
         eat = 1;
         _commands.Enqueue(trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    // A creature's health from the server: siphon auto-capture's fallback health read (ILT only).
+    public override void OnUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth)
+    {
+        try { _hub?.OnUpdateHealth(targetId, healthRatio); }
+        catch (Exception ex) { RynthLog.Exception(LogCat.IltHub, ex, "OnUpdateHealth"); }
     }
 
     // The server's killer notification: this character landed the killing blow.
@@ -624,15 +661,18 @@ public sealed class RynthILTPlugin : RynthPluginBase
 
     /// <summary>
     /// The verbs RynthILT answers: the ILT "/ra hub" verbs (not RynthAi's Quests / Pets tabs or its
-    /// Remote tab), "/ra guardian", "/ra bounty|bounties|bountys" and "rates".
+    /// Remote tab), "/ra guardian", "/ra bounty|bounties|bountys", "rates" and "t11".
     /// </summary>
     internal static bool IsIltVerb(string[] words)
     {
         string verb = words[0].ToLowerInvariant();
         switch (verb)
         {
-            case "guardian": case "bounty": case "bounties": case "bountys": case "rates":
+            case "guardian": case "bounty": case "bounties": case "bountys": case "rates": case "t11":
                 return true;
+            case "ub":
+                // ub-IT's ACECustom verbs RynthAi passes on ("/ub qblist", "/ub augs").
+                return words.Length >= 2 && words[1].ToLowerInvariant() is "qblist" or "augs";
             case "hub":
                 if (words.Length < 2) return false;   // "/ra hub" alone toggles RynthAi's Mini Remote
                 string sub = words[1].ToLowerInvariant();
@@ -678,6 +718,23 @@ public sealed class RynthILTPlugin : RynthPluginBase
             case "hub":
             case "rates":
                 break;
+            case "ub":
+            {
+                // ub-IT's "/ub qblist" and "/ub augs" (RynthAi passes them on): ACECustom's own commands.
+                string sub = args.Length > 0 ? args[0].ToLowerInvariant() : string.Empty;
+                string? server = sub == "qblist" ? "/qb list" : sub == "augs" ? "/aug" : null;
+                if (server == null) { ChatLine("[RynthILT] /ub qblist or /ub augs"); return; }
+                if (_hub?.Options.IsIltLikeWorld != true) { ChatLine($"[RynthILT] /ub {sub}: not an Infinite Leaftide world."); return; }
+                if (!Host.HasInvokeChatParser || !Host.InvokeChatParser(server)) ChatLine("[RynthILT] RynthCore didn't take: " + server);
+                return;
+            }
+            case "t11":
+            {
+                // "/ilt t11 ..." and RynthAi's "/ra t11 ..." (T11 loot counters; IltT11).
+                if (_hub == null) { ChatLine("[RynthILT] ILT features not ready (log in first)."); return; }
+                _hub.T11.HandleCommand(args);
+                return;
+            }
             case "vaulted":
             case "vaulteddungeons":
             {
@@ -707,7 +764,8 @@ public sealed class RynthILTPlugin : RynthPluginBase
             case "help":
                 ChatLine("[RynthILT] /ilt hub ... (the Mini Remote's ILT tabs; same as /ra hub ...), /ilt guardian ..., /ilt servers [list|<names>|default],");
                 ChatLine("[RynthILT] /ilt bounty [list|refresh] - the tracked ACECustom bounties (the Bounties window: the ILT button on the RynthCore bar, or /rc bounties),");
-                ChatLine("[RynthILT] /ilt vaulted [on|off|toggle|status] - Vaulted Dungeons keeper (ILT only; master switch: RynthAi Settings > Navigation > Vaulted Dungeons, off by default),");
+                ChatLine("[RynthILT] /ilt vaulted [on|off|toggle|status] - Vaulted Dungeons keeper (ILT only; master switch: /ilt settings or Settings > Navigation > Vaulted Dungeons, off by default),");
+                ChatLine("[RynthILT] /ilt t11 [augs <n|auto>|refresh|item [0xId]] - T11 loot: the /aug wield counters RynthAi's loot rules use, the item-aug override, an item's T11 text (also /ra t11),");
                 ChatLine("[RynthILT] /ilt settings [show|hide|toggle] - the ILT settings: the world verdict, the ILT world names and the server's features (force a server: RynthCore Options > Diagnostics),");
                 ChatLine("[RynthILT] /ilt fellow [show|hide|toggle] - ILT's /fship commands as buttons (also in the Mini Remote's Fellowship section),");
                 ChatLine("[RynthILT] /ilt trace <category|all|list> [on|off], /ilt debug [on|off].");
@@ -835,6 +893,10 @@ public sealed class RynthILTPlugin : RynthPluginBase
         {
             _hub = new IltHubController(Host, folder, _settings, _ai, () => _hubWritesBlocked,
                                         pending ? IltMigration.FindLegacyCharFolder(world, charName) : null);
+            // Once per character: the RynthAi settings that moved here on 2026-10-20.
+            var imported = IltMigration.ImportRynthAiSettings(_hub.State, world, charName);
+            if (imported.Count > 0)
+                RynthLog.Write(LogCat.IltStore, $"Carried {charName}'s RynthAi settings that moved to RynthILT over: {string.Join(", ", imported)}.");
             _hub.OnLoginComplete(charName, force);
         }
         catch (Exception ex)

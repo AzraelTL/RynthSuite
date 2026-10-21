@@ -105,6 +105,7 @@ internal sealed class IltSessionRates : IIltFeature
 
     public void Tick(long nowMs)
     {
+        FollowSharedSession();
         // The shared stats move every 0.5 s; their rows refresh each second, coins every 5 s.
         if (nowMs - _lastSampleAt < SampleIntervalMs)
         {
@@ -136,6 +137,23 @@ internal sealed class IltSessionRates : IIltFeature
         }
 
         BuildRows();
+    }
+
+    private long _sharedStartTicks;   // RynthAi's session start as last seen (0 = not yet)
+
+    /// <summary>
+    /// The coins / pyreals start over with RynthAi's shared session (its Reset XP, or a session that
+    /// restarted): one clock for both, without RynthAi telling RynthILT. Pump thread.
+    /// </summary>
+    private void FollowSharedSession()
+    {
+        if (!_ctx.Ai.TryGetSessionStats(out SessionStatsV1 s) || s.StartUtcTicks == 0) return;
+        if (_sharedStartTicks != 0 && s.StartUtcTicks > _sharedStartTicks)
+        {
+            RynthLog.Trace(LogCat.IltRates, "RynthAi's session restarted: coins and pyreals start over too");
+            Reset();
+        }
+        _sharedStartTicks = s.StartUtcTicks;
     }
 
     /// <summary>Positive change since the last sample; the first sample only sets the baseline.</summary>

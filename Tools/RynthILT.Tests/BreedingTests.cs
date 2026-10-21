@@ -12,7 +12,7 @@ namespace RynthILT.Tests;
 // The pet breeding tracker (IltBreedingRules / IltBreedingEssence / IltBreedingSupplies / IltPetBreeding):
 // the server's rules and where each value came from, the parsers for ACECustom's appraisal block,
 // chat and "@breed-debug" (formats copied from PetDevice_Breeding.cs / PetDevice_Maturity.cs), each
-// breeding gate, the pair planner's odds, the supply refusals, and the "RynthILT.Data" v2 reader JSON.
+// breeding gate, the pair planner's odds, the supply refusals, and the JSON RynthOracle reads.
 internal static class BreedingTests
 {
     public static void Register(Runner r)
@@ -26,7 +26,7 @@ internal static class BreedingTests
         r.Add("breeding: each gate (charges, rest, growth, neutered, shiny, bond, tier, ID)", Gates);
         r.Add("breeding: pair planner blocks wrong sexes and ranges the inherited mutations", Planner);
         r.Add("breeding: supplies are refused where the server would refuse them", Supplies);
-        r.Add("breeding: reader JSON round-trips through the shared reader view", ReaderJson);
+        r.Add("breeding: reader JSON round-trips through RynthOracle's view", ReaderJson);
         r.Add("breeding: saved state survives the hub.json source-generated serializer", StateJson);
         r.Add("breeding: RynthILT.Data v2 keeps v1 readers working", DataApiVersion);
     }
@@ -363,12 +363,15 @@ internal static class BreedingTests
 
     private static unsafe void DataApiVersion()
     {
-        Check.Eq(RynthIltDataApiV1.InterfaceVersion, 2u, "version 2");
-        Check.True(RynthIltDataApiV1.V1Size < (uint)sizeof(RynthIltDataApiV1), "v2 appends to v1");
+        // Version 3 (the Temple guardians) appends after the breeding pair; a v2 reader sees the same breeding layout.
+        Check.Eq(RynthIltDataApiV1.InterfaceVersion, 3u, "version 3");
+        Check.True(RynthIltDataApiV1.V1Size < RynthIltDataApiV1.V2Size && RynthIltDataApiV1.V2Size < (uint)sizeof(RynthIltDataApiV1),
+                   "v2 appends to v1, v3 to v2");
         Check.Eq(RynthIltDataApiV1.V1Size, (uint)(8 + 4 * sizeof(IntPtr)), "v1 = two uints and four function pointers");
         Check.True(DataInterface.Query(RynthIltDataApiV1.InterfaceName, 1) != IntPtr.Zero, "v1 readers still get the table");
         Check.True(DataInterface.Query(RynthIltDataApiV1.InterfaceName, 2) != IntPtr.Zero, "v2 readers too");
-        Check.True(DataInterface.Query(RynthIltDataApiV1.InterfaceName, 3) == IntPtr.Zero, "a future version isn't claimed");
+        Check.True(DataInterface.Query(RynthIltDataApiV1.InterfaceName, 3) != IntPtr.Zero, "v3 readers too");
+        Check.True(DataInterface.Query(RynthIltDataApiV1.InterfaceName, 4) == IntPtr.Zero, "a future version isn't claimed");
         var t = (RynthIltDataApiV1*)DataInterface.Query(RynthIltDataApiV1.InterfaceName, 1);
         Check.True(t->GetPetBreedingJson != null && t->PetBreedingCommand != null, "breeding functions filled");
         Check.Eq(RynthIltHub.SectionPetBreeding, "pets-breeding", "section id");

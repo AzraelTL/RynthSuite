@@ -27,15 +27,31 @@ internal sealed class OracleSettings
     public bool QuestTimersOpen;
     /// <summary>The selected tab, by name (the set of tabs depends on the server).</summary>
     public string TabName = "Quests";
-    /// <summary>ConquestAC: "/bank deposit" at every ten-minute mark (upstream's auto-deposit; off by default).</summary>
-    public bool ConquestAutoDeposit;
     /// <summary>Say so in chat when a tracked quest's timer comes up.</summary>
     public bool AlertTimers = true;
     /// <summary>false: only tracked quests are watched; true: every quest the character holds.</summary>
     public bool AlertAllTimers;
 
-    private static string FilePath => Path.Combine(
+    /// <summary>Where the tests keep the settings file (a scratch path); null means the rynthoracle.json in RynthCore's %APPDATA% folder.</summary>
+    internal static string? PathOverride;
+
+    internal static string FilePath => PathOverride ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RynthCore", "rynthoracle.json");
+
+    /// <summary>The names this version reads and writes; any other value in the file is kept as it was.</summary>
+    private static readonly string[] KnownNames =
+    {
+        "readQuestsAtLogin", "hideOwnQuestReplies", "checkQuestListDaily", "lastQuestListCheck", "autoShowVoidWindow",
+        "mainWindowOpen", "questTimersOpen", "alertTimers", "alertAllTimers", "tabName",
+    };
+    // "conquestAutoDeposit" moved to RynthConquest (2026-10-20), which takes it over from this file once;
+    // it is kept here (as any value this version doesn't use) until then.
+
+    /// <summary>
+    /// Values in the file this version doesn't use (a newer version's, or a setting that moved to
+    /// another plugin, which reads it from here once), written back unchanged so a save never loses them.
+    /// </summary>
+    private readonly System.Collections.Generic.List<(string Name, string Raw)> _kept = new();
 
     public void Load()
     {
@@ -45,13 +61,15 @@ internal sealed class OracleSettings
             using var doc = JsonDocument.Parse(File.ReadAllText(FilePath));
             JsonElement r = doc.RootElement;
             if (r.ValueKind != JsonValueKind.Object) return;
+            _kept.Clear();
+            foreach (JsonProperty p in r.EnumerateObject())
+                if (Array.IndexOf(KnownNames, p.Name) < 0 && !_kept.Exists(k => k.Name == p.Name)) _kept.Add((p.Name, p.Value.GetRawText()));
             ReadQuestsAtLogin = Bool(r, "readQuestsAtLogin", ReadQuestsAtLogin);
             HideOwnQuestReplies = Bool(r, "hideOwnQuestReplies", HideOwnQuestReplies);
             CheckQuestListDaily = Bool(r, "checkQuestListDaily", CheckQuestListDaily);
             AutoShowVoidWindow = Bool(r, "autoShowVoidWindow", AutoShowVoidWindow);
             MainWindowOpen = Bool(r, "mainWindowOpen", MainWindowOpen);
             QuestTimersOpen = Bool(r, "questTimersOpen", QuestTimersOpen);
-            ConquestAutoDeposit = Bool(r, "conquestAutoDeposit", ConquestAutoDeposit);
             AlertTimers = Bool(r, "alertTimers", AlertTimers);
             AlertAllTimers = Bool(r, "alertAllTimers", AlertAllTimers);
             if (r.TryGetProperty("tabName", out JsonElement t) && t.ValueKind == JsonValueKind.String) TabName = t.GetString() ?? TabName;
@@ -78,11 +96,12 @@ internal sealed class OracleSettings
             sb.Append("  \"autoShowVoidWindow\": ").Append(AutoShowVoidWindow ? "true" : "false").Append(",\n");
             sb.Append("  \"mainWindowOpen\": ").Append(MainWindowOpen ? "true" : "false").Append(",\n");
             sb.Append("  \"questTimersOpen\": ").Append(QuestTimersOpen ? "true" : "false").Append(",\n");
-            sb.Append("  \"conquestAutoDeposit\": ").Append(ConquestAutoDeposit ? "true" : "false").Append(",\n");
             sb.Append("  \"alertTimers\": ").Append(AlertTimers ? "true" : "false").Append(",\n");
             sb.Append("  \"alertAllTimers\": ").Append(AlertAllTimers ? "true" : "false").Append(",\n");
-            sb.Append("  \"tabName\": \"").Append(JsonEncodedText.Encode(TabName).ToString()).Append("\"\n");
-            sb.Append("}\n");
+            sb.Append("  \"tabName\": \"").Append(JsonEncodedText.Encode(TabName).ToString()).Append('"');
+            foreach ((string name, string raw) in _kept)
+                sb.Append(",\n  \"").Append(JsonEncodedText.Encode(name).ToString()).Append("\": ").Append(raw);
+            sb.Append("\n}\n");
             Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
             string tmp = FilePath + ".tmp";
             File.WriteAllText(tmp, sb.ToString());

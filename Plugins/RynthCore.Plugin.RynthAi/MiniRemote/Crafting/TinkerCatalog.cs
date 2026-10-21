@@ -247,16 +247,12 @@ internal static class TinkerCatalog
     };
 
     /// <summary>
-    /// Trinkets (compass, goggles, scarab, watch, puzzle box, tops) are jewelry the Jewelry tab
-    /// leaves alone: they take the Trinkets tab's recipes instead (UB-IT IsLeaftideTrinketJewelry).
+    /// Trinkets are jewelry the Jewelry tab leaves alone: they take the Trinkets tab's recipes instead.
+    /// Which jewelry is a trinket is the server plugin's (its profile's "trinkets": Leaftide's compasses,
+    /// goggles, scarabs, ... come from RynthILT since 2026-10-20); without one, nothing is.
     /// </summary>
-    public static bool IsTrinket(string name)
-    {
-        string n = (name ?? string.Empty).ToLowerInvariant();
-        if (n.Contains("compass") || n.Contains("goggles") || n.Contains("scarab") || n.Contains("watch") || n.Contains("puzzle box"))
-            return true;
-        return n.Contains("top") && !n.Contains("topaz");
-    }
+    public static bool IsTrinket(string name, RynthCore.Plugin.Shared.ServerTrinketRule? rule)
+        => (rule ?? RynthCore.Plugin.Shared.ServerTrinketRule.None).IsTrinket(name);
 
     public static string Label(TinkerBench bench) => bench switch
     {

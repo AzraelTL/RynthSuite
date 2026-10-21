@@ -1,7 +1,9 @@
 using System;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using RynthCore.Loot;
 using RynthCore.Plugin.RynthAi;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.PluginCore;
@@ -27,6 +29,11 @@ internal static class GiveTests
         r.Add("give: /ub give with a count hands over that many", UbGiveCount);
         r.Add("give: /mt give hands over only the first match", MtGivesFirst);
         r.Add("give: /ub givep matches part of the name", UbGivePartial);
+        r.Add("give: a meta's /ub give hands over every match too (it used to take /mt give's one)", MetaUbGivesAll);
+        r.Add("give: give-all never hands over RynthAi's own items, attuned or equipped ones", GiveAllSkipsProtected);
+        r.Add("give: a running meta's give-all also keeps what the loot profile keeps; a typed one does not", GiveAllLootKeepOnlyForMeta);
+        r.Add("give: give-all logs every stack it queues and caps one command at 500", GiveAllLogsAndCaps);
+        r.Add("give: a delayed /ub give keeps the standing of the line that queued it", DelayedGiveKeepsStanding);
         r.Add("give: the next give waits until the server took the last (it answers extra gives 'too busy')", WaitsForServer);
         r.Add("give: a whole stack to an NPC that takes one per give keeps giving until it is gone, one give per tick", NpcStackOneAtATime);
         r.Add("give: the answer and the next give share one tick (the interval is only a minimum gap between sends)", NextGiveSameTick);
@@ -98,6 +105,8 @@ internal static class GiveTests
 
         public void Set(string f, object? v) => typeof(RynthAiPlugin).GetField(f, Any)!.SetValue(P, v);
         public object? Call(string m, params object?[] a) => typeof(RynthAiPlugin).GetMethod(m, Any)!.Invoke(P, a);
+        public int LogWith(string text) => FakeHost.Logs.Count(l => l.Contains(text, StringComparison.Ordinal));
+        public int ChatWith(string text) => FakeHost.Chat.Count(c => c.Contains(text, StringComparison.Ordinal));
 
         /// <summary>Runs the chat command, then drains the give queue.</summary>
         public void Run(string command)
@@ -165,6 +174,134 @@ internal static class GiveTests
         w.Run("/mt give Mana Mote to Town Crier");
         Check.Eq(FakeHost.Gives.Count, 1, "/mt give: one item");
         Check.False(w.GivenItems.Contains(WornMote), "and never the worn one");
+    }
+
+    private static void MetaUbGivesAll()
+    {
+        var w = new World();
+        w.S.IsMacroRunning = true;
+        w.S.EnableMeta = true;
+        w.Call("HandleMetaChatCommand", "/ub give Mana Mote to Town Crier");
+        for (int i = 0; i < 20; i++) w.Call("DrainGiveQueue");
+        Check.Eq(FakeHost.Gives.Count, 3, "all three carried Mana Motes, as typed");
+        Check.False(FakeHost.Gives.Any(g => g.Item == WornMote), "and never the worn one");
+    }
+
+    private static void GiveAllSkipsProtected()
+    {
+        var w = new World();
+        // Mote2 is on the Weapons list, Mote3 on the Consumables list: RynthAi is using them.
+        w.S.ItemRules.Add(new ItemRule { Id = unchecked((int)Mote2), Name = "Mana Mote" });
+        w.S.ConsumableRules.Add(new ConsumableRule { Id = unchecked((int)Mote3), Name = "Mana Mote" });
+        w.Run("/ub give Mana Mote to Town Crier");
+        Check.Eq(FakeHost.Gives.Count, 1, "only the unprotected mote goes");
+        Check.Eq(FakeHost.Gives[0].Item, Mote1, "that one");
+        Check.Eq(w.LogWith("skipped 0x80281102 'Mana Mote': on RynthAi's Weapons list"), 1, "the Weapons-list skip is logged");
+        Check.Eq(w.LogWith("skipped 0x80281103 'Mana Mote': on RynthAi's Consumables list"), 1, "and the Consumables-list one");
+        Check.True(w.ChatWith("2 protected stack(s) skipped") == 1, "and the summary counts them");
+
+        // A monster rule's weapon is protected too.
+        var w2 = new World();
+        w2.S.MonsterRules.Add(new MonsterRule { Name = "Drudge", WeaponId = unchecked((int)Mote1), OffhandId = unchecked((int)Mote2) });
+        w2.Run("/ub give Mana Mote to Town Crier");
+        Check.True(FakeHost.Gives.Count == 1 && FakeHost.Gives[0].Item == Mote3, "a monster rule's weapon and off hand stay");
+
+        // An attuned item can't be given, and isn't tried.
+        var w3 = new World();
+        foreach (uint id in new[] { Mote1, Mote2, Mote3 }) FakeHost.Ints[(id, 114u)] = 1;
+        w3.Run("/ub give Mana Mote to Town Crier");
+        Check.Eq(FakeHost.Gives.Count, 0, "attuned motes are not given");
+        Check.True(w3.ChatWith("Nothing to give") == 1, "and it says why nothing was queued");
+    }
+
+    private static string KeepEverythingProfile()
+    {
+        string path = Path.Combine(Program.TempRoot, "give-keep-all.json");
+        var p = new LootProfile { Name = "keep all" };
+        p.Rules.Add(new LootRule { Name = "All", Action = LootAction.Keep });
+        p.Save(path);
+        return path;
+    }
+
+    private static void GiveAllLootKeepOnlyForMeta()
+    {
+        // Typed: the user asked for it; only the always-on protections apply.
+        var typed = new World();
+        typed.S.CurrentLootPath = KeepEverythingProfile();
+        typed.Run("/ub give Mana Mote to Town Crier");
+        Check.Eq(FakeHost.Gives.Count, 3, "typed /ub give hands over what the loot profile keeps");
+
+        // From a running meta: what the loot profile keeps stays.
+        var meta = new World();
+        meta.S.CurrentLootPath = KeepEverythingProfile();
+        meta.S.IsMacroRunning = true;
+        meta.S.EnableMeta = true;
+        meta.Call("HandleMetaChatCommand", "/ub give Mana Mote to Town Crier");
+        for (int i = 0; i < 20; i++) meta.Call("DrainGiveQueue");
+        Check.Eq(FakeHost.Gives.Count, 0, "a meta's /ub give leaves what the loot profile keeps");
+        Check.Eq(meta.LogWith("kept by the loot profile"), 3, "each skip is logged");
+        Check.True(meta.ChatWith("Nothing to give") == 1, "and said");
+
+        // The same meta with the macro stopped is not a running meta: the typed rules apply.
+        var stopped = new World();
+        stopped.S.CurrentLootPath = KeepEverythingProfile();
+        stopped.S.IsMacroRunning = false;
+        stopped.Call("HandleMetaChatCommand", "/ub give Mana Mote to Town Crier");
+        for (int i = 0; i < 20; i++) stopped.Call("DrainGiveQueue");
+        Check.Eq(FakeHost.Gives.Count, 3, "without a running meta it is a plain give");
+    }
+
+    private static void GiveAllLogsAndCaps()
+    {
+        var w = new World();
+        // 520 carried pebbles: more than one command may queue.
+        const int Pebbles = 520;
+        uint first = 0x80290000;
+        for (int i = 0; i < Pebbles; i++)
+        {
+            uint id = first + (uint)i;
+            FakeHost.Names[id] = "Pebble";
+            FakeHost.Containers[id] = Player;
+            FakeHost.ItemTypes[id] = 0x80;
+        }
+        for (int i = 0; i < Pebbles; i++) w.Cache.OnCreateObject(first + (uint)i);
+        for (int i = 0; i < 6; i++) w.Cache.Tick();   // the cache classifies 250 objects a tick
+        w.Call("HandleUbCommand", "/ub give Pebble to Town Crier");
+        var queue = (System.Collections.ICollection)typeof(RynthAiPlugin).GetField("_pendingGives", Any)!.GetValue(w.P)!;
+        Check.Eq(queue.Count, RynthAiPlugin.MaxGiveAllPerCommand, "one command queues at most 500");
+        Check.Eq(w.LogWith("[Give] queued 0x"), RynthAiPlugin.MaxGiveAllPerCommand, "one log line per stack queued");
+        Check.Eq(w.LogWith("the cap is 500"), 1, "the cap is logged");
+        Check.True(w.ChatWith("capped at 500") == 1, "and said in chat");
+
+        // Below the cap nothing is cut.
+        var small = new World();
+        small.Call("HandleUbCommand", "/ub give Mana Mote to Town Crier");
+        var q2 = (System.Collections.ICollection)typeof(RynthAiPlugin).GetField("_pendingGives", Any)!.GetValue(small.P)!;
+        Check.Eq(q2.Count, 3, "three motes, three queued");
+        Check.Eq(small.LogWith("the cap is"), 0, "no cap line");
+    }
+
+    private static void DelayedGiveKeepsStanding()
+    {
+        // A running meta that queues "/ub delay 0 /ub give ..." gives as a running meta when it fires,
+        // so the loot profile's Keep rules still protect; a typed delay does not.
+        var meta = new World();
+        meta.S.CurrentLootPath = KeepEverythingProfile();
+        meta.S.IsMacroRunning = true;
+        meta.S.EnableMeta = true;
+        meta.Call("HandleMetaChatCommand", "/ub delay 0 /ub give Mana Mote to Town Crier");
+        meta.Call("TickDelayedCommands");
+        for (int i = 0; i < 20; i++) meta.Call("DrainGiveQueue");
+        Check.Eq(FakeHost.Gives.Count, 0, "the delayed line still counts as the meta's");
+
+        var typed = new World();
+        typed.S.CurrentLootPath = KeepEverythingProfile();
+        typed.S.IsMacroRunning = true;
+        typed.S.EnableMeta = true;
+        typed.Call("HandleUbCommand", "/ub delay 0 /ub give Mana Mote to Town Crier");
+        typed.Call("TickDelayedCommands");
+        for (int i = 0; i < 20; i++) typed.Call("DrainGiveQueue");
+        Check.Eq(FakeHost.Gives.Count, 3, "a typed delay is a typed give");
     }
 
     private static void UbGivePartial()

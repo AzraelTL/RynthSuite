@@ -31,7 +31,7 @@ internal enum IltSection
     Games,
     /// <summary>
     /// Vaulted Dungeons keeper (portal-recall gem + kill-client). A Mini Remote tab on ILT worlds only,
-    /// and only while RynthAi's "Vaulted Dungeons" master switch (Settings > Navigation) is on.
+    /// and only while its "Vaulted Dungeons" master switch (/ilt settings, Settings > Navigation) is on.
     /// </summary>
     VaultedDungeons,
     /// <summary>Registry charms (acquired / status / tier / server) and the Guardian Hand.</summary>

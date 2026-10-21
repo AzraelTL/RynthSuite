@@ -244,7 +244,14 @@ internal static class TinkerTests
         Check.Eq(p2.Count(x => x == TinkerCatalog.Serpentine), 3, "group a: its cap");
         Check.Eq(p2.Count(x => x == TinkerCatalog.Steel), 4, "group b: its own cap");
         Check.Eq(p2.Count(x => x == TinkerCatalog.Iron), 9, "no group, no slot: all 9");
-        Check.True(TinkerCatalog.IsTrinket("Ornate Compass") && !TinkerCatalog.IsTrinket("Yellow Topaz Ring"), "trinkets left to their tab");
+        // Which jewelry is a trinket is the server plugin's (its profile's "trinkets"; RynthILT's Leaftide list).
+        Check.False(TinkerCatalog.IsTrinket("Ornate Compass", null), "no server plugin: no trinkets (retail jewelry is all Jewelry)");
+        var leaftide = ServerTrinketRule.Parse("{\"schema\":1,\"trinkets\":{\"names\":[\"compass\",\"top\"],\"except\":[\"topaz\"]}}");
+        Check.True(TinkerCatalog.IsTrinket("Ornate Compass", leaftide) && !TinkerCatalog.IsTrinket("Yellow Topaz Ring", leaftide),
+                   "with the server's rule: trinkets left to their tab, a topaz ring is no top");
+        Check.True(TinkerCatalog.IsTrinket("Spinning Top", leaftide), "a top is");
+        Check.Eq(ServerTrinketRule.Parse("{\"schema\":1,\"salvage\":[]}"), ServerTrinketRule.None, "a profile without trinkets: none");
+        Check.Eq(ServerTrinketRule.Parse("not json"), ServerTrinketRule.None, "unusable text: none");
     }
 
     private static void ItemRows()
@@ -345,8 +352,11 @@ internal static class TinkerTests
         Check.Eq(TinkerPlanner.TierOf("Minor Pyreal Salvage"), 0, "Minor");
         Check.Eq(TinkerPlanner.TierOf("Salvage (100)"), -1, "no tier");
 
-        Check.True(TinkerCatalog.IsTrinket("Spinning Top") && TinkerCatalog.IsTrinket("Copper Pocket Watch")
-                   && !TinkerCatalog.IsTrinket("Imperial Topaz Necklace"), "trinket names (topaz isn't a top)");
+        // The server plugin's rule (RynthILT's Leaftide list, as its profile sends it).
+        var rule = new ServerTrinketRule(new[] { "compass", "goggles", "scarab", "watch", "puzzle box", "top" }, new[] { "topaz" });
+        Check.True(TinkerCatalog.IsTrinket("Spinning Top", rule) && TinkerCatalog.IsTrinket("Copper Pocket Watch", rule)
+                   && !TinkerCatalog.IsTrinket("Imperial Topaz Necklace", rule), "trinket names (topaz isn't a top)");
+        Check.False(TinkerCatalog.IsTrinket("Copper Pocket Watch", ServerTrinketRule.None), "without a server rule nothing is a trinket");
         Check.True(TinkerCatalog.Targets(TinkerBench.Trinkets, AcObjectClass.Jewelry), "trinkets are jewelry");
     }
 }

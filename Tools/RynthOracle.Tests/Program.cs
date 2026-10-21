@@ -24,7 +24,7 @@ namespace RynthCore.Engine.UI.ScriptWindows
 
 namespace RynthOracle.Tests
 {
-    internal static class Program
+    internal static partial class Program
     {
         private static int _pass, _fail;
 
@@ -39,22 +39,37 @@ namespace RynthOracle.Tests
 
         private static int Main()
         {
+            // Tab clicks save the settings: into a scratch file, never the player's %APPDATA% copy.
+            OracleSettings.PathOverride = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RynthOracleTests-" + Guid.NewGuid().ToString("N") + "-settings.json");
             Lists();
             QuestLines();
             Catalog();
             Servers();
             EngineServers();
+            IltProfile();
+            ServerFeatures();
             QuestNotes();
-            ConquestReplies();
-            AelrynthReplies();
             Void();
             TimerAlerts();
             Pages();
             CharacterExtras();
+            Charms();
+            Breeding();
+            Legendary();
+            DynamicStamps();
+            GoToParsing();
+            Loaders();
+            MergedList();
+            MarkersReachable();
+            GoToButtons();
+            Trackers();
+            GiveParchment();
+            Throttle();
             Events();
             QuestTexts();
             Refreshes();
             SkillsTabs();
+            ServerMove();
             Console.WriteLine($"{_pass} passed, {_fail} failed");
             return _fail == 0 ? 0 : 1;
         }
@@ -156,6 +171,37 @@ namespace RynthOracle.Tests
             s2.NoteTypedCommand(); // the player typing it
             s2.Tick(51_200);
             Check(!s2.AwaitingOurs, "a typed /myquests shows its reply");
+
+            // A second reply that lost most of its lines on the way (the engine's chat queue dropped
+            // the head of the burst) updates the flags instead of blanking them.
+            var s3 = new QuestFlagStore();
+            long t3 = 200_000;
+            for (int i = 0; i < 100; i++)
+                s3.OnChatLine($"flag{i:D3} - 1 solves (1719432000)\"Q{i}\" -1 0", t3 + i);
+            s3.Tick(t3 + 5_000);
+            Check(s3.Flags.Count == 100, "first full reply: 100 flags");
+            long t4 = t3 + 120_000;
+            for (int i = 90; i < 100; i++)
+                s3.OnChatLine($"flag{i:D3} - 2 solves (1719500000)\"Q{i}\" -1 0", t4 + i);
+            s3.Tick(t4 + 5_000);
+            Check(s3.Flags.Count == 100 && s3.LastPartialReply is { Got: 10, Had: 100 },
+                  "a cut-short reply (10 of 100) is merged, not a replacement");
+            Check(s3.TryGet("flag095", out QuestFlag f95) && f95.Solves == 2 && s3.TryGet("flag001", out _),
+                  "merged reply updates the lines it had and keeps the rest");
+            long t5 = t4 + 120_000;
+            for (int i = 0; i < 95; i++)
+                s3.OnChatLine($"flag{i:D3} - 3 solves (1719600000)\"Q{i}\" -1 0", t5 + i);
+            s3.Tick(t5 + 5_000);
+            Check(s3.Flags.Count == 95 && !s3.TryGet("flag099", out _), "a near-full reply still replaces (a dropped flag goes away)");
+
+            // ACECustom's once-a-minute limit: the throttle line ends "Reading..." and keeps the flags.
+            int had = s3.Flags.Count;
+            long t6 = t5 + 30_000;
+            Check(s3.Request(_ => true, t6) && s3.AwaitingOurs, "refresh sent");
+            Check(s3.OnChatLine("[MyQuests] This command may only be run once every 60 seconds.", t6 + 200) == MyQuestsLine.Throttled
+                  && !s3.AwaitingOurs && s3.Flags.Count == had, "throttle reply: not loading, flags kept");
+            Check(s3.ThrottleSecondsLeft(t6 + 1_000) > 50 && !s3.Request(_ => true, t6 + 10_000), "no resend while the server's minute runs");
+            Check(s3.ThrottleSecondsLeft(t6 + 61_000) == 0 && s3.Request(_ => true, t6 + 61_000), "refresh allowed again after the minute");
         }
 
         private static void Catalog()
@@ -224,7 +270,7 @@ namespace RynthOracle.Tests
 
             // Identity from it.
             ServerIdentity.FromEngine(st, "Launcher Profile", out string tag, out string world, out string source);
-            Check(tag == "" && world == "InfiniteLeaftide" && source.Contains("no RynthOracle pages"), "engine: ILT active has no Oracle tag (its screens are RynthILT's): " + source);
+            Check(tag == ServerTags.InfiniteLeaftide && world == "InfiniteLeaftide", "engine: ILT active is the ILT tag: " + source);
             Check(source.Contains("host matches"), "engine: the reason is shown: " + source);
 
             var picked = RynthCore.Plugin.Shared.EngineServerState.Parse(EngineJson("conquest", "ConquestAC", "RynthConquest", "conquest", "",
@@ -273,7 +319,7 @@ namespace RynthOracle.Tests
             Check(ServerIdentity.TagForWorld("Conquest") == ServerTags.Conquest, "Conquest");
             Check(ServerIdentity.TagForWorld("Levistras") == ServerTags.Levistras, "Levistras");
             Check(ServerIdentity.TagForWorld("Coldeve") == "" && ServerIdentity.TagForWorld("") == "", "other servers have no tag");
-            Check(ServerIdentity.TagForWorld("InfiniteLeaftide") == "", "Infinite Leaftide has no Oracle tag (RynthILT draws its screens)");
+            Check(ServerIdentity.TagForWorld("InfiniteLeaftide") == ServerTags.InfiniteLeaftide, "Infinite Leaftide is the ILT tag (the Quests tab's stamps and guardians, Pet Breeding)");
             var id = new ServerIdentity();
             id.Force("", "Coldeve");
             Check(id.Allows(null) && id.Allows("") && !id.Allows(ServerTags.Conquest) && !id.Allows(ServerTags.Aelrynth), "untagged everywhere, tagged nowhere else");
@@ -285,16 +331,19 @@ namespace RynthOracle.Tests
             var view = new OracleView(c);
             c.Server.Force("", "Coldeve");
             string[] none = view.VisibleTabs();
-            Check(!none.Contains(OracleView.TabBoards) && !none.Contains(OracleView.TabConquest), "no server tabs on other servers: " + string.Join(",", none));
+            Check(!none.Contains("Leaderboards") && !none.Contains("Conquest"), "no server tabs on other servers: " + string.Join(",", none));
+            // A server's own pages are its server plugin's since 2026-10-20 (RynthConquest, RynthAelrynth).
             c.Server.Force(ServerTags.Aelrynth, "Aeshnidae");
             string[] ael = view.VisibleTabs();
-            Check(ael.Contains(OracleView.TabBoards) && !ael.Contains(OracleView.TabConquest), "Aelrynth: leaderboards, no Conquest tab");
+            Check(!ael.Contains("Leaderboards") && !ael.Contains("Conquest"), "Aelrynth: no leaderboards in RynthOracle: " + string.Join(",", ael));
             c.Server.Force(ServerTags.Conquest, "Conquest");
             string[] cq = view.VisibleTabs();
-            Check(cq.Contains(OracleView.TabBoards) && cq.Contains(OracleView.TabConquest), "ConquestAC: leaderboards and the Conquest tab");
-            c.Settings.TabName = OracleView.TabConquest;
-            c.Server.Force(ServerTags.Aelrynth, "Aeshnidae");
-            Check(view.Tab == OracleView.TabQuests, "a Conquest tab left selected falls back to Quests elsewhere");
+            Check(!cq.Contains("Leaderboards") && !cq.Contains("Conquest"), "Conquest: no Conquest tab and no leaderboards in RynthOracle: " + string.Join(",", cq));
+            foreach (string old in new[] { "Conquest", "Leaderboards" })
+            {
+                c.Settings.TabName = old;
+                Check(view.Tab == OracleView.TabQuests, $"a {old} tab saved by an older version falls back to Quests");
+            }
         }
 
         // Quest notes: tracking and rewards saved per character, UB's reward format and import, kill-task timers.
@@ -369,101 +418,6 @@ namespace RynthOracle.Tests
             }
         }
 
-        private static void ConquestReplies()
-        {
-            var d = new ConquestData();
-            long now = 1_000_000;
-            d.RequestBank(now);
-            Check(d.OnChatLine("[BANK] Your balances:", now, out bool ours) && ours, "bank heading (ours)");
-            d.OnChatLine("[BANK] Pyreals: 1,039,678,533", now, out _);
-            d.OnChatLine("[BANK] Event Tokens [Dragon Coins] (x): 12", now, out _);
-            Check(d.Bank.Any(b => b.Name == "Pyreals" && b.Value.Contains("4,158 MMDs")), "pyreals with MMDs");
-            Check(d.Bank.Any(b => b.Name == "Dragon Coins (x)"), "event token name");
-            Check(!d.OnChatLine("Bob says, \"[BANK] Pyreals: 999\"", now, out _), "a pasted balance is ignored");
-            d.OnChatLine("[BANK] Pyreals: 5", now + 60_000, out bool late);
-            Check(!late, "a reply long after the request isn't ours (shows in chat)");
-
-            d.RequestAugs(now);
-            d.OnChatLine("Creature: 25", now, out _);
-            d.OnChatLine("Duration: 3", now, out _);
-            ConquestAug creature = d.Augs.First(a => a.Name == "Creature");
-            Check(creature.Count == 25 && creature.NextLuminanceCost() == 6_229_500, $"Creature 25 next costs 6,229,500 ({creature.NextLuminanceCost()})");
-            Check(d.DurationAugs == 3 && Math.Abs(d.VoidDurationMultiplier(5) - 2.15) < 1e-9, "void duration x(1 + 5*0.2 + 3*0.05)");
-
-            d.RequestEnl(now);
-            d.OnChatLine("Enlightenment Augmentations:", now, out _);
-            d.OnChatLine("Skill Credits: 2 (10 max)", now, out _);
-            d.OnChatLine("Damage: 5 (25 max)", now, out _);
-            Check(d.EnlAugs.Count == 2 && d.EnlAugs[0].Name == "Damage", "enlightenment augs in display order");
-
-            d.RequestBonus(now);
-            d.OnChatLine("=== XP Bonuses ===", now, out _);
-            d.OnChatLine("Quest Bonus: 14.18% (1,418 quests)", now, out _);
-            d.OnChatLine("Total Bonus (Kills): 0.16%", now, out _);
-            Check(d.Bonuses.First(b => b.Name == "Quest").Value == "14.18% (1,418 quests)" && d.Bonuses.First(b => b.Name == "Total (Kills)").Value == "0.16%", "bonuses");
-
-            d.RequestFships(now);
-            d.OnChatLine("Fellowships looking for members:", now, out _);
-            d.OnChatLine("- Heroes (Leader: Bob) [3/14] @ Bur", now, out _);
-            d.OnChatLine("- Quiet (Leader: Ann) [1/14]", now, out _);
-            Check(d.Fellowships.Count == 2 && d.Fellowships[0].Location == "Bur" && d.Fellowships[1].MemberCount == 1, "fellowship list");
-
-            ConquestBoard lvl = d.Boards.First(b => b.Key == "level");
-            d.RequestBoard(lvl, now);
-            d.OnChatLine("Top 2 Players by Level:", now, out _);
-            d.OnChatLine("1: 300 - Alpha", now, out _);
-            d.OnChatLine("2: 299 - Beta", now, out _);
-            d.OnChatLine("57: 250 - Me (You)", now, out _);
-            Check(lvl.Rows.Count == 2 && lvl.You != null && lvl.You.Rank == 57 && lvl.You.Name == "Me", "ConquestAC /top board");
-
-            Check(ConquestData.WithdrawCommand(ConquestData.Withdrawable[ConquestData.DefaultWithdraw], "10") == "/bank withdraw n 10", "withdraw MMDs");
-            Check(ConquestData.WithdrawCommand(ConquestData.Withdrawable[0], "-3") == null, "withdraw refuses a bad amount");
-            Check(ConquestData.TransferCommand(ConquestData.Transferable[2], "4", "Some One") == "/bank transfer p 1000000 \"Some One\"", "transfer MMD notes as pyreals");
-            Check(ConquestData.TransferCommand(ConquestData.Transferable[2], "1001", "X") == null, "transfer cap");
-        }
-
-        private static void AelrynthReplies()
-        {
-            var a = new AelrynthBoards();
-            long now = 2_000_000;
-            a.RequestTop("", now);
-            Check(a.OnChatLine("Leaderboards - 37 characters, refreshed 4 min ago. /top <board> for the top ten, /top me for yourself.", now, out bool ours) && ours, "overview header");
-            a.OnChatLine("  kills             Creature kills: Buffy, 1,234,567", now, out _);
-            a.OnChatLine("  pk                PK kills: nobody yet", now, out _);
-            Check(a.Overview.Count == 2 && a.Overview[0].Key == "kills" && a.Overview[0].Leader == "Buffy" && a.Overview[0].Value == "1,234,567"
-                  && a.Overview[1].Leader == "nobody yet", "overview rows");
-
-            a.RequestTop("kills", now);
-            a.OnChatLine("Creature kills - top 10 of 37:", now, out _);
-            a.OnChatLine("    1. Buffy                             1,234,567  <- you", now, out _);
-            a.OnChatLine("    2. Dargoth                             987,654", now, out _);
-            a.OnChatLine("    3. Sal                                     500  12 kills per death", now, out _);
-            Check(a.BoardTitle == "Creature kills" && a.BoardRows.Count == 3 && a.BoardRows[0].IsYou && a.BoardRows[1].Value == "987,654"
-                  && a.BoardRows[2].Extra == "12 kills per death", "board rows: " + string.Join(" | ", a.BoardRows.Select(r => $"{r.Rank} {r.Name} {r.Value} [{r.Extra}] {r.IsYou}")));
-
-            a.RequestTop("me", now);
-            a.OnChatLine("Buffy on the boards:", now, out _);
-            a.OnChatLine("  Creature kills               #1 of 37, 1,234,567", now, out _);
-            a.OnChatLine("  PK kills                     -", now, out _);
-            Check(a.Standings.Count == 2 && a.Standings[0].Rank == 1 && a.Standings[1].Rank == 0, "/top me");
-
-            Check(!a.OnChatLine("    9. Nobody   12", now + 30_000, out _), "an entry long after its header is ignored");
-
-            a.RequestTrial("", now);
-            a.OnChatLine("Trials - a fresh personal copy of a listed dungeon, entered through its portal, is a timed course: ...", now, out _);
-            a.OnChatLine("  The Citadel Below - Trial (02F0): tier 0 12:34 by Buffy | you: tier 0 12:34 | this week: Buffy 12:34 (tier 0)", now, out _);
-            a.OnChatLine("      your next attempt here: in 12 min", now, out _);
-            a.OnChatLine("Trophy: the week's fastest clear of each dungeon, any tier - a trophy and 1,000 experience, Sunday 20:00 (2026-W40). /trial <name> for the top 10 of one dungeon.", now, out _);
-            Check(a.Trials.Count == 1 && a.Trials[0].Landblock == "02F0" && a.TrialLines.Count == 3, $"/trial overview ({a.Trials.Count} dungeons, {a.TrialLines.Count} lines)");
-
-            a.RequestTrial("citadel", now);
-            a.OnChatLine("The Citadel Below - Trial (02F0) - top 10, best per character, any tier:", now, out _);
-            a.OnChatLine("   1. 12:34  Buffy (tier 0, 105 kills, 3 Oct)", now, out _);
-            a.OnChatLine("  you: tier 0 12:34 (105 kills)", now, out _);
-            Check(a.TrialRows.Count == 1 && a.TrialRows[0].Name == "Buffy" && a.TrialRows[0].Value == "12:34" && a.TrialNotes.Count == 1, "/trial dungeon top 10");
-            Check(!a.OnChatLine("Bob tells you, \"hello\"", now, out _), "ordinary chat is never taken");
-        }
-
         private static void Void()
         {
             var v = new VoidTracker();
@@ -526,13 +480,9 @@ namespace RynthOracle.Tests
             Check(timersBody.Contains("Attribute and Skill Redistribution") && timersBody.Contains("ready"), "the Quest Timers window lists tracked quests with their timers");
 
             // Every tab on each server, including the server-specific ones (with data in them).
-            c.Conquest.RequestBank(c.NowMs);
-            c.Conquest.OnChatLine("[BANK] Pyreals: 1,000", c.NowMs, out _);
-            c.Boards.OnChatLine("Leaderboards - 3 characters, refreshed just now. /top <board> ...", c.NowMs, out _);
-            c.Boards.OnChatLine("  kills             Creature kills: Buffy, 12", c.NowMs, out _);
             c.EarnedTitles.Add(1);
             c.TitlesKnown = true;
-            foreach (string server in new[] { ServerTags.Aelrynth, ServerTags.Conquest, "" })
+            foreach (string server in new[] { ServerTags.Aelrynth, ServerTags.Conquest, ServerTags.InfiniteLeaftide, "" })
             {
                 c.Server.Force(server, server);
                 foreach (string tab in view.VisibleTabs())
@@ -543,7 +493,7 @@ namespace RynthOracle.Tests
                     main.End();
                     ParseAll(host, $"{server}/{tab}", out int ops);
                     Check(ops > 5 && ops < 1400, $"{server}/{tab}: {ops} ops");
-                    if (server == ServerTags.Aelrynth || tab is OracleView.TabConquest) Console.WriteLine($"  {(server.Length > 0 ? server : "other")}/{tab}: {ops} ops, {main.Body.Length} bytes");
+                    if (server == ServerTags.Aelrynth) Console.WriteLine($"  {(server.Length > 0 ? server : "other")}/{tab}: {ops} ops, {main.Body.Length} bytes");
                     main.MarkSubmitted(true);
                 }
             }
@@ -564,18 +514,6 @@ namespace RynthOracle.Tests
             Check(!openBody.Contains("/qb"), "no quest bonus list here (Infinite Leaftide's /qb is RynthILT's)");
             Console.WriteLine($"  Quests (opened): {openOps} ops, {main.Body.Length} bytes");
             main.MarkSubmitted(true);
-
-            // The Conquest tab's sub-pages and the Aelrynth board views.
-            c.Server.Force(ServerTags.Conquest, "Conquest");
-            c.Settings.TabName = OracleView.TabConquest;
-            for (int v = 0; v < 6; v++)
-            {
-                main.Begin(); view.Draw(main); main.End();
-                Apply(host, Event(1, (uint)(100 + v), main.Hash, main.KeyOf("cq.v." + ((v + 1) % 6)), new byte[] { 1, 0, 0 }));
-                main.Begin(); view.Draw(main); main.End();
-                ParseAll(host, $"conquest view {v}", out int ops);
-                Check(ops > 5 && ops < 1400, $"conquest view {v}: {ops} ops");
-            }
 
             // A page that can't fit: everything in the catalog on one page is cut short, still valid.
             var big = new UiWindow("RynthOracle/Big", "Big") { Visible = true };
@@ -727,10 +665,10 @@ namespace RynthOracle.Tests
         {
             // The tabs: after Character, on every server; every earlier tab is still there.
             string[] earlier = { OracleView.TabQuests, OracleView.TabCharacter, OracleView.TabAugs, OracleView.TabSociety,
-                OracleView.TabMarkers, OracleView.TabTitles, OracleView.TabVoid, OracleView.TabFellowship, OracleView.TabAbout };
+                OracleView.TabTitles, OracleView.TabVoid, OracleView.TabFellowship, OracleView.TabAbout };
             OracleContext c = Context();
             var view = new OracleView(c);
-            foreach (string server in new[] { ServerTags.Aelrynth, ServerTags.Conquest, "" })
+            foreach (string server in new[] { ServerTags.Aelrynth, ServerTags.Conquest, ServerTags.InfiniteLeaftide, "" })
             {
                 c.Server.Force(server, server);
                 string[] tabs = view.VisibleTabs();
@@ -876,7 +814,7 @@ namespace RynthOracle.Tests
             void Press(string scope) => Click("refresh." + scope);
 
             // A Refresh button on every tab, on every server.
-            foreach (string server in new[] { ServerTags.Aelrynth, ServerTags.Conquest, "" })
+            foreach (string server in new[] { ServerTags.Aelrynth, ServerTags.Conquest, ServerTags.InfiniteLeaftide, "" })
             {
                 c.Server.Force(server, server);
                 foreach (string tab in view.VisibleTabs())
@@ -908,7 +846,7 @@ namespace RynthOracle.Tests
             foreach ((string tab, int wantChars, int wantQuests) in new[]
             {
                 (OracleView.TabCharacter, 1, 0), (OracleView.TabAugs, 1, 1), (OracleView.TabSociety, 1, 1),
-                (OracleView.TabMarkers, 0, 1), (OracleView.TabVoid, 1, 0),
+                (OracleView.TabVoid, 1, 0),
             })
             {
                 chars = quests = 0;
@@ -936,45 +874,6 @@ namespace RynthOracle.Tests
             c.NowMs += 4000;
             Press("About");
             Check(lists == 2, "About: allowed again after the pause");
-
-            // ConquestAC: the sub-page's own command, once per pause; the line follows the reply.
-            c.Server.Force(ServerTags.Conquest, "Conquest");
-            c.Settings.TabName = OracleView.TabConquest;
-            string[] want = { "/b", "/augs", "/enl augs", "/bonus", "/fship list" };
-            for (int v = 0; v < 6; v++)
-            {
-                Click("cq.v." + v);
-                sent.Clear();
-                quests = 0;
-                c.NowMs += 4000;
-                Press("Conquest" + v);
-                if (v < 5) Check(sent.Count == 1 && sent[0] == want[v], $"Conquest view {v}: Refresh sends {want[v]} (sent {string.Join(",", sent)})");
-                else Check(sent.Count == 0 && quests == 1, "Conquest custom quests: Refresh asks for the quest flags");
-                Press("Conquest" + v);
-                Check(sent.Count == (v < 5 ? 1 : 0), $"Conquest view {v}: a second press at once sends nothing more");
-            }
-            Click("cq.v.0");
-            c.NowMs += 4000;
-            Press("Conquest0");
-            System.Threading.Thread.Sleep(5);
-            c.Conquest.OnChatLine("[BANK] Pyreals: 2,000", c.NowMs, out _);
-            Check(Draw().Contains("Updated "), "Conquest bank: the line says Updated when the balances arrive");
-
-            // Boards: ConquestAC's board, then Aelrynth's three views.
-            c.Settings.TabName = OracleView.TabBoards;
-            sent.Clear();
-            c.NowMs += 4000;
-            Press(OracleView.TabBoards + "00");
-            Check(sent.Count == 1 && sent[0].StartsWith("/top "), "ConquestAC boards: Refresh sends /top <board>: " + string.Join(",", sent));
-            c.Server.Force(ServerTags.Aelrynth, "Aeshnidae");
-            sent.Clear();
-            foreach ((int viewNo, string cmd) in new[] { (0, "/top"), (1, "/top me"), (2, "/trial") })
-            {
-                Click("ab.v" + viewNo);
-                c.NowMs += 4000;
-                Press($"{OracleView.TabBoards}{viewNo}0");
-                Check(sent.Count > 0 && sent[^1].TrimEnd() == cmd, $"Aelrynth boards view {viewNo}: Refresh sends {cmd} (sent {sent.LastOrDefault()})");
-            }
         }
 
         private static byte[] Event(ushort type, uint seq, uint window, uint key, byte[] payload)

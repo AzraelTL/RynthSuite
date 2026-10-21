@@ -150,6 +150,7 @@ internal sealed class IltHubStore
         s.Pet.Breeding.StageNames ??= new();
         s.Pet.Breeding.Log ??= new();
         s.Pet.Breeding.LastDebug ??= new();
+        s.Pet.CaptureLens = Math.Clamp(s.Pet.CaptureLens, 0, PetCaptureRules.Lenses.Length - 1);
         s.Pet.Breeding.Rules.RemoveAll(r => r == null || string.IsNullOrEmpty(r.Key));
         s.Pet.Breeding.Log.RemoveAll(e => e == null);
         for (int i = 0; i < s.Pet.Breeding.StageNames.Count; i++) s.Pet.Breeding.StageNames[i] ??= string.Empty;
@@ -169,6 +170,10 @@ internal sealed class IltHubStore
         s.Gear.DispelExclusions ??= new();
         s.Gear.RingRuns = new Dictionary<string, int>(s.Gear.RingRuns ?? new(), StringComparer.OrdinalIgnoreCase);
         s.Games ??= new IltGamesState();
+        s.Combat ??= new IltCombatState();
+        s.T11 ??= new IltT11State();
+        s.Remote ??= new IltRemoteState();
+        if (s.T11.ItemAugsOverride < -1) s.T11.ItemAugsOverride = -1;
         s.Guardian ??= new IltGuardianState();
         s.Guardian.TurnInCounts = new Dictionary<string, int>(s.Guardian.TurnInCounts ?? new(), StringComparer.OrdinalIgnoreCase);
         s.Guardian.CooldownUntilUtc = new Dictionary<string, DateTime>(s.Guardian.CooldownUntilUtc ?? new(), StringComparer.OrdinalIgnoreCase);

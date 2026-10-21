@@ -42,7 +42,36 @@ internal static class DoorTests
         r.Add("door: Only Doors On My Path - a door beside the way is left shut, one straight ahead is opened", PathOnlyAhead);
         r.Add("door: Only Doors On My Path - on a route the door on the next leg goes, not a nearer one beside it", PathOnlyRoute);
         r.Add("door: Only Doors On My Path - not a door past the range along the path, nor one behind the route's direction", PathOnlyRange);
+        r.Add("door: one created before its position was readable (just after a portal) is still found and opened", CreatedBeforePosition);
     }
+
+    /// <summary>
+    /// A dungeon's objects arrive while the character is still in portal space, often before their
+    /// position reads: such a door was filed as inventory and never seen by the door scans (Dargoth
+    /// Hera, Infested Mine, 2026-10-19: Open Doors on, a closed door on the route, no use at all).
+    /// </summary>
+    private static void CreatedBeforePosition() => With(() =>
+    {
+        foreach (uint? itemType in new uint?[] { 0x80u, null })   // a readable item type, and none at all
+        {
+            var b = new Bot();
+            MoveDoor(Door, 40f, 0f);                     // the rig's door far out of range
+            FakeHost.Names[Door2] = "Door";
+            FakeHost.Bitfields[Door2] = BfDoor;
+            FakeHost.ObjectStates[Door2] = Closed;
+            if (itemType is uint t) FakeHost.ItemTypes[Door2] = t;
+            b.Cache.OnCreateObject(Door2);                // no position yet
+            for (int i = 0; i < 12; i++) b.Cache.Tick();  // classified (and any retries spent) without one
+            Check.True(b.Cache.GetLandscapeObjects().Any(o => unchecked((uint)o.Id) == Door2),
+                $"a static door stays a world object without a position (item type {(itemType is null ? "unreadable" : "0x80")})");
+            Check.False(b.Cache.GetInventory().Any(o => unchecked((uint)o.Id) == Door2), "never filed as inventory");
+
+            FakeHost.Positions[Door2] = (Me0.Cell, Me0.X + 2f, Me0.Y, Me0.Z);   // the position comes in
+            b.Tick();
+            b.Run(300);
+            Check.Eq(Uses(Door2), 1, "the door is used once it has a position");
+        }
+    });
 
     // ── Rig ─────────────────────────────────────────────────────────────────
 

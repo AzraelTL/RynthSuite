@@ -4,8 +4,10 @@
 //  borrows from RynthAi. The Mini Remote that hosts the ILT tabs, the /myquests
 //  tracker (the Temple attribute tracker reads its flags), spell names (the dispel
 //  keeper), VTank loot-profile matching (equipment suits) and the VTank .usd
-//  importer (which edits RynthAi's own rules; drawn in RynthILT's Gear tab), and the
-//  Mini Remote's session stats (the Character tab's rates count the same session).
+//  importer (which edits RynthAi's own rules; drawn in RynthILT's Gear tab), the
+//  Mini Remote's session stats (the ILT rates count the same session), and since
+//  2026-10-20 combat's generic back-away (the Empyrean Handler's ring) and the loot
+//  rules' wield counters (the T11 counters RynthILT reads from /aug).
 //  Compiled into both plugins (linked source), so the layout can't drift.
 //
 //  Rules: as RynthILT.Hub (Shared/RynthIltHubApi.cs): append-only, UTF-8 strings,
@@ -26,6 +28,18 @@ public static class RynthAiHub
 
     /// <summary>RenderSection: the VTank .usd settings importer (RynthAi's monster / weapon / consumable rules).</summary>
     public const string SectionVTankImport = "vtank-import";
+
+    // BackAwayFrom results.
+    /// <summary>The back-jump started; attacks wait until it settles.</summary>
+    public const int BackAwayStarted = 1;
+    /// <summary>Not now: RynthAi's macro isn't running with combat on, it is backing away already, or it isn't logged in.</summary>
+    public const int BackAwayNotNow = 0;
+    /// <summary>The character is outside the radius: nothing done.</summary>
+    public const int BackAwayOutside = 2;
+    /// <summary>The object (or the player) has no position.</summary>
+    public const int BackAwayUnknownObject = 3;
+    /// <summary>In range, but the jump didn't start.</summary>
+    public const int BackAwayJumpRefused = -1;
 }
 
 /// <summary>One /myquests flag as RynthAi's quest tracker has it. Blittable.</summary>
@@ -176,9 +190,37 @@ public unsafe struct RynthAiHubApiV1
     public static int VaultedDungeonsEnabledOffset => (int)BaseStructSize + sizeof(nint);
 
     /// <summary>
-    /// VaultedDungeonsEnabled(): 1 when RynthAi's "Vaulted Dungeons" setting (Settings > Navigation) is
-    /// on. That setting is the master switch of RynthILT's Vaulted Dungeons keeper and lives only in
-    /// RynthAi; 0 (off) is also the answer before login and after shutdown. Any thread.
+    /// VaultedDungeonsEnabled(): obsolete since 2026-10-20, kept because the table is append-only. The
+    /// Vaulted Dungeons master switch is RynthILT's own setting now (RynthILT 0.4+ reads its state, and
+    /// RynthAi mirrors it for the engine through RynthILT.Hub GetSetting / SetSetting). RynthAi answers
+    /// the value its profile still carries (what RynthILT copied once), so an older RynthILT keeps
+    /// working; 0 before login and after shutdown. Any thread.
     /// </summary>
     public delegate* unmanaged[Cdecl]<int> VaultedDungeonsEnabled;
+
+    // ── Appended 2026-10-20 (check with Has before calling) ─────────────────
+
+    /// <summary>The byte offset of <see cref="BackAwayFrom"/> (for <see cref="Has"/>): right after VaultedDungeonsEnabled.</summary>
+    public static int BackAwayFromOffset => (int)BaseStructSize + 2 * sizeof(nint);
+
+    /// <summary>
+    /// BackAwayFrom(objectId, radiusYards, holdMs): a server plugin's "get out of this radius now" (RynthILT:
+    /// the Empyrean Handler's lethal ring). RynthAi faces the object, run-back jumps away from it (holdMs =
+    /// the jump's charge, 100-3000) and holds its attacks until the jump settles, then re-engages the same
+    /// target; the radius is at least the player's Ring Range. Only while RynthAi's macro runs with combat
+    /// on. Returns <see cref="RynthAiHub.BackAwayStarted"/> and the other BackAway* results. Pump thread.
+    /// </summary>
+    public delegate* unmanaged[Cdecl]<uint, float, int, int> BackAwayFrom;
+
+    /// <summary>The byte offset of <see cref="SetPlayerCounter"/> (for <see cref="Has"/>): right after BackAwayFrom.</summary>
+    public static int SetPlayerCounterOffset => (int)BaseStructSize + 3 * sizeof(nint);
+
+    /// <summary>
+    /// SetPlayerCounter(propertyId, value): a player counter the server doesn't send at login and the
+    /// loot rules' wield gates compare against (the T11 "Can Wield" key: Item Augmentations 9008, Triune
+    /// Weave 50000, the school charms 50001-50004). The server plugin reads them (RynthILT: ACECustom's
+    /// "/aug" reply, with its item-aug override applied) and reports each; value &lt; 0 = unknown again.
+    /// 1 = taken, 0 = not such a counter. Any thread.
+    /// </summary>
+    public delegate* unmanaged[Cdecl]<uint, long, int> SetPlayerCounter;
 }

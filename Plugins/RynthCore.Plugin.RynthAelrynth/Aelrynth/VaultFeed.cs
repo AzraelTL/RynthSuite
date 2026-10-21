@@ -1,31 +1,34 @@
+// Moved here from RynthInventory (Scanning/VaultFeed.cs) on 2026-10-20: RynthInventory asked every server
+// for an Aelrynth vault; now only RynthAelrynth asks, on Aelrynth, and hands the vault to RynthInventory
+// through the generic storage feed (Plugins/Shared/StorageFeed.cs).
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text.Json;
-using RynthCore.Plugin.RynthInventory.Data;
 using RynthCore.Plugin.Shared;
 
-namespace RynthCore.Plugin.RynthInventory.Scanning;
+namespace RynthCore.Plugin.RynthAelrynth;
 
 /// <summary>
 /// The Aelrynth account vault (the Aeshnidae.Mule mod): item storage the retail client is never
-/// shown, so the only way to see inside is to ask. The plugin types /mule-data, exactly as a
+/// shown, so the only way to see inside is to ask. RynthAelrynth types /mule-data, exactly as a
 /// player could, and the server answers one chat line a page:
 ///
 ///     ~ael1 {"t":"mule","ready":true,"page":1,"pages":3,"count":57,"max":1000,"items":[{...}]}
 ///
 /// (the same "~ael1" lines the Aelrynth Companion reads; only lines whose "t" is "mule" are ours).
-/// The pages are collected into one StorageRecord and kept with the character's storage, so the
-/// vault is searched, shown with icons and merged across characters like any other storage; the
-/// newest copy wins, and a vault belongs to the account, so every character sees the same one.
+/// The pages are collected into one StorageFeedRecord, which RynthAelrynth sends to RynthInventory
+/// (StorageFeed): it is kept with the character's storage, so the vault is searched, shown with
+/// icons and merged across characters like any other storage; the newest copy wins, and a vault
+/// belongs to the account, so every character sees the same one.
 ///
-/// A server without the command is asked once after login; its "Unknown command" reply is eaten
-/// and the plugin stays quiet. A vault the server says is not ready yet is asked again a few
-/// times, and is never recorded as empty.
+/// A server without the command (Aelrynth without the mod, or a world wrongly taken for Aelrynth)
+/// is asked once after login; its "Unknown command" reply is eaten and the feed stays quiet. A
+/// vault the server says is not ready yet is asked again a few times, and is never recorded as empty.
 ///
-/// Threads: <see cref="ShouldEat"/> may run on AC's thread (it only queues); everything else runs
-/// on the plugin tick.
+/// Threads: <see cref="ShouldEat"/> only queues; everything else runs on the plugin tick.
+/// Pure: RynthServerPack.Tests covers it.
 /// </summary>
 internal sealed class VaultFeed
 {
@@ -33,6 +36,8 @@ internal sealed class VaultFeed
     public const string Prefix = "~ael1 ";
     public const string Label = "Account vault";
     public const string VaultName = "Aelrynth vault";
+    /// <summary>After login, before the first /mule-data; then every <see cref="RefreshMs"/>.</summary>
+    public const long FirstAskMs = 8_000, RefreshMs = 10 * 60_000;
 
     public enum State { Idle, Asking, Unsupported, Waiting }
 
@@ -47,17 +52,17 @@ internal sealed class VaultFeed
     private volatile bool _expecting;
     private int _readyTries;
     private long _retryAtMs;
-    private readonly List<ItemRecord> _pages = new();
+    private readonly List<StorageFeedItem> _pages = new();
     private bool _changed;
 
     public VaultFeed(Func<string, bool> send) => _send = send;
 
     public State Status { get; private set; } = State.Idle;
     /// <summary>The vault once a full read finished (null until then).</summary>
-    public StorageRecord? Record { get; private set; }
+    public StorageFeedRecord? Record { get; private set; }
     public int Max { get; private set; }
 
-    /// <summary>For /ginv status.</summary>
+    /// <summary>For /rserver info.</summary>
     public string Describe() => Status switch
     {
         State.Unsupported => "no vault on this server",
@@ -69,12 +74,16 @@ internal sealed class VaultFeed
     /// <summary>True once after <see cref="Record"/> was replaced.</summary>
     public bool TakeChanged() { bool c = _changed; _changed = false; return c; }
 
+    /// <summary>Login and logout: a fresh read (the record from before is forgotten).</summary>
     public void Reset()
     {
         Status = State.Idle;
         _expecting = false;
         _pages.Clear();
         _readyTries = 0;
+        Record = null;
+        _changed = false;
+        Max = 0;
         while (_lines.TryDequeue(out _)) { }
     }
 
@@ -142,7 +151,7 @@ internal sealed class VaultFeed
         if (Status == State.Waiting && nowMs >= _retryAtMs) SendPage(nowMs, 1);
         else if (Status == State.Asking && nowMs - _sentAtMs > AnswerWindowMs)
         {
-            // Nothing came back: a server without the mod, or a lost line. The next /ginv vault retries.
+            // Nothing came back: a server without the mod, or a lost line. The next refresh retries.
             _expecting = false;
             Status = State.Idle;
             _pages.Clear();
@@ -190,15 +199,7 @@ internal sealed class VaultFeed
             {
                 Status = State.Waiting; _retryAtMs = nowMs + RetryReadyMs; _pages.Clear(); return;
             }
-            Record = new StorageRecord
-            {
-                Id = VaultId(account),
-                Name = VaultName,
-                Label = Label,
-                Cell = 0,
-                SeenUtc = DateTime.UtcNow,
-                Items = new List<ItemRecord>(_pages),
-            };
+            Record = new StorageFeedRecord(VaultId(account), VaultName, Label, new List<StorageFeedItem>(_pages));
             _pages.Clear();
             _changed = true;
             Status = State.Idle;
@@ -210,29 +211,15 @@ internal sealed class VaultFeed
         }
     }
 
-    private static ItemRecord Item(JsonElement e)
-    {
-        var it = new ItemRecord
-        {
-            Id = UInt(e, "o"),
-            Wcid = UInt(e, "w"),
-            Name = Str(e, "n"),
-            Icon = UInt(e, "i"),
-            Underlay = UInt(e, "u"),
-            Overlay = UInt(e, "v"),
-            Stack = Math.Max(1, Int(e, "s", 1)),
-            MaxStack = Int(e, "m", 0),
-            ItemType = UInt(e, "y"),
-            Place = ItemPlace.Storage,
-        };
-        it.Category = ItemCategory.FromItemType(it.ItemType);
-        return it;
-    }
+    private static StorageFeedItem Item(JsonElement e) => new(
+        UInt(e, "o"), UInt(e, "w"), Str(e, "n"), UInt(e, "i"), UInt(e, "u"), UInt(e, "v"),
+        Math.Max(1, Int(e, "s", 1)), Int(e, "m", 0), UInt(e, "y"));
 
     /// <summary>
     /// A stand-in container id for the account's vault. Storage is merged by (server, id) with the
     /// newest copy winning, so the same id on every character of the account shows ONE vault. It is
-    /// in the top of the id space, where no object the client has seen lives.
+    /// in the top of the id space, where no object the client has seen lives (StorageFeed.IsStandInId).
+    /// The same formula as RynthInventory used, so vaults saved before the move are replaced, not doubled.
     /// </summary>
     public static uint VaultId(string account)
     {

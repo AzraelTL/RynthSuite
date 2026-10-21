@@ -282,6 +282,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         long t0 = Environment.TickCount64;
         try { _dashboard?.SaveSettings(); } catch { }
         try { _sessionStats?.Shutdown(); } catch { }
+        try { GameInput.Shutdown(); } catch { }   // keys still held for /mt movement | jump | strafe
         // Release the Monster Editor process handle (if the toggle button
         // launched one) rather than leaking it on plugin unload/hot-reload.
         try { _dashboard?.ReleaseMonsterEditorHandle(); } catch { }
@@ -742,8 +743,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _combatManager.ManaReserveHold = spellId => _buffManager?.OffensiveCastHold(spellId);   // the mana reserve
         _combatManager.ManaCanEverAfford = spellId => _buffManager?.CanEverAfford(spellId) ?? true;   // script hook: never-payable spells
         _combatManager.SetStaleBusyCallback(OnCombatBusyStale);
-        // Empyrean Handler lethal-ring: face the Handler, run-back jump (Jumper "xs"), re-engage.
-        // Read _jumper at call time — it is constructed later in this session setup.
+        // A server plugin's back-away (RynthAi.Hub BackAwayFrom; RynthILT's Empyrean Handler ring): face
+        // the danger, run-back jump (Jumper "xs"), re-engage. Read _jumper at call time — it is
+        // constructed later in this session setup.
         _combatManager.RequestBackJump = (faceHeading, ms) => _jumper != null && _jumper.Start("xs", faceHeading, ms);
         _combatManager.JumpBusy = () => _jumper?.IsBusy == true;
         _buffManager?.SetStaleBusyCallback(OnCombatBusyStale);   // a heal ahead of a leftover busy count
@@ -778,7 +780,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
         _metaManager = new MetaManager(_dashboard.Settings, Host, _vitals);
         _metaManager.SetPlayerId(_playerId);
-        _metaManager.SetMtCommandHandler(HandleMtCommand);
+        _metaManager.SetMtCommandHandler(HandleMetaChatCommand);
         _metaManager.SetRaCommandHandler(HandleRaCommand);
         if (_objectCache != null) _metaManager.SetObjectCache(_objectCache);
         _metaManager.SetFellowshipTracker(_fellowshipTracker);
@@ -786,6 +788,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         if (_buffManager != null) _metaManager.SetBuffManager(_buffManager);
         _metaManager.SetCreatureStore(_creatureStore);
         _metaManager.SetKillClock(_killClock);
+        _metaManager.SetCorpseOpenedCheck(id => _completedCorpses.ContainsKey(id));
         if (_dashboard != null)
             _dashboard.MetaSnapshotProvider = () => _metaManager?.GetStateSnapshot();
 
@@ -801,7 +804,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
         CreateMiniRemote();
         if (_miniRemote?.SkipLoginQuestRefresh == true)
-            Log("RynthAi: RynthILT says /myquests is off on this server; login quest refresh already ran.");
+            Log("RynthAi: the server plugin says /myquests is off on this server; login quest refresh already ran.");
         try
         {
             string hubChar = CurrentCharacterName();
@@ -995,13 +998,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "hub":
             case "quests":
             case "pets":
-            case "guardian":
-            case "bounty":
-            case "bounties":
-            case "bountys":
                 // Dashboard Char launcher and its right-click menu (hub=tab <section> switches the
-                // Mini Remote's tab); value carries the "/ra hub|quests|pets|bounty" arguments. The
-                // Infinite Leaftide verbs go on to RynthILT (MiniRemoteController.HandleCommand).
+                // Mini Remote's tab); value carries the "/ra hub|quests|pets" arguments. A hub verb that
+                // isn't RynthAi's goes on to the server plugin (MiniRemoteController.HandleCommand), and so
+                // does any other action RynthAi doesn't have (default below: "guardian", "bounty", ...).
                 if (_miniRemote == null) { ChatLine("[RynthAi] The Mini Remote isn't ready (log in first)."); break; }
                 _miniRemote.HandleCommand(action.ToLowerInvariant(), value.Split(' ', StringSplitOptions.RemoveEmptyEntries));
                 break;
@@ -1020,10 +1020,6 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 // Inventory panel "Add to Mini Remote"; value is "<slot 1-30|first> <objectId>".
                 if (_huds == null) { ChatLine("[RynthAi] HUDs not ready (log in first)."); break; }
                 if (!_huds.HandleRemoteSlot(value)) Host.Log($"[RynthAi] bad remoteslot value: {value}");
-                break;
-            case "prog":
-                // Skills panel Progression tab (augmentations / enlightenment edits).
-                HandleProgressionRemote(value);
                 break;
             case "trace":
             case "logs":
@@ -1045,6 +1041,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             // movestart/movestop are applied DIRECTLY by the RynthRemote plugin (pure Host.SetAutoRun/
             // SetMotion + its own dead-man watchdog) and are never forwarded here.
             default:
+                // The server plugin's verbs sent to RynthAi (an engine button for "/ra guardian", "/ra bounty", ...).
+                if (_serverHub != null && _serverHub.Command((action.ToLowerInvariant() + " " + value).Trim())) break;
                 Host.Log($"[RynthAi] ignored unknown remote command: {action}={value}");
                 return;
         }
@@ -1448,6 +1446,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             if (_loginComplete) PostDataWriteProblems();   // a save that failed / folder not writable: say so in chat
             CombatHook.ObserveUseDone();        // ctx.last.err: the answer to the hook's last cast
             TickDelayedCommands();              // /ub delay
+            GameInput.Pump();                   // release keys held for /mt movement | jump | strafe
             DrainEngineCommands();              // fellowship command buttons (RynthCore's Fellowship section)
             TickPropertyDump();                 // /ub propertydump: waits for the ID, chat in chunks
             if (_loginComplete) _dashboard?.TickPackSetup(_objectCache, _playerId);   // new/copied profile items
@@ -1623,7 +1622,6 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             if (diag) Host.Log("[RynthAi] OnTick: after quest tracker");
             DrainGiveQueue();
             if (diag) Host.Log("[RynthAi] OnTick: after drain give queue");
-            Loot.T11ItemSupport.SyncOverride(_dashboard?.Settings.T11ItemAugsOverride ?? -1);
             _jumper?.Tick();
             if (diag) Host.Log("[RynthAi] OnTick: after jumper tick");
 
@@ -2371,14 +2369,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _combatManager?.TraceCastChat(text, chatType);
         _combatManager?.HandleChatForDebuffs(text);
         _combatManager?.HandleChatForDamage(text, chatType);
-        _combatManager?.HandleChatForRingEvade(text, chatType);
         _missileCraftingManager?.HandleChat(text);
         _scrollLearner?.OnChat(text);
         _metaManager?.HandleChat(text, chatType);
         _questTracker?.OnChatLine(text);
-        // The "/aug" reply carries the T11 wield counters (RynthILT's login probe requests it on ILT).
-        try { Loot.T11ItemSupport.OnChat(text); }
-        catch (Exception ex) { RynthLog.Exception(LogCat.Looting, ex, "T11 /aug parse"); }
         CheckChatForSafetyStops(text);
         try { OnOwnCorpseChat(text); } catch { }
     }
@@ -3826,6 +3820,18 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         DispatchRaCommand(cmd, parts, ref eat);
     }
 
+    /// <summary>
+    /// An unknown "/ra" verb offered to the active server plugin (RynthILT.Hub Command, the words after
+    /// "/ra"). True when it took it (it answers in chat itself). Main / pump thread.
+    /// </summary>
+    private bool TryForwardToServerPlugin(string[] parts)
+    {
+        var server = _serverHub;
+        if (server == null || parts.Length < 2) return false;
+        try { return server.Command(string.Join(" ", parts, 1, parts.Length - 1)); }
+        catch (Exception ex) { RynthLog.Exception(LogCat.UI, ex, "server plugin command"); return false; }
+    }
+
     private void DispatchRaCommand(string cmd, string[] parts, ref int eat)
     {
         // Need trimmed original for commands that use it
@@ -3858,7 +3864,6 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "dumpprops":    HandleDumpPropsCommand(parts); break;
             case "version":      HandleVersionCommand(); break;
             case "server":       HandleServerCommand(); break;
-            case "t11":          HandleT11Command(parts); break;
             case "wielded":      HandleWieldedCommand(); break;
             case "scan":         HandleScanCommand(); break;
             case "buildinfo":    HandleBuildInfoCommand(); break;
@@ -3873,10 +3878,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "hub":
             case "quests":
             case "pets":
-            case "guardian":
-            case "bounty":
-            case "bounties":
-            case "bountys":
+                // The Mini Remote's verbs; "/ra guardian", "/ra bounty" and the like are the server
+                // plugin's (default below), as is any "/ra hub ..." verb RynthAi doesn't have.
                 if (_miniRemote == null) { ChatLine("[RynthAi] The Mini Remote isn't ready (log in first)."); break; }
                 _miniRemote.HandleCommand(cmd, parts.Length > 2 ? parts[2..] : Array.Empty<string>());
                 break;
@@ -3964,6 +3967,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 }
                 break;
             case "settings":     HandleSettingsCommand(parts); break;
+            // /ra equipfor <monster>: VTank's /vt equipitemsfor (MagToolsCommands.Extra.cs)
+            case "equipfor":     HandleEquipForCommand(parts); break;
             case "autotrade":    HandleAutoTradeRaCommand(parts); break;
             case "trade":        HandleTradeCommand(parts); break;
             case "busyinfo":     HandleBusyInfoCommand(); break;
@@ -4021,6 +4026,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     HandleJumpCommand(cmd, parts);
                     break;
                 }
+                // A verb RynthAi doesn't have may be the server plugin's ("/ra t11", "/ra guardian", "/ra bounty"
+                // are RynthILT's on Infinite Leaftide); without one it goes on to the server, as any unknown "/ra".
+                if (TryForwardToServerPlugin(parts)) break;
                 eat = 0;
                 break;
         }

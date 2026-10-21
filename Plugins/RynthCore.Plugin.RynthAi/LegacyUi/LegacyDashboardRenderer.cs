@@ -1100,6 +1100,20 @@ internal sealed partial class LegacyDashboardRenderer
 
     // ── Settings bridge (engine-side Avalonia SettingsPanel) ─────────────────
 
+    /// <summary>
+    /// The active server plugin's mirrored settings (RynthILT.Hub GetSetting / SetSetting, through the
+    /// Mini Remote's server client): the value, or -1 when none is offered. Set by RynthAiPlugin.
+    /// </summary>
+    public Func<string, int>? ServerSettingGet { get; set; }
+    public Action<string, int>? ServerSettingSet { get; set; }
+
+    /// <summary>A mirrored server setting as a nullable bool (null = not offered: the engine row hides).</summary>
+    private bool? ServerSettingBool(string key)
+    {
+        int v = ServerSettingGet?.Invoke(key) ?? -1;
+        return v < 0 ? null : v != 0;
+    }
+
     public string BuildSettingsJson()
     {
         try
@@ -1139,7 +1153,6 @@ internal sealed partial class LegacyDashboardRenderer
                 BlacklistCastSettleMs      = s.BlacklistCastSettleMs,
                 TargetNoProgressTimeoutSec = s.TargetNoProgressTimeoutSec,
                 GiveQueueIntervalMs        = s.GiveQueueIntervalMs,
-                T11ItemAugsOverride        = s.T11ItemAugsOverride,
                 // Recharge
                 HealAt                     = s.HealAt,
                 UsePotions                 = s.UsePotions,
@@ -1197,6 +1210,10 @@ internal sealed partial class LegacyDashboardRenderer
                 SpellCastIntervalMs        = s.SpellCastIntervalMs,
                 AttackSpellIntervalMs      = s.AttackSpellIntervalMs,
                 CastDispelSelf             = s.CastDispelSelf,
+                UseDispelItems             = s.UseDispelItems,
+                AutoFellowMgmt             = s.AutoFellowMgmt,
+                MChargesWhenOff            = s.MChargesWhenOff,
+                CustomPetRange             = s.CustomPetRange,
                 MinRingTargets             = s.MinRingTargets,
                 BlastRange                 = s.BlastRange,
                 MinBlastTargets            = s.MinBlastTargets,
@@ -1221,7 +1238,7 @@ internal sealed partial class LegacyDashboardRenderer
                 CorpseApproachRangeMin     = s.CorpseApproachRangeMin,
                 // Navigation
                 BoostNavPriority           = s.BoostNavPriority,
-                EnableVaultedDungeons      = s.EnableVaultedDungeons,
+                EnableVaultedDungeons      = ServerSettingBool(RynthCore.Plugin.Shared.RynthIltHub.SettingVaultedDungeons),   // RynthILT's (null: the row hides)
                 FollowNavMin               = s.FollowNavMin,
                 NavRingThickness           = s.NavRingThickness,
                 NavLineThickness           = s.NavLineThickness,
@@ -1393,7 +1410,6 @@ internal sealed partial class LegacyDashboardRenderer
             if (p.BlacklistCastSettleMs > 0) s.BlacklistCastSettleMs = p.BlacklistCastSettleMs;
             s.TargetNoProgressTimeoutSec = p.TargetNoProgressTimeoutSec;
             s.GiveQueueIntervalMs        = p.GiveQueueIntervalMs;
-            s.T11ItemAugsOverride        = p.T11ItemAugsOverride ?? -1;
             // Recharge
             s.HealAt                     = p.HealAt;
             s.UsePotions                 = p.UsePotions;
@@ -1453,6 +1469,11 @@ internal sealed partial class LegacyDashboardRenderer
             s.SpellCastIntervalMs        = p.SpellCastIntervalMs;
             if (p.AttackSpellIntervalMs is int attackDelay) s.AttackSpellIntervalMs = attackDelay;   // absent = unchanged
             s.CastDispelSelf             = p.CastDispelSelf;
+            // Absent (an engine without them) = unchanged.
+            if (p.UseDispelItems is bool useDispelItems) s.UseDispelItems = useDispelItems;
+            if (p.AutoFellowMgmt is bool autoFellow) s.AutoFellowMgmt = autoFellow;
+            if (p.MChargesWhenOff is bool mCharges) s.MChargesWhenOff = mCharges;
+            if (p.CustomPetRange is int petRange) s.CustomPetRange = Math.Clamp(petRange, 1, 50);
             s.MinRingTargets             = p.MinRingTargets;
             s.BlastRange                 = p.BlastRange;
             s.MinBlastTargets            = p.MinBlastTargets;
@@ -1477,7 +1498,8 @@ internal sealed partial class LegacyDashboardRenderer
             s.CorpseApproachRangeMin     = p.CorpseApproachRangeMin;
             // Navigation
             s.BoostNavPriority           = p.BoostNavPriority;
-            if (p.EnableVaultedDungeons is bool vaulted) s.EnableVaultedDungeons = vaulted;           // absent = unchanged
+            if (p.EnableVaultedDungeons is bool vaulted)                                               // absent = unchanged
+                ServerSettingSet?.Invoke(RynthCore.Plugin.Shared.RynthIltHub.SettingVaultedDungeons, vaulted ? 1 : 0);   // RynthILT's switch
             s.FollowNavMin               = p.FollowNavMin;
             s.NavRingThickness           = p.NavRingThickness;
             s.NavLineThickness           = p.NavLineThickness;
@@ -1966,7 +1988,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.TargetSelection          = Math.Clamp(tmp.TargetSelection, 0, 3);
         dst.TargetLock               = tmp.TargetLock;
         dst.RingRange                = tmp.RingRange;
-        dst.HandlerRingEvade         = tmp.HandlerRingEvade;   // a profile saved before this setting loads it as on
+        dst.HandlerRingEvade         = tmp.HandlerRingEvade;   // obsolete (RynthILT's now): carried so the profile keeps it for RynthILT's one-time import
         dst.ApproachRange            = tmp.ApproachRange;
         dst.MinRingTargets           = tmp.MinRingTargets;
         dst.BlastRange               = tmp.BlastRange;
@@ -1989,7 +2011,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.CorpseApproachRangeMax   = NormalizeCorpseRangeYards(tmp.CorpseApproachRangeMax, 10.0);
         dst.CorpseApproachRangeMin   = NormalizeCorpseRangeYards(tmp.CorpseApproachRangeMin, 2.0);
         dst.BoostNavPriority         = tmp.BoostNavPriority;
-        dst.EnableVaultedDungeons    = tmp.EnableVaultedDungeons;
+        dst.EnableVaultedDungeons    = tmp.EnableVaultedDungeons;   // obsolete (RynthILT's now): carried for its one-time import
         dst.BoostLootPriority        = tmp.BoostLootPriority;
         dst.OpenDoors                = tmp.OpenDoors;
         dst.OpenDoorRange            = tmp.OpenDoorRange;
@@ -2118,6 +2140,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.AutoTradeAutoAccept        = tmp.AutoTradeAutoAccept;
         dst.AutoTradeAutoAcceptChars   = tmp.AutoTradeAutoAcceptChars ?? new();
         dst.MetaDebug                = tmp.MetaDebug;
+        dst.AllowMetaKeystrokes      = tmp.AllowMetaKeystrokes;
         dst.StartMacroOnLogin        = tmp.StartMacroOnLogin;
         dst.PatrolOnLogin            = tmp.PatrolOnLogin;
         dst.YieldToVTank             = tmp.YieldToVTank;
@@ -2127,7 +2150,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.NavLabelMode             = NavLabelModes.Clamp(tmp.NavLabelMode);
         dst.NavGuideLine             = tmp.NavGuideLine;
         dst.GiveQueueIntervalMs      = tmp.GiveQueueIntervalMs;
-        dst.T11ItemAugsOverride      = tmp.T11ItemAugsOverride;
+        dst.T11ItemAugsOverride      = tmp.T11ItemAugsOverride;   // obsolete (RynthILT's now): carried for its one-time import
         dst.SpellCastIntervalMs      = tmp.SpellCastIntervalMs;
         dst.StuckCastBreakMs         = tmp.StuckCastBreakMs;
         dst.RecoveryRetryMs          = tmp.RecoveryRetryMs;

@@ -28,6 +28,7 @@ internal static class ManaStoneChoiceTests
         r.Add("mana charges: refill gear even when ManaStone rules name only other stones", ChargesIgnoreStoneRules);
         r.Add("mana stones: the server's 'low on Mana' refills gear whose read is stale-high", ServerLowRefills);
         r.Add("mana stones: worn gear is identified again, so a stale-high read follows the gear", GearReadRefreshed);
+        r.Add("mana stones: worn means worn per the tracker - a packed item with a stale wield record takes no appraisals, gear it says is worn gets refilled", WornPerTracker);
         r.Add("mana charges: overnight idle, the gear never runs dry (re-identify)", () => Overnight(identify: true));
         r.Add("mana charges: overnight idle, the gear never runs dry (server warnings only)", () => Overnight(identify: false));
         r.Add("mana tapping: one item at a time - the stone first, then one item, drained before the next", OneTapItemAtATime);
@@ -140,6 +141,34 @@ internal static class ManaStoneChoiceTests
         Check.Eq(rig.OnPlayer.Count, 2, "full: back to the reads (90%)");
     }
 
+    /// <summary>
+    /// The engine's equipment tracker decides what is worn. A robe moved to the pack keeps its old wield
+    /// record: it used to count as worn and take the pass's appraisal ("worn=41" for 20 worn, 2026-10-20).
+    /// A cloak whose own wield record reads 0 but the tracker says is worn is gear like any other.
+    /// </summary>
+    private static void WornPerTracker()
+    {
+        const uint Robe = 0x80400040, Cloak = 0x80400041;
+        using var rig = new Rig(tapping: false, new (uint, int?)[] { (ChargeA, 1000) }, stoneName: ManaCharge, maceMana: 4500,
+            before: ids =>
+            {
+                FakeHost.Names[Robe] = "Old Robe";
+                FakeHost.Containers[Robe] = Player;                 // in the pack...
+                FakeHost.Ints[(Robe, WieldedSlotKey)] = 0x200;      // ...with a stale wield record, mana unread
+                FakeHost.Names[Cloak] = "Cloak";
+                FakeHost.Wielders[Cloak] = Player;
+                FakeHost.Ints[(Cloak, MaxManaKey)] = 1000;
+                FakeHost.Ints[(Cloak, CurManaKey)] = 100;           // 10%: needs a refill
+                ids.Add(Robe); ids.Add(Cloak);
+                FakeHost.EquippedCalls = true;                      // the tracker: mace and cloak are worn
+                FakeHost.Equipped[Mace] = 0x100000;
+                FakeHost.Equipped[Cloak] = 0x8000000;
+            });
+        rig.Run(3000);
+        Check.Eq(FakeHost.IdRequests.Count(i => i == Robe), 0, "no appraisal spent on the packed robe");
+        Check.Eq(rig.OnPlayer.Count, 1, "the cloak the tracker says is worn (10%) gets the charge");
+    }
+
     private static void GearReadRefreshed()
     {
         using var rig = new Rig(tapping: false, new (uint, int?)[] { (ChargeA, 1000) }, stoneName: ManaCharge, maceMana: 4500);
@@ -229,7 +258,7 @@ internal static class ManaStoneChoiceTests
         /// <param name="identify">The engine can identify objects (RequestId).</param>
         public Rig(bool tapping, (uint Id, int? Mana)[] stones, bool ringToDrain = false,
                    string stoneName = "Moderate Mana Stone", int maceMana = 0, bool identify = true,
-                   bool ringArrived = true, bool contents = false)
+                   bool ringArrived = true, bool contents = false, Action<List<uint>>? before = null)
         {
             FakeHost.Reset();
             FakeHost.UseOnCalls = true;
@@ -260,6 +289,7 @@ internal static class ManaStoneChoiceTests
                 ids.Add(Ring);
             }
 
+            before?.Invoke(ids);   // a test's own objects and host options, before the host exists
             var host = FakeHost.Create(Player);
             C = FakeHost.MakeCache(host, Player, ids);
             S = new LegacyUiSettings { EnableManaTapping = tapping, ManaTapMinMana = 100 };

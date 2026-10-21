@@ -463,6 +463,17 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.SliderInt("Give Interval (ms)", ref _settings.GiveQueueIntervalMs, 0, 2000);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Minimum gap between two gives sent by /ra givea commands.\n0 = send the next give the moment the server answers the last (fastest).\nThe queue always waits for the server's answer first.");
+
+                ImGui.Separator();
+                ImGui.Spacing();
+                ImGui.Text("Meta Compatibility");
+                ImGui.Checkbox("Allow metas to send keystrokes (/mt send)", ref _settings.AllowMetaKeystrokes);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Mag-Tools metas press keys and click inside the game window with /mt send, /mt click,\n" +
+                                     "/mt movement, /mt strafe, /mt client minimize|restore and the key form of /mt jump.\n" +
+                                     "Off (the default): those verbs log once and do nothing. Turn it on only for a meta you trust:\n" +
+                                     "the keys go to the game window as if you pressed them. /mt send /command (a chat command)\n" +
+                                     "is not a key press and works either way.");
                 break;
 
             case "Recharge":
@@ -741,9 +752,6 @@ internal sealed class LegacyAdvancedSettingsUi
                     ImGui.SetTooltip("Drop a locked target only past this distance (hysteresis).\n0 or <= Monster Range = auto (Monster Range + 3).");
                 ImGui.SetNextItemWidth(120);
                 ImGui.InputInt("Ring Range", ref _settings.RingRange);
-                ImGui.Checkbox("Evade Handler Ring", ref _settings.HandlerRingEvade);
-                if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Empyrean Handler: when it channels its lethal ring and you are within 12 yards (or Ring Range if larger),\nback-jump away and re-engage. Acts only while the macro is running with combat on.");
                 ImGui.SetNextItemWidth(120);
                 ImGui.InputInt("Approach Range", ref _settings.ApproachRange);
 

@@ -11,7 +11,7 @@ public sealed partial class RynthAiPlugin
     /// <summary>
     /// /ra server: which server RynthCore says this is and why, every server it knows with this
     /// character's override, the plugin that owns the active server and what its settings say,
-    /// and whether the Mini Remote's ILT tabs (RynthILT.Hub) are connected. One check that every
+    /// and whether a server plugin's hub (the Mini Remote's server tabs) is connected. One check that every
     /// plugin is reading the same server identity. Plain ASCII (the AC chat can't draw more).
     /// </summary>
     private void HandleServerCommand()
@@ -45,8 +45,15 @@ public sealed partial class RynthAiPlugin
                 : $"[RynthAi] {st.ActivePlugin} sent no server settings ({RynthServerProfileApiV1.InterfaceName} not answered - an older plugin?).");
         }
 
-        bool iltTabs = _ilt != null && _ilt.Loaded;
-        ChatLine($"[RynthAi] Mini Remote ILT tabs (RynthILT.Hub): {(iltTabs ? "connected" + (_ilt!.IsIltWorld ? ", ILT world" : ", not an ILT world") : "not connected")}.");
+        var hub = _serverHub;
+        if (hub == null || !hub.Loaded)
+            ChatLine("[RynthAi] Mini Remote server tabs: no server plugin hub connected (none loaded for this world).");
+        else
+        {
+            string id = hub.Text(RynthIltHub.TextServerId);
+            ChatLine($"[RynthAi] Mini Remote server tabs: connected{(id.Length > 0 ? " (server '" + id + "')" : string.Empty)}, "
+                     + (hub.ServerActive ? "its server is this world." : "its server is not this world (nothing shown)."));
+        }
         ChatLine("[RynthAi] Change the server: RynthCore Options > Diagnostics > Server, or /rc server pick <id>|auto.");
     }
 }

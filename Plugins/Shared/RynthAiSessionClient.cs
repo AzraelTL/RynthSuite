@@ -28,6 +28,9 @@ public sealed unsafe class RynthAiSessionClient
     /// <summary>RynthAi answered with its hub table (last lookup).</summary>
     public bool Connected => _table != null && _table->Version >= 1;
 
+    /// <summary>RynthAi is loaded and answers on its hub interface now (looked up again every few seconds while it is missing).</summary>
+    public bool IsLoaded(RynthCoreHost host, long now) => Table(host, now) != null;
+
     /// <summary>Forget the table; the next call looks it up again (login, logout).</summary>
     public void Reset()
     {

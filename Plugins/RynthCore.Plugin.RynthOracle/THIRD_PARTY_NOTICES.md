@@ -18,7 +18,7 @@ What came from upstream:
 
 - The quest, augmentation, aug-gem quest, society quest, title and exploration marker lists
   in `Resources\` (`quests.csv`, `augmentations.csv`, `augquests.csv`, `society.csv`,
-  `titles.csv`, `markers.csv`, `customquests.csv`), copied unchanged, except that the
+  `titles.csv`, `markers.csv`), copied unchanged, except that the
   master quest list is split by its own Server column into `quests.csv` (every retail
   quest), `quests.conquest.csv` and `quests.levistras.csv` (each server's own rows, loaded
   only on that server); the lines themselves are untouched. `quests.csv` is Oracle of Dereth's curator-maintained master quest list;
@@ -27,9 +27,11 @@ What came from upstream:
   file carries no licence of its own, so it is treated as part of the MIT-licensed repository.
 - The logic of the ported features (quest flag parsing and status rules, luminance costs,
   society ranks and ribbon limits, the status summary, exploration markers, Void
-  damage-over-time timers, and the ConquestAC features: bank, advanced and enlightenment
-  augmentations, XP bonuses and levels past 275, the fellowship list, the /top boards),
-  rewritten for RynthCore. Ported files say so in their header.
+  damage-over-time timers), rewritten for RynthCore. Ported files say so in their header.
+- Upstream's ConquestAC features (bank and auto-deposit, advanced and enlightenment
+  augmentations, XP bonuses and levels past 275, the fellowship list, the /top boards,
+  `customquests.csv`) were part of RynthOracle until 2026-10-20 and are now in RynthConquest,
+  the Conquest server plugin (its own THIRD_PARTY_NOTICES.md).
 
 ---
 

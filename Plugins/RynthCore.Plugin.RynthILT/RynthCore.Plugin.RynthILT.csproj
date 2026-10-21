@@ -13,7 +13,15 @@
                        RynthILT borrows from RynthAi through RynthAi.Hub (Plugins/Shared/RynthIltHubApi.cs,
                        RynthAiHubApi.cs).
       IltSettingsView/ a copy of the ILT settings (RynthCore's verdict, this character's override, the
-                       ILT world names, the Hub's feature read) in its own window ("/ilt settings").
+                       ILT world names, the Hub's feature read) in its own window ("/ilt settings"),
+                       with this character's ILT options (Vaulted Dungeons master switch, Handler
+                       ring evade, T11 item augs).
+      Moved out of RynthAi 2026-10-20 (Hub/): the Pets tab's ACECustom parts (IltPetAutomation:
+                       pet charms, summon from empty, siphon capture), the Empyrean Handler ring
+                       detection (IltRingEvade; RynthAi does the back-away), the T11 /aug counters
+                       and "/ilt t11" (IltT11; RynthAi keeps the loot keys), the Vaulted Dungeons
+                       switch, the Remote tab's ILT parts, the Mini Remote tab views on the rail
+                       (IltSectionsManifest.cs) and the Leaftide trinket list (the profile).
       IltFellowship/   ILT's /fship commands as buttons ("/ilt fellow").
   -->
   <PropertyGroup>
@@ -43,7 +51,7 @@
     <RynthPluginServerName>Infinite Leaftide</RynthPluginServerName>
     <RynthPluginServerHosts>infiniteleaftide.online</RynthPluginServerHosts>
     <RynthPluginServerWorldNames>InfiniteLeaftide|*Leaftide*</RynthPluginServerWorldNames>
-    <RynthPluginDescription>Infinite Leaftide (ACECustom) features: the ILT Hub (the Mini Remote's ILT tabs: banking, gear, charms, games), the Guardian, bounties, progression, the attribute raiser, the ring inscription chain, the ILT settings and the /fship fellowship commands.</RynthPluginDescription>
+    <RynthPluginDescription>Infinite Leaftide (ACECustom) features: the ILT Hub (the Mini Remote's ILT tabs: banking, gear, charms, games, Vaulted Dungeons; the Pets tab's charms, siphon capture and breeding), the Guardian, bounties, progression, the attribute raiser, the ring inscription chain, the Empyrean Handler ring evade, the T11 loot counters, the ILT settings and the /fship fellowship commands.</RynthPluginDescription>
   </PropertyGroup>
 
   <ItemGroup>
@@ -56,12 +64,16 @@
     <!-- The two interfaces between RynthILT and RynthAi (linked into both plugins). -->
     <Compile Include="..\Shared\RynthIltHubApi.cs" Link="Shared\RynthIltHubApi.cs" />
     <Compile Include="..\Shared\RynthAiHubApi.cs" Link="Shared\RynthAiHubApi.cs" />
+    <!-- Chat types and the line-start marker (the Empyrean Handler's ring line, Hub/IltRingEvade.cs). -->
+    <Compile Include="..\Shared\ChatSource.cs" Link="Shared\ChatSource.cs" />
     <!-- "RynthAi.Activity": what the bot is doing (the Vaulted Dungeons keeper waits out combat and buffing). -->
     <Compile Include="..\Shared\RynthAiActivityApi.cs" Link="Shared\RynthAiActivityApi.cs" />
     <!-- The pet-capture success lines (shared with RynthAi's Pets tab): they count as a kill for Vaulted Dungeons' timer. -->
     <Compile Include="..\Shared\PetCaptureLines.cs" Link="Shared\PetCaptureLines.cs" />
     <!-- "RynthILT.Data": the charms list and bank balances for other plugins (DataInterface.cs). -->
     <Compile Include="..\Shared\RynthIltDataApi.cs" Link="Shared\RynthIltDataApi.cs" />
+    <!-- "RynthILT.Server": the feature / fellowship / quest bonus profile for other plugins (ServerInterface.cs). -->
+    <Compile Include="..\Shared\RynthIltServerApi.cs" Link="Shared\RynthIltServerApi.cs" />
     <!-- RynthCore's server list (API v86): the ILT verdict the Hub follows (IltSettingsView/). -->
     <Compile Include="..\Shared\EngineServerState.cs" Link="Shared\EngineServerState.cs" />
     <!-- "RynthServer.Profile": ILT's settings and tinkering salvage (Hub/IltSalvage.cs) for other
@@ -80,6 +92,12 @@
     <!-- Save failures (its own files and the copies migrated from RynthAi) said in chat with the
          reason and the fix, as RynthAi's are. -->
     <Compile Include="..\Shared\DataWriteGuard.cs" Link="Shared\DataWriteGuard.cs" />
+    <!-- T11 (ACECustom tier 11+ gear): the "/aug" reader, the counters and the item text parser (Hub/IltT11.cs,
+         "/ilt t11"). RynthAi keeps the loot keys and evaluator; RynthILT reports the counters to it. -->
+    <Compile Include="..\..\Shared\RynthCore.LootSdk\T11\T11Catalog.cs" Link="Shared\T11\T11Catalog.cs" />
+    <Compile Include="..\..\Shared\RynthCore.LootSdk\T11\T11ItemInfo.cs" Link="Shared\T11\T11ItemInfo.cs" />
+    <Compile Include="..\..\Shared\RynthCore.LootSdk\T11\T11Keys.cs" Link="Shared\T11\T11Keys.cs" />
+    <Compile Include="..\..\Shared\RynthCore.LootSdk\T11\T11PlayerAugs.cs" Link="Shared\T11\T11PlayerAugs.cs" />
     <!-- AcObjectClass (the item classes the gear tools check). -->
     <Compile Include="..\..\Shared\RynthCore.LootSdk\AcGameEnums.cs" Link="Shared\AcGameEnums.cs" />
     <!-- ILT's /fship commands (IltFellowship/): the shared command list format and its button panel. -->

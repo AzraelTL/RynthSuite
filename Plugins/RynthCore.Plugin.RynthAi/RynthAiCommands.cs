@@ -41,7 +41,6 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra attackable    — check if target is attackable");
         ChatLine("[RynthAi] /ra wielded       — show wielded items");
         ChatLine("[RynthAi] /ra dumpprops [0xId] — every property of the selection (else yourself)");
-        ChatLine("[RynthAi] /ra t11 [augs <n|auto>|refresh|item] — T11 loot: wield counters, aug override, parsed item");
         ChatLine("[RynthAi] /ra iteminfo [name] — the selected (or named) item's details, Mag-Tools style");
         ChatLine("[RynthAi] /ra mexec <expr>  — evaluate meta expression");
         ChatLine("[RynthAi] /ra listvars      — show session variables");
@@ -2498,6 +2497,12 @@ public sealed partial class RynthAiPlugin
     private enum GiveItemMatch { Exact, Partial, Regex }
 
     /// <summary>
+    /// The most stacks one give-all command (/ra givea*, /ub give) queues. A line that matches more
+    /// than this gives the first MaxGiveAllPerCommand and says so; run it again for the rest.
+    /// </summary>
+    internal const int MaxGiveAllPerCommand = 500;
+
+    /// <summary>
     /// Hands <paramref name="amount"/> of an item to a player or NPC with AC's give action
     /// (Event_GiveObjectRequest) when the engine has it; MoveItemExternal is move-to-container
     /// and silently does nothing for an NPC. amount 0 or the whole stack = the whole object.
@@ -2597,9 +2602,41 @@ public sealed partial class RynthAiPlugin
 
         if (allItems)
         {
+            // Every match goes, except what must never be handed over: equipped gear, the items
+            // RynthAi uses (Weapons and Consumables lists, monster-rule weapons), attuned and retained
+            // items, and, for a line a running meta sends, whatever the loot profile keeps. One log
+            // line per stack queued or skipped, and a cap on how many one command queues.
+            bool fromMeta = MetaCommandActive;
+            var toGive = new List<WorldObject>();
+            int protectedCount = 0;
             foreach (var item in matches)
+            {
+                string? why = ItemProtectionReason(item, includeLootKeep: fromMeta);
+                if (why != null)
+                {
+                    protectedCount++;
+                    Log($"[Give] skipped 0x{(uint)item.Id:X8} '{item.Name}': {why}");
+                    continue;
+                }
+                toGive.Add(item);
+            }
+            bool capped = toGive.Count > MaxGiveAllPerCommand;
+            if (capped)
+            {
+                Log($"[Give] '{itemPart}' matched {toGive.Count} stacks; the cap is {MaxGiveAllPerCommand}, so only the first {MaxGiveAllPerCommand} are queued.");
+                toGive.RemoveRange(MaxGiveAllPerCommand, toGive.Count - MaxGiveAllPerCommand);
+            }
+            foreach (var item in toGive)
+            {
                 EnqueueGive((uint)item.Id, (uint)target.Id, 0);   // 0 = the whole stack, whatever it reads at send time
-            ChatLine($"[RynthAi] Queued {matches.Count} stack(s) matching '{itemPart}' → {target.Name}");
+                Log($"[Give] queued 0x{(uint)item.Id:X8} '{item.Name}' x{Math.Max(1, item.Values(LongValueKey.StackCount, 1))} -> {target.Name}{(fromMeta ? " (from a running meta)" : "")}");
+            }
+            string skippedNote = protectedCount > 0 ? $", {protectedCount} protected stack(s) skipped" : "";
+            string capNote = capped ? $", capped at {MaxGiveAllPerCommand}: run it again for the rest" : "";
+            if (toGive.Count == 0)
+                ChatLine($"[RynthAi] Nothing to give: every item matching '{itemPart}' is protected ({protectedCount} skipped).");
+            else
+                ChatLine($"[RynthAi] Queued {toGive.Count} stack(s) matching '{itemPart}' → {target.Name}{skippedNote}{capNote}");
         }
         else if (countGiven)
         {

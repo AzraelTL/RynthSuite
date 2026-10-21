@@ -45,6 +45,8 @@ internal static unsafe class HubInterface
             t->SessionReset = &SessionReset;
             t->SessionStatsMore = &SessionStatsMore;
             t->VaultedDungeonsEnabled = &VaultedDungeonsEnabled;
+            t->BackAwayFrom = &BackAwayFrom;
+            t->SetPlayerCounter = &SetPlayerCounter;
             t->Version = RynthAiHubApiV1.InterfaceVersion;
             _table = t;
         }
@@ -251,11 +253,27 @@ internal static unsafe class HubInterface
         catch { return 0; }
     }
 
-    /// <summary>RynthAi's Vaulted Dungeons setting: RynthILT's keeper runs only while it is on (off by default).</summary>
+    /// <summary>Obsolete slot: the profile's old Vaulted Dungeons value (RynthILT's own setting since 2026-10-20; an older RynthILT reads this).</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int VaultedDungeonsEnabled()
     {
         try { return Plugin?.VaultedDungeonsEnabledForIlt == true ? 1 : 0; }
+        catch { return 0; }
+    }
+
+    /// <summary>A server plugin's back-away (RynthILT: the Empyrean Handler's ring); BackAway* results, 0 before login.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int BackAwayFrom(uint objectId, float radiusYards, int holdMs)
+    {
+        try { return Plugin?.BackAwayForServer(objectId, radiusYards, holdMs) ?? RynthAiHub.BackAwayNotNow; }
+        catch { return RynthAiHub.BackAwayNotNow; }
+    }
+
+    /// <summary>A wield counter from the server plugin (T11 "Can Wield"); 0 for an id that is no counter, or after shutdown.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int SetPlayerCounter(uint propertyId, long value)
+    {
+        try { return !_released && T11ItemSupport.SetCounter(propertyId, value) ? 1 : 0; }
         catch { return 0; }
     }
 

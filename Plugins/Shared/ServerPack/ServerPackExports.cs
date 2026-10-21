@@ -67,6 +67,10 @@ public static unsafe class ServerPackExports
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnChatBarEnter", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnChatBarEnter(IntPtr textUtf16, IntPtr eatFlag) => Runtime.OnChatBarEnter(textUtf16, eatFlag);
 
+    // Incoming chat, for the server's own code (ServerPackPlugin.ServerChatText). Pump thread.
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnChatWindowText", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void OnChatWindowText(IntPtr textUtf16, int chatType, IntPtr eatFlag) => Runtime.OnChatWindowText(textUtf16, chatType, eatFlag);
+
     /// <summary>The standalone server card ("/rserver"). Render thread.</summary>
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginRender", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void Render()
@@ -95,8 +99,8 @@ public static unsafe class ServerPackExports
 
     /// <summary>
     /// RynthCore's Mini Remote sections: "section:server-&lt;id&gt;" (":popout" added in a popped-out
-    /// window) draws the server card into the engine's current window. 1 = drawn, 0 = not ready or
-    /// not ours.
+    /// window) draws the server card into the engine's current window, "section:server-&lt;id&gt;.&lt;page&gt;"
+    /// one of the server's own pages (ServerPackPages). 1 = drawn, 0 = not ready or not ours.
     /// </summary>
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginRenderEmbed", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static int RenderEmbed(byte* surface, float width, float height, float* wantWidth, float* wantHeight)
@@ -106,9 +110,18 @@ public static unsafe class ServerPackExports
             if (surface == null) return 0;
             string name = Marshal.PtrToStringUTF8((IntPtr)surface) ?? string.Empty;
             if (name.EndsWith(":popout", StringComparison.Ordinal)) name = name[..^":popout".Length];
-            if (!name.Equals(ServerPackPlugin.SettingsSurface, StringComparison.Ordinal)) return 0;
             var plugin = Runtime.Plugin;
-            if (plugin == null || !plugin.RenderEmbeddedCard(out float wantH)) return 0;
+            if (plugin == null) return 0;
+            float wantH;
+            if (name.Equals(ServerPackPlugin.SettingsSurface, StringComparison.Ordinal))
+            {
+                if (!plugin.RenderEmbeddedCard(out wantH)) return 0;
+            }
+            else
+            {
+                string? page = ServerPackPages.PageIdOf(name, RynthPluginInfo.ServerId);
+                if (page == null || !plugin.RenderEmbeddedPage(page, out wantH)) return 0;
+            }
             if (wantWidth != null) *wantWidth = width;
             if (wantHeight != null) *wantHeight = wantH;
             return 1;

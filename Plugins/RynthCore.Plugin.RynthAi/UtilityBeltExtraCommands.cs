@@ -22,7 +22,9 @@ namespace RynthCore.Plugin.RynthAi;
 public sealed partial class RynthAiPlugin
 {
     // ── /ub delay queue ─────────────────────────────────────────────────────
-    private readonly List<(long DueMs, string Command)> _delayedCommands = new();
+    // FromMeta: the line was queued by a running meta, so it runs as one when due (it may be
+    // /mt vendor sell or /mt trade accept, which only act for a meta).
+    private readonly List<(long DueMs, string Command, bool FromMeta)> _delayedCommands = new();
 
     /// <summary>Runs /ub delay commands that are due. Called every tick.</summary>
     private void TickDelayedCommands()
@@ -35,8 +37,13 @@ public sealed partial class RynthAiPlugin
         {
             if (_delayedCommands[i].DueMs > now) continue;
             string cmd = _delayedCommands[i].Command;
+            bool fromMeta = _delayedCommands[i].FromMeta;
             _delayedCommands.RemoveAt(i--);
-            try { HandleRynthChatSubmit(cmd); }
+            try
+            {
+                if (fromMeta) RunAsMeta(() => { HandleRynthChatSubmit(cmd); return true; });
+                else HandleRynthChatSubmit(cmd);
+            }
             catch (Exception ex) { Log($"[RynthAi] /ub delay: '{cmd}' threw {ex.Message}"); }
         }
     }
@@ -109,7 +116,7 @@ public sealed partial class RynthAiPlugin
         }
         string command = args.Substring(sp + 1).Trim();
         if (command.Length == 0) return;
-        _delayedCommands.Add((Environment.TickCount64 + ms, command));
+        _delayedCommands.Add((Environment.TickCount64 + ms, command, MetaCommandActive));
     }
 
     // /ub count {item <name> | profile <lootProfile> | player <range>} [debug] [think]

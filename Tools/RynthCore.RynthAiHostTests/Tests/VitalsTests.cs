@@ -23,6 +23,8 @@ internal static class VitalsTests
         r.Add("vitals: Stamina to Health follows its own health line and stamina floor", StaminaToHealthThresholds);
         r.Add("vitals: profiles without the Stamina to Health keys load today's 30 / 20", StaminaToHealthDefaults);
         r.Add("vitals: Re-stam To keeps a started recharge going to its line; off = one recharge as before", RestamTo);
+        r.Add("vitals: a recharge started in a fight finishes to Re-stam To after the fight", RestamRunOutlivesFight);
+        r.Add("vitals: a Re-stam To run counts casts sent, not the ticks spent waiting for one", RestamRunCountsSentCasts);
         r.Add("vitals: out of Magic stance a listed stamina potion goes before Revitalize; a caster casts first", StaminaPotionFirst);
         r.Add("vitals: a listed potion whose stack ran out is drunk from the next stack of that name", ListedPotionNextStack);
         r.Add("vitals: after a kit, nothing else heals until the kit's result line lands", KitResultWait);
@@ -319,6 +321,60 @@ internal static class VitalsTests
         Check.True(FakeHost.Uses.Contains(NextStack), "the next stack of Stamina Tinctures is drunk");
         Check.False(FakeHost.Uses.Contains(Listed), "not the stack that ran out");
         Check.Eq(FakeHost.Casts.Count, 0, "no Revitalize while a tincture is carried");
+    }
+
+    // A recharge started in a fight finishes to Re-stam To when the fight ends, instead of dropping to
+    // a lower Top Stam (Drakkon: Re-stam At 35, To 90, Top Stam 60).
+    private static void RestamRunOutlivesFight()
+    {
+        var s = new LegacyUiSettings { RestamAt = 35, RestamTo = 90, TopOffStam = 60 };
+        bool run = false; int casts = 0;
+        Check.Eq(BuffManager.StaminaLine(true, 30, s, ref run, ref casts), 90, "fight, 30%: recharge to 90");
+        casts++;
+        Check.Eq(BuffManager.StaminaLine(false, 58, s, ref run, ref casts), 90, "fight over at 58%: the recharge still goes to 90");
+        casts++;
+        Check.Eq(BuffManager.StaminaLine(false, 91, s, ref run, ref casts), 60, "reached 90: done, the top-off line again");
+        Check.False(run, "the recharge ended");
+        Check.Eq(BuffManager.StaminaLine(false, 55, s, ref run, ref casts), 60, "no recharge running: idle uses Top Stam");
+    }
+
+    // Drakkon, 2026-10-20: every Re-stam To run stopped after one Robustification. The stamina chain also
+    // answers "handled" while it waits for the last cast to finish, and each such tick counted as a cast:
+    // the 4-cast cap was reached during the first cast's 2.3 s. Only casts actually sent count now.
+    private static void RestamRunCountsSentCasts()
+    {
+        FakeHost.Reset();
+        FakeHost.WeaponCalls = true;
+        FakeHost.ServerGates = true;
+        FakeHost.LastUseDoneCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Magic;
+        foreach (var row in SpellTable.Rows) FakeHost.Spellbook.Add((uint)row.Id);
+        FakeHost.Skills[(Player, STypeLife)] = (400, 2);
+        var host = FakeHost.Create();
+        var s = new LegacyUiSettings { IsMacroRunning = true, HealAt = 0, TopOffHP = 0, EmergencyHealAt = 0, StaminaToHealthAt = 0,
+                                       GetManaAt = 0, TopOffMana = 0, RestamAt = 35, RestamTo = 90, TopOffStam = 60, UsePotions = false, EnableBuffing = false,
+                                       SpellCastIntervalMs = 0 };
+        var skills = new CharacterSkills(host);
+        skills.SetPlayerId(Player);
+        var sm = new SpellManager(host, s);
+        sm.InitializeNatively();
+        sm.SetCharacterSkills(skills);
+        var vitals = new PlayerVitalsCache { MaxHealth = 100, CurrentHealth = 100, MaxStamina = 100, CurrentStamina = 30, MaxMana = 100, CurrentMana = 100 };
+        var b = new BuffManager(host, s, sm, vitals) { InCombatOverride = () => true };
+        b.SetCharacterSkills(skills);
+
+        Check.True(b.CheckVitals(), "30% in a fight: the recharge starts");
+        Check.Eq(FakeHost.Casts.Count, 1, "one Revitalize sent");
+        for (int i = 0; i < 12; i++) b.CheckVitals();   // its 2.3 s: the server hasn't answered yet
+        Check.Eq(FakeHost.Casts.Count, 1, "nothing re-cast while the first is out");
+
+        string castName = SpellTableStub.GetById(FakeHost.Casts[0].SpellId)?.Name ?? "Revitalize Self";
+        b.OnChatWindowText($"You cast {castName} and restore 25 points of your stamina.", 7);   // the cast lands: +25
+        FakeHost.UseDone(0);
+        vitals.CurrentStamina = 55;
+        System.Threading.Thread.Sleep(600);              // real-time gaps between vital actions
+        Check.True(b.CheckVitals(), "55%: under Re-stam To, the run goes on");
+        Check.Eq(FakeHost.Casts.Count, 2, "a second Revitalize (the waits didn't use up the run)");
     }
 
     // Tom, 2026-10-06: one Revitalize often doesn't recover enough stamina.

@@ -7,8 +7,9 @@
 //   * ILT only. The module does nothing (no tick work, no recall, no quit, no tab) unless
 //     IltServerOptions.IsIltLikeWorld says this is an Infinite Leaftide / ACECustom world, the same
 //     verdict every other ILT feature follows. A command answers "not available on this server".
-//   * Master switch, off by default: RynthAi's "Vaulted Dungeons" setting (Settings > Navigation),
-//     read through RynthAi.Hub VaultedDungeonsEnabled. It is the only copy. While it is off the module
+//   * Master switch, off by default: IltHubState.VaultedDungeonsEnabled (the ILT settings, and the
+//     engine's Settings > Navigation row RynthAi mirrors; RynthAi's profile setting until 2026-10-20,
+//     copied once). It is the only copy. While it is off the module
 //     ignores AutoStart, never ticks, sends no recall and no /rc quit, and the tab is hidden. Turning
 //     it off while running stops the keeper at once and says so once.
 //   * Active is never resumed from the saved settings. It starts when the player turns it on, or on
@@ -122,7 +123,7 @@ internal sealed class IltVaultedDungeons : IIltFeature
     public IltVaultedDungeons(IltHubContext ctx)
     {
         _ctx = ctx;
-        MasterEnabled = () => _ctx.Ai.VaultedDungeonsEnabled;
+        MasterEnabled = () => _ctx.State.VaultedDungeonsEnabled;
         Activity = () => _ctx.Ai.Activity();
         UseGem = gemName =>
         {
@@ -152,7 +153,7 @@ internal sealed class IltVaultedDungeons : IIltFeature
     private static string? GateReply(string gate) => gate switch
     {
         GateWorld => "Not available on this server (Infinite Leaftide / ACECustom only).",
-        GateMaster => "Off: turn on \"Vaulted Dungeons\" in Settings > Navigation first (the master switch, off by default).",
+        GateMaster => "Off: turn on \"Vaulted Dungeons\" in the ILT settings (/ilt settings; also Settings > Navigation) first (the master switch, off by default).",
         _ => null,
     };
 
@@ -431,7 +432,7 @@ internal sealed class IltVaultedDungeons : IIltFeature
         _state = "paused";
         _ctx.Chat("[Vaulted Dungeons] Stopped: " + (gate == GateWorld
             ? "this is not an Infinite Leaftide / ACECustom world."
-            : "\"Vaulted Dungeons\" was turned off in Settings > Navigation."));
+            : "\"Vaulted Dungeons\" (the master switch) was turned off."));
         SaveIfDirty();
     }
 
@@ -552,7 +553,7 @@ internal sealed class IltVaultedDungeons : IIltFeature
                     ? GemNames[_cfg.Gem - 1] : "(none)";
                 _ctx.Chat($"[Vaulted Dungeons] {(_cfg.Active ? "On" : "Off")} — dungeon={d}, gem={g}, "
                           + $"kill-client={(_cfg.Quit ? $"{_cfg.QuitMinutes}m" : "off")}, state={_state}.");
-                _ctx.Chat("[Vaulted Dungeons] /ilt vaulted [on|off|toggle|status]  (Mini Remote tab; master switch: Settings > Navigation > Vaulted Dungeons)");
+                _ctx.Chat("[Vaulted Dungeons] /ilt vaulted [on|off|toggle|status]  (Mini Remote tab; master switch: /ilt settings or Settings > Navigation > Vaulted Dungeons)");
                 return true;
         }
     }

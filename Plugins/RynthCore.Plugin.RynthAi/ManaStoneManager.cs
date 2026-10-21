@@ -996,7 +996,10 @@ internal sealed class ManaStoneManager
             if (_tapTargetCooldownUntil.TryGetValue(item.Id, out long until) && now < until)
                 continue;
 
-            // Skip equipped items
+            // Skip equipped items: worn per the tracker (a wield record can read 0 for worn gear), or
+            // per the item's own slot.
+            if (EquippedState.IsWielded(_host, item.Id) == true)
+                continue;
             if (_host.TryGetObjectIntProperty(unchecked((uint)item.Id), (uint)AcIntProperty.WieldedSlot, out int wield)
                 && wield != 0)
                 continue;
@@ -1060,12 +1063,22 @@ internal sealed class ManaStoneManager
             if (IsManaStone(item)) continue;
             if (!IsOwnedByPlayer(item, playerId)) continue;
 
-            // The live slot read can fail off AC's thread; the cache's copy (what /ra wielded
-            // uses) is the fallback.
-            if (!_host.TryGetObjectIntProperty(unchecked((uint)item.Id), (uint)AcIntProperty.WieldedSlot, out int wield) || wield == 0)
-                wield = item.Values(LongValueKey.CurrentWieldedLocation, 0);
-            if (wield == 0)
-                continue;
+            // What is worn: the engine's tracker of the server's wield/move messages (API v87) when it
+            // has one. An item's own wield record goes stale once it is moved to a pack: those counted
+            // as worn ("worn=41" for a character wearing 20, 2026-10-20) and took the one appraisal a
+            // pass, while gear really worn whose mana couldn't be read waited, skipped as unreadable.
+            // Without a tracker: the live slot read, then the cache's copy (what /ra wielded uses).
+            if (EquippedState.IsWielded(_host, item.Id) is bool tracked)
+            {
+                if (!tracked) continue;
+            }
+            else
+            {
+                if (!_host.TryGetObjectIntProperty(unchecked((uint)item.Id), (uint)AcIntProperty.WieldedSlot, out int wield) || wield == 0)
+                    wield = item.Values(LongValueKey.CurrentWieldedLocation, 0);
+                if (wield == 0)
+                    continue;
+            }
             worn++;
 
             // Only items that actually consume mana matter. Off AC's thread an item's mana is

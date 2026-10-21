@@ -726,7 +726,7 @@ public sealed partial class RynthNavPlugin
         _recallWandTried = false; _recallChangedStance = false; _recallSent = false; _recallWasPortaling = false;
         _recallPreLb = CurrentLandblock; _recallPreWx = _wx; _recallPreWy = _wy;
         BeginWand();
-        Host.SetAutoRun(false); Host.StopCompletely();
+        AutoRun.Stop();
         RecallOption? o = CurrentRecallOption();
         lock (_gate) _status = o == null ? "recall step: unknown recall" : $"recalling: {o.Name}";
         Host.Log($"[RynthNav] recall step: {o?.Name ?? "?"}");
@@ -758,7 +758,7 @@ public sealed partial class RynthNavPlugin
             Host.Log($"[RynthNav] recall {o.Name}: teleported (moved {moved:F0}u)");
             _lastLandMs = NowMs;
             EndRecall();
-            Host.SetAutoRun(false); Host.StopCompletely();
+            AutoRun.Stop();
             RefreshTiles(CurrentLandblock);
             BeginSettle();
             return;

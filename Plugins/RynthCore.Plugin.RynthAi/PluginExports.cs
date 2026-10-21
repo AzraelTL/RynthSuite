@@ -754,34 +754,6 @@ public static unsafe class PluginExports
         }
     }
 
-    private static IntPtr _progressionPtr = IntPtr.Zero;
-
-    /// <summary>
-    /// The Skills panel's Progression tab for an engine that still asks RynthAi: the planners went
-    /// to RynthILT (2026-10-13), so this passes on RynthILT's RynthILTGetProgressionJson
-    /// ({"available":false} without RynthILT). Same contract as before: one static buffer, valid
-    /// until the next call; the engine polls it from its pump thread only. (The Charms Tracking
-    /// export, RynthPluginGetCharmsJson, for engines up to 2026.10.5.35 is gone with the charms.)
-    /// </summary>
-    [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetProgressionJson", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetProgressionJson()
-    {
-        try
-        {
-            var host = Runtime.Plugin?.HostForIlt;
-            string? json = host is { HasGetPluginExportJson: true } h ? h.GetPluginExportJson("RynthILT", "RynthILTGetProgressionJson") : null;
-            IntPtr newPtr = Marshal.StringToHGlobalAnsi(string.IsNullOrEmpty(json) ? "{\"available\":false}" : json);
-            IntPtr oldPtr = Interlocked.Exchange(ref _progressionPtr, newPtr);
-            if (oldPtr != IntPtr.Zero)
-                Marshal.FreeHGlobal(oldPtr);
-            return newPtr;
-        }
-        catch
-        {
-            return IntPtr.Zero;
-        }
-    }
-
     // ── Items bridge (engine-side Avalonia ItemsPanel) ──────────────────────
 
     private static IntPtr _itemsPtr = IntPtr.Zero;

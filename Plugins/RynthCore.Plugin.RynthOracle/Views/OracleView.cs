@@ -12,8 +12,11 @@ internal sealed partial class OracleView
     public const string TabQuests = "Quests", TabCharacter = "Character",
         TabSkills = "Skills", TabAttributes = "Attributes", TabProgress = "Progress",
         TabAugs = "Augs", TabSociety = "Society",
-        TabMarkers = "Markers", TabTitles = "Titles", TabVoid = "Void", TabFellowship = "Fellowship",
-        TabBoards = "Leaderboards", TabConquest = "Conquest", TabAbout = "About";
+        TabTitles = "Titles", TabVoid = "Void", TabFellowship = "Fellowship",
+        TabBreeding = "Pet Breeding", TabAbout = "About";
+    // The Markers tab (and the Legendary and Dynamic Stamps trackers and RynthILT's Temple guardians)
+    // are rows of the Quests tab: QuestsTab.cs, ShowTrackers, /ro markers. A saved tab name of the old
+    // Markers tab falls back to Quests (see Tab).
 
     /// <summary>
     /// A tab: shown where any of its server tags matches the server; no tags = everywhere (retail).
@@ -51,17 +54,17 @@ internal sealed partial class OracleView
                 () => "Re-reads your character from the game and sends /myquests for the gem timers."),
             new(TabSociety, any, DrawSociety, true, RefreshCharacterAndQuests,
                 () => "Re-reads your society standing from the game and sends /myquests for today's ribbons and quest timers."),
-            new(TabMarkers, any, DrawMarkers, false, () => RefreshQuests(),
-                () => "Sends /myquests: the markers you found are in your quest flags."),
             new(TabTitles, any, DrawTitles, false, RefreshTitles,
                 () => "Re-reads the titles you hold from the game."),
             new(TabVoid, any, DrawVoid, true, RefreshVoid,
                 () => "Re-reads your buffs from the game and drops the spell timers that ran out."),
             new(TabFellowship, any, DrawFellowship, false, RefreshFellowship,
                 () => "Re-reads the fellowship and its members from the game."),
-            // Server-specific: each parser and its commands only exist on its own server.
-            new(TabBoards, new[] { Data.ServerTags.Conquest, Data.ServerTags.Aelrynth }, DrawBoards, false, RefreshBoards, BoardsHelp),
-            new(TabConquest, new[] { Data.ServerTags.Conquest }, DrawConquest, true, RefreshConquest, ConquestHelp),
+            // A server's own pages are its server plugin's since 2026-10-20: Conquest's (bank, augs,
+            // boards, ...) RynthConquest's, Aelrynth's leaderboards and Trials RynthAelrynth's.
+            // Infinite Leaftide only, and only while the server has pet breeding (BreedingOffered).
+            new(TabBreeding, new[] { Data.ServerTags.InfiniteLeaftide }, DrawBreeding, false, RefreshBreeding,
+                () => "Asks RynthILT to appraise every essence again (charges, rest timers, bond, growth)."),
             new(TabAbout, any, DrawAbout, false, RefreshAbout,
                 () => "Loads the quest list and server pack from their files again and asks RynthCore which server this is."),
         };
@@ -69,9 +72,22 @@ internal sealed partial class OracleView
 
     private bool Visible(TabDef t)
     {
+        if (t.Name == TabBreeding && !BreedingOffered()) return false;
         if (t.Servers.Length == 0) return true;
         foreach (string s in t.Servers) if (_c.Server.Is(s)) return true;
         return false;
+    }
+
+    /// <summary>
+    /// The Pet Breeding tab is offered on an Infinite Leaftide world unless RynthILT's profile says
+    /// the server has pet breeding switched off (a feature it doesn't know yet counts as on).
+    /// </summary>
+    internal bool BreedingOffered()
+    {
+        if (!_c.Server.Is(Data.ServerTags.InfiniteLeaftide)) return false;
+        foreach (Data.IltFeature f in _c.Ilt.Profile.Features)
+            if (f.Key == "pet_breeding") return f.State != RynthCore.Plugin.Shared.RynthIltServer.StateOff;
+        return true;
     }
 
     /// <summary>The selected tab's name; a tab not available on this server falls back to Quests.</summary>

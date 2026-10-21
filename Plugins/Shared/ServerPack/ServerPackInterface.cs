@@ -6,6 +6,7 @@
 // unloaded); after Release() it reports Version 0 and GetProfileJson answers 0. Before the plugin is
 // up, or between characters, the profile still describes the server (active false, no world).
 using System;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -20,7 +21,7 @@ internal static unsafe class ServerPackInterface
     private static volatile bool _released;
 
     /// <summary>The last JSON handed out, and what it was built for (rebuilt only when that changes).</summary>
-    private sealed record Snapshot(bool Active, string World, string Json);
+    private sealed record Snapshot(bool Active, string World, int ValuesRevision, string Json);
     private static Snapshot? _last;
 
     /// <summary>The table for (<paramref name="iface"/>, <paramref name="version"/>), or 0 when it isn't ours.</summary>
@@ -52,10 +53,14 @@ internal static unsafe class ServerPackInterface
         ServerPackInfo info = plugin?.Info ?? ServerPackPlugin.StaticInfo;
         bool active = plugin?.Active ?? false;
         string world = plugin?.World ?? string.Empty;
+        int valuesRevision = plugin?.ProfileValues.Revision ?? -1;
         Snapshot? last = Volatile.Read(ref _last);
-        if (last != null && last.Active == active && last.World == world) return last.Json;
-        string json = ServerPackProfile.BuildJson(info, RynthPluginInfo.Name, RynthPluginInfo.Version, active, world);
-        Volatile.Write(ref _last, new Snapshot(active, world, json));
+        if (last != null && last.Active == active && last.World == world && last.ValuesRevision == valuesRevision) return last.Json;
+        KeyValuePair<string, double>[] values = plugin != null
+            ? plugin.ProfileValues.Snapshot(out valuesRevision)
+            : Array.Empty<KeyValuePair<string, double>>();
+        string json = ServerPackProfile.BuildJson(info, RynthPluginInfo.Name, RynthPluginInfo.Version, active, world, values);
+        Volatile.Write(ref _last, new Snapshot(active, world, valuesRevision, json));
         return json;
     }
 

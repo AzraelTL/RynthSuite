@@ -1,8 +1,9 @@
 // ACECustom MonsterCapture health / range / lens table — matches Source/ACE.Server/Entity/MonsterCapture.cs.
-using RynthCore.Plugin.RynthAi.MiniRemote;
+// Moved from RynthCore.RynthAiTests with the rules (RynthILT's IltPetCaptureRules since 2026-10-20).
+using RynthCore.Plugin.RynthILT.Hub;
 using RynthCore.RynthAiTests.Harness;
 
-namespace RynthCore.RynthAiTests.Tests;
+namespace RynthILT.Tests;
 
 internal static class PetCaptureRulesTests
 {

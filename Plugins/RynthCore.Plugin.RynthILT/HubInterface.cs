@@ -27,7 +27,9 @@ internal static unsafe class HubInterface
     /// <summary>The table for (<paramref name="iface"/>, <paramref name="version"/>), or 0 when it isn't ours.</summary>
     public static IntPtr Query(string iface, uint version)
     {
-        if (iface != RynthIltHubApiV1.InterfaceName || version < 1 || version > RynthIltHubApiV1.InterfaceVersion || _released)
+        // Its own name, and the neutral one RynthAi asks the active server's owner for (the same table).
+        if ((iface != RynthIltHubApiV1.InterfaceName && iface != RynthIltHubApiV1.NeutralInterfaceName)
+            || version < 1 || version > RynthIltHubApiV1.InterfaceVersion || _released)
             return IntPtr.Zero;
         if (_table == null)
         {
@@ -42,6 +44,11 @@ internal static unsafe class HubInterface
             t->RenderTab = &RenderTab;
             t->RenderSection = &RenderSection;
             t->Command = &Command;
+            t->AllowSummonOnEmpty = &AllowSummonOnEmpty;
+            t->GetSubTabs = &GetSubTabs;
+            t->GetSetting = &GetSetting;
+            t->SetSetting = &SetSetting;
+            t->GetText = &GetText;
             t->Version = RynthIltHubApiV1.InterfaceVersion;
             _table = t;
         }
@@ -182,6 +189,82 @@ internal static unsafe class HubInterface
             string? line = Utf8(text);
             if (plugin == null || string.IsNullOrWhiteSpace(line) || line.Length > 512) return 0;
             return plugin.RunForwardedCommand(line) ? 1 : 0;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>The Pets tab's summon-from-empty gate (IltPetAutomation's last tick; 0 off ILT).</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int AllowSummonOnEmpty()
+    {
+        try { return Hub?.PetAutomation.AllowSummonOnEmpty == true ? 1 : 0; }
+        catch { return 0; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetSubTabs(byte* parent, IltTabV1* tabs, int capacity)
+    {
+        try
+        {
+            var hub = Hub;
+            string? p = Utf8(parent);
+            if (hub == null || p == null) return 0;
+            var all = hub.SubTabs(p);
+            if (tabs != null)
+            {
+                for (int i = 0; i < all.Length && i < capacity; i++)
+                {
+                    IltTabV1* t = &tabs[i];
+                    WriteUtf8(all[i].Id, t->Id, 24);
+                    WriteUtf8(all[i].Label, t->Label, 32);
+                    t->Width = 0;
+                    t->Height = 0;
+                    t->Flags = RynthIltHub.TabShown | RynthIltHub.TabAvailable;
+                }
+            }
+            return all.Length;
+        }
+        catch { return 0; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetSetting(byte* key)
+    {
+        try
+        {
+            var hub = Hub;
+            string? k = Utf8(key);
+            return hub == null || k == null ? -1 : hub.GetSetting(k);
+        }
+        catch { return -1; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int SetSetting(byte* key, int value)
+    {
+        try
+        {
+            var hub = Hub;
+            string? k = Utf8(key);
+            return hub != null && k != null && hub.SetSetting(k, value) ? 1 : 0;
+        }
+        catch { return 0; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetText(byte* id, byte* buffer, int capacity)
+    {
+        try
+        {
+            var hub = Hub;
+            string? k = Utf8(id);
+            if (hub == null || k == null || buffer == null || capacity <= 0) return 0;
+            string text = hub.GetText(k);
+            if (text.Length == 0) { buffer[0] = 0; return 0; }
+            WriteUtf8(text, buffer, capacity);
+            int n = 0;
+            while (n < capacity && buffer[n] != 0) n++;
+            return n;
         }
         catch { return 0; }
     }

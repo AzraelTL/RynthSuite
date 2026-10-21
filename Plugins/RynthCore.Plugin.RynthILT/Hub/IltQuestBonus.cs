@@ -125,6 +125,12 @@ internal sealed class IltQuestBonus : IIltFeature
     /// <summary>Increments each time a "/qb list" reply is parsed (0 = not loaded this session).</summary>
     public int QbGeneration => _qbGeneration;
 
+    /// <summary>
+    /// Snapshot for the "RynthILT.Server" profile JSON (Oracle Quests / Fellowship). Pump thread.
+    /// </summary>
+    public IltQuestBonusInfo Snapshot() =>
+        new(_ctx.Options.IsOff(IltFeature.Qb), _qbGeneration, _qbCount, _qbStatus, _qbCompleted, _qbIncomplete);
+
     /// <summary>True when the last "/qb list" (completed or incomplete) contains the flag.</summary>
     public bool QbHasFlag(string flag)
     {

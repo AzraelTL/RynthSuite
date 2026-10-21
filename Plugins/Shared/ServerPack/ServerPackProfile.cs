@@ -9,9 +9,89 @@
 // The JSON is plain ASCII (anything else is \u-escaped), so a reader can show it in the AC client.
 // Pure (no host calls): RynthServerPack.Tests covers it.
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Text;
 
 namespace RynthCore.Plugin.ServerPack;
+
+/// <summary>
+/// Live numbers a server plugin publishes in its profile ("values"), for other plugins that apply a
+/// server rule without knowing the server: e.g. RynthConquest's "voidDotDurationScale" (how much
+/// longer this character's Void damage-over-time lasts there), which RynthOracle's Void timers use.
+/// Set from the server's own code (ServerPackPlugin.SetProfileValue), read by the profile interface
+/// on any thread; <see cref="Revision"/> goes up on every change, so the JSON is rebuilt only then.
+/// </summary>
+internal sealed class ServerProfileValues
+{
+    private readonly object _gate = new();
+    private readonly List<KeyValuePair<string, double>> _values = new();
+    private volatile int _revision;
+
+    /// <summary>Goes up whenever a value changes.</summary>
+    public int Revision => _revision;
+
+    /// <summary>1-48 of letters, digits, '.', '_' and '-'.</summary>
+    public static bool IsValidKey(string? key)
+    {
+        if (string.IsNullOrEmpty(key) || key.Length > 48) return false;
+        foreach (char c in key)
+            if (!(char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-')) return false;
+        return true;
+    }
+
+    /// <summary>Sets (or adds) a value; false for a bad key or a number that isn't finite. Any thread.</summary>
+    public bool Set(string key, double value)
+    {
+        if (!IsValidKey(key) || !double.IsFinite(value)) return false;
+        lock (_gate)
+        {
+            int i = _values.FindIndex(v => v.Key == key);
+            if (i >= 0)
+            {
+                if (_values[i].Value.Equals(value)) return true;
+                _values[i] = new KeyValuePair<string, double>(key, value);
+            }
+            else _values.Add(new KeyValuePair<string, double>(key, value));
+            _revision++;
+        }
+        return true;
+    }
+
+    /// <summary>Drops one value (true when it was there). Any thread.</summary>
+    public bool Remove(string key)
+    {
+        lock (_gate)
+        {
+            int i = _values.FindIndex(v => v.Key == key);
+            if (i < 0) return false;
+            _values.RemoveAt(i);
+            _revision++;
+            return true;
+        }
+    }
+
+    /// <summary>Drops every value (logout: the next character publishes its own). Any thread.</summary>
+    public void Clear()
+    {
+        lock (_gate)
+        {
+            if (_values.Count == 0) return;
+            _values.Clear();
+            _revision++;
+        }
+    }
+
+    /// <summary>A copy of the values and the revision it belongs to. Any thread.</summary>
+    public KeyValuePair<string, double>[] Snapshot(out int revision)
+    {
+        lock (_gate)
+        {
+            revision = _revision;
+            return _values.ToArray();
+        }
+    }
+}
 
 internal static class ServerPackProfile
 {
@@ -29,9 +109,11 @@ internal static class ServerPackProfile
 
     /// <summary>
     /// The profile for <paramref name="info"/>: <paramref name="active"/> is this plugin's verdict
-    /// (RynthCore's when it pushed one), <paramref name="world"/> the world name the client reports.
+    /// (RynthCore's when it pushed one), <paramref name="world"/> the world name the client reports,
+    /// <paramref name="values"/> the live numbers the server's own code published (ServerProfileValues).
     /// </summary>
-    public static string BuildJson(ServerPackInfo info, string pluginName, string pluginVersion, bool active, string? world)
+    public static string BuildJson(ServerPackInfo info, string pluginName, string pluginVersion, bool active, string? world,
+                                   IReadOnlyList<KeyValuePair<string, double>>? values = null)
     {
         var sb = new StringBuilder(1024);
         sb.Append("{\"schema\":").Append(Schema);
@@ -93,10 +175,35 @@ internal static class ServerPackProfile
             sb.Append('}');
         }
         sb.Append(']');
+        // Added within schema 1 (2026-10-20), only when the server has trinkets.
+        if (info.TrinketNames.Length > 0)
+        {
+            sb.Append(",\"trinkets\":{");
+            sb.Append("\"names\":[");
+            for (int i = 0; i < info.TrinketNames.Length; i++) { if (i > 0) sb.Append(','); Str(sb, info.TrinketNames[i]); }
+            sb.Append("],\"except\":[");
+            for (int i = 0; i < info.TrinketExcept.Length; i++) { if (i > 0) sb.Append(','); Str(sb, info.TrinketExcept[i]); }
+            sb.Append("]}");
+        }
         Field(sb, "discord", info.Discord);
         Field(sb, "website", info.Website);
         Field(sb, "wiki", info.Wiki);
         Field(sb, "source", info.Source);
+        // Added within schema 1: live numbers for this character on this server ({} when none).
+        sb.Append(",\"values\":{");
+        if (values != null)
+        {
+            bool first = true;
+            foreach (KeyValuePair<string, double> v in values)
+            {
+                if (!ServerProfileValues.IsValidKey(v.Key) || !double.IsFinite(v.Value)) continue;
+                if (!first) sb.Append(',');
+                first = false;
+                Str(sb, v.Key);
+                sb.Append(':').Append(v.Value.ToString("R", CultureInfo.InvariantCulture));
+            }
+        }
+        sb.Append('}');
         sb.Append('}');
         return sb.ToString();
     }

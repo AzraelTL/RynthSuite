@@ -110,11 +110,7 @@ public sealed partial class RynthNavPlugin
     private double LocalX => _wx - ((_cellId >> 24) & 0xFF) * 192.0;
     private double LocalY => _wy - ((_cellId >> 16) & 0xFF) * 192.0;
 
-    private void HubHalt()
-    {
-        Host.SetAutoRun(false);
-        Host.StopCompletely();
-    }
+    private void HubHalt() => AutoRun.Halt();
 
     /// <summary>One tick of a hub step: wait for the landing inside, walk to the exit, take it.</summary>
     private void StepHub()

@@ -78,6 +78,13 @@ internal sealed class ServerPackInfo
     public ServerCommand[] Commands { get; init; } = Array.Empty<ServerCommand>();
     /// <summary>The server's own tinkering salvage (only recipes known to exist); empty = none defined.</summary>
     public ServerSalvage[] Salvage { get; init; } = Array.Empty<ServerSalvage>();
+    /// <summary>
+    /// Jewelry that is a trinket on this server (the Crafting tab's Trinkets bench, not Jewelry): name
+    /// words, case-insensitive, and words that rule a name out again ("top" but not "topaz"). Empty:
+    /// the server has no trinkets (retail: every jewelry piece is Jewelry).
+    /// </summary>
+    public string[] TrinketNames { get; init; } = Array.Empty<string>();
+    public string[] TrinketExcept { get; init; } = Array.Empty<string>();
     /// <summary>"3 accounts", "3 active characters", ...; empty when not published.</summary>
     public string AccountLimit { get; init; } = string.Empty;
     public BottingPolicy Botting { get; init; } = BottingPolicy.Unknown;

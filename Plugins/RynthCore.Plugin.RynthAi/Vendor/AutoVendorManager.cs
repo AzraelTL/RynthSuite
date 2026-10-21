@@ -67,7 +67,7 @@ internal sealed class AutoVendorManager
     private bool _needsUpdateSaid;
 
     // ── Session ──
-    private enum Phase { Idle, Identifying, Ready, WaitTrade, WaitConfirm, WaitSplit }
+    private enum Phase { Idle, Identifying, Ready, WaitTrade, WaitConfirm, WaitSplit, WaitMerge }
     private Phase _phase = Phase.Idle;
     private VTankLootProfile? _profile;
     private string _profilePath = string.Empty;
@@ -94,6 +94,13 @@ internal sealed class AutoVendorManager
     private int _splitAmount;
     private HashSet<uint> _splitBefore = new();
     private long _splitDeadline;
+    // A split or merge that never shows up (no new stack / nothing moved): MaxFailures in a row ends the
+    // session instead of retrying every 10 s forever.
+    private int _tidyFails;
+    private int _tidySteps;                       // splits/merges since the last trade
+    private const int MaxTidySteps = 8;
+    private uint _mergeSource, _mergeTarget;
+    private int _mergeSourceCount, _mergeTargetCount;
 
     private int _pyrealStackSize;
 
@@ -391,6 +398,7 @@ internal sealed class AutoVendorManager
             case Phase.WaitTrade:   TickWaitTrade(now); break;
             case Phase.WaitConfirm: TickWaitConfirm(now); break;
             case Phase.WaitSplit:   TickWaitSplit(now); break;
+            case Phase.WaitMerge:   TickWaitMerge(now); break;
         }
         UpdateStatus();
     }
@@ -472,6 +480,8 @@ internal sealed class AutoVendorManager
         if (!silent)
             ThinkOrWrite($"AutoVendor finished: {_vendorName}");
         _phase = Phase.Idle;
+        _tidyFails = 0;
+        _tidySteps = 0;
         _profile = null;
         _requestId = 0;
         _idQueue.Clear();
@@ -600,6 +610,20 @@ internal sealed class AutoVendorManager
         PackState pack = ReadPack(v, vi, inv);
         VendorPlan plan = AutoVendorPlanner.PlanNext(v, wants, sells, pack);
 
+        // Splits and merges only get the stacks ready for a trade: a run of them with no trade between
+        // is going in circles (split-merge-split, 2026-10-19), so it ends the session.
+        if (plan.Kind is PlanKind.Split or PlanKind.Merge)
+        {
+            if (++_tidySteps > MaxTidySteps)
+            {
+                ThinkOrWrite($"AutoVendor Fatal - {MaxTidySteps} splits/merges of {plan.SplitItem?.Name} without a sale");
+                Stop(false);
+                return;
+            }
+        }
+        else
+            _tidySteps = 0;
+
         switch (plan.Kind)
         {
             case PlanKind.Done:
@@ -621,6 +645,10 @@ internal sealed class AutoVendorManager
 
             case PlanKind.Split:
                 DoSplit(plan.SplitItem!, plan.SplitAmount, plan.Message, inv, now);
+                break;
+
+            case PlanKind.Merge:
+                DoMerge(plan.SplitItem!, plan.MergeTarget!, plan.Message, now);
                 break;
         }
     }
@@ -819,8 +847,71 @@ internal sealed class AutoVendorManager
     {
         if (now < _nextPollAt) return;
         _nextPollAt = now + PollMs;
-        if (FindNewStack(Inventory(), _splitBefore, _splitName, _splitAmount) != 0 || now > _splitDeadline)
+        if (FindNewStack(Inventory(), _splitBefore, _splitName, _splitAmount) != 0)
+        {
+            _tidyFails = 0;
             _phase = Phase.Ready;
+        }
+        else if (now > _splitDeadline)
+            TidyFailed($"splitting {_splitAmount} off {_splitName} made no new stack");
+    }
+
+    private void DoMerge(SellItem source, SellItem target, string why, long now)
+    {
+        if (!_host.HasMergeStackInternal)
+        {
+            ThinkOrWrite("AutoVendor Fatal - this engine can't merge stacks");
+            Stop(false);
+            return;
+        }
+        _mergeSource = source.Id;
+        _mergeTarget = target.Id;
+        _mergeSourceCount = source.StackSize;
+        _mergeTargetCount = target.StackSize;
+        _splitName = source.Name;
+        _host.Log($"[RynthAi] AutoVendor merge {source.Name}:{source.Id:X8} ({source.StackSize}) onto {target.Id:X8} ({target.StackSize}) - {why}");
+        if (!_host.MergeStackInternal(source.Id, target.Id))
+        {
+            TidyFailed($"could not merge {source.Name}");
+            return;
+        }
+        Tool($"merging {source.Name} stacks ({why})");
+        _splitDeadline = now + SplitWaitMs;
+        _nextPollAt = now + PollMs;
+        _bailAt = now;
+        _phase = Phase.WaitMerge;
+    }
+
+    private void TickWaitMerge(long now)
+    {
+        if (now < _nextPollAt) return;
+        _nextPollAt = now + PollMs;
+        var inv = Inventory();
+        var src = inv.FirstOrDefault(w => unchecked((uint)w.Id) == _mergeSource);
+        var tgt = inv.FirstOrDefault(w => unchecked((uint)w.Id) == _mergeTarget);
+        // Done when the source is used up, or either count moved (past the max the target fills and
+        // the source survives smaller).
+        if (src == null || StackOf(src) != _mergeSourceCount || (tgt != null && StackOf(tgt) != _mergeTargetCount))
+        {
+            _tidyFails = 0;
+            _phase = Phase.Ready;
+        }
+        else if (now > _splitDeadline)
+            TidyFailed($"merging {_splitName} stacks moved nothing");
+    }
+
+    private void TidyFailed(string what)
+    {
+        _tidyFails++;
+        _host.Log($"[RynthAi] AutoVendor: {what} ({_tidyFails}/{MaxFailures})");
+        if (_tidyFails >= MaxFailures)
+        {
+            _tidyFails = 0;
+            ThinkOrWrite($"AutoVendor Fatal - {what}, {MaxFailures} times in a row");
+            Stop(false);
+            return;
+        }
+        _phase = Phase.Ready;
     }
 
     // ── Collect (UB GetBuyItems / GetSellItems) ──
@@ -847,6 +938,7 @@ internal sealed class AutoVendorManager
 
         uint player = PlayerId();
         var packOrder = PackOrder(inv, player);
+        var unitValues = TrueUnitValues(inv);
         foreach (var wo in inv)
         {
             uint id = unchecked((uint)wo.Id);
@@ -871,6 +963,13 @@ internal sealed class AutoVendorManager
             int stack = StackOf(wo);
             bool isNote = wo.ObjectClass == AcObjectClass.TradeNote || (type & AutoVendorPlanner.ItemTypePromissoryNote) != 0;
             int unitValue = stack > 1 ? safety.Value / stack : safety.Value;
+            // A stack keeps its old Value after a split (100 peas' worth on a stack of 2 read "1,250,000
+            // each", 2026-10-19), which hid it from the sell list and from the split planner. Use the
+            // per-unit value most of this item's units carry (TrueUnitValues).
+            bool stackable = InventoryManager.GetMaxStackSize(wo) > 1;
+            if (stackable && unitValues.TryGetValue(StackKey(wo), out int trueUnit) && trueUnit > 0)
+                unitValue = trueUnit;
+            int stackValue = stackable ? unitValue * Math.Max(1, stack) : safety.Value;
             if (unsafeWhy == null && !AutoVendorPlanner.VendorWillBuy(v, type, isNote, unitValue))
             {
                 // A Sell rule wanted it and the vendor won't take it: say why, once per name a
@@ -915,10 +1014,12 @@ internal sealed class AutoVendorManager
                 Class = wo.ObjectClass,
                 ItemType = type,
                 StackSize = stack,
-                Value = safety.Value,
+                Value = stackValue,
                 RuleName = sd.RuleName,
                 Location = main ? "Main Pack" : $"{packName} #{packIdx}",
                 SortSlot = main ? Math.Max(0, wo.DirectSlot) : 1000 + 100 * packIdx + Math.Max(0, wo.DirectSlot),
+                MaxStack = InventoryManager.GetMaxStackSize(wo),
+                Wcid = _host.HasGetObjectWcid && _host.TryGetObjectWcid(id, out uint wcid) ? wcid : 0,
             });
         }
         return result;
@@ -984,7 +1085,7 @@ internal sealed class AutoVendorManager
     /// <summary>UB cancels a pending use by facing one degree away.</summary>
     private void CancelUse()
     {
-        if (_host.HasTurnToHeading && _host.TryGetPlayerHeading(out float h))
+        if (_host.HasTurnToHeading && PlayerCompass.TryGet(_host, out float h))
             _host.TurnToHeadingBy("Vendor", (h + 359f) % 360f);
         else if (_host.HasStopCompletely)
             _host.StopCompletelyBy("Vendor");
@@ -1330,6 +1431,34 @@ internal sealed class AutoVendorManager
         return count;
     }
 
+    /// <summary>
+    /// Per item (weenie, else name): the Value / StackSize that the most units carry. A stack's Value goes
+    /// stale after a split (too high) or a merge (too low); the untouched stacks outnumber them.
+    /// </summary>
+    private Dictionary<string, int> TrueUnitValues(List<WorldObject> inv)
+    {
+        var votes = new Dictionary<string, Dictionary<int, long>>(StringComparer.Ordinal);
+        foreach (var wo in inv)
+        {
+            int stack = StackOf(wo);
+            int value = wo.Values(19 /* Value */, 0);
+            if (stack < 1 || value <= 0 || InventoryManager.GetMaxStackSize(wo) < 2) continue;
+            string key = StackKey(wo);
+            if (!votes.TryGetValue(key, out var byUnit)) votes[key] = byUnit = new Dictionary<int, long>();
+            int unit = value / stack;
+            byUnit[unit] = byUnit.GetValueOrDefault(unit) + stack;
+        }
+        var result = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var (key, byUnit) in votes)
+            result[key] = AutoVendorPlanner.MostCarriedUnit(byUnit);
+        return result;
+    }
+
+    private string StackKey(WorldObject wo) =>
+        _host.HasGetObjectWcid && _host.TryGetObjectWcid(unchecked((uint)wo.Id), out uint wcid) && wcid != 0
+            ? "w:" + wcid
+            : "n:" + wo.Name;
+
     private uint FindNewStack(List<WorldObject> inv, HashSet<uint> before, string name, int amount)
     {
         foreach (var wo in inv)
@@ -1487,6 +1616,7 @@ internal sealed class AutoVendorManager
                 Phase.WaitTrade => $"Waiting for the server - {_vendorName}",
                 Phase.WaitConfirm => $"Confirming trade - {_vendorName}",
                 Phase.WaitSplit => $"Splitting {_splitName} - {_vendorName}",
+                Phase.WaitMerge => $"Merging {_splitName} - {_vendorName}",
                 _ => $"Vendoring {_vendorName} ({Path.GetFileName(_profilePath)})",
             };
         if (_settings.AutoVendorTestMode && _phase != Phase.Idle) s += " [test mode]";

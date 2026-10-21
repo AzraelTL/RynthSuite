@@ -20,6 +20,24 @@ internal sealed class OracleContext
     public readonly VoidTracker Void = new();
     public readonly FellowshipTracker Fellowship = new();
     public readonly ServerIdentity Server = new();
+    /// <summary>RynthILT's server profile (Leaftide features, fellowship rules, the /qb list); None without RynthILT.</summary>
+    public readonly IltServerLink Ilt = new();
+    /// <summary>RynthILT's "RynthILT.Data" (charms, pet breeding, the Temple guardians).</summary>
+    public readonly RynthCore.Plugin.Shared.RynthIltDataClient IltData = new();
+    /// <summary>The charms RynthILT last reported (None without RynthILT); read while the Character tab shows.</summary>
+    public RynthCore.Plugin.Shared.IltCharmsView Charms = RynthCore.Plugin.Shared.IltCharmsView.None;
+    /// <summary>The last charm Toggle's outcome, shown under the charms list.</summary>
+    public string CharmMessage = "";
+    /// <summary>RynthILT's pet breeding tracker (None without it); read while the Pet Breeding tab shows.</summary>
+    public RynthCore.Plugin.Shared.IltBreedingView Breeding = RynthCore.Plugin.Shared.IltBreedingView.None;
+    /// <summary>The last breeding button's outcome, shown under the tab's buttons.</summary>
+    public string BreedingMessage = "";
+    /// <summary>RynthILT's Temple guardians (None without RynthILT 0.3.3+); read while the Quests tab shows on Infinite Leaftide.</summary>
+    public RynthCore.Plugin.Shared.IltGuardianView Guardian = RynthCore.Plugin.Shared.IltGuardianView.None;
+    /// <summary>Goes up each time <see cref="Guardian"/> changes, so the Quests list rebuilds its guardian rows.</summary>
+    public int GuardianRevision;
+    /// <summary>The last guardian button's outcome, shown under the guardian controls.</summary>
+    public string GuardianMessage = "";
     /// <summary>RynthAi's session (the one session every tracker shows); read while the Character tab shows.</summary>
     public readonly RynthCore.Plugin.Shared.RynthAiSessionClient AiSession = new();
     /// <summary>The last session RynthAi reported; SessionKnown false without RynthAi.</summary>
@@ -27,10 +45,11 @@ internal sealed class OracleContext
     public bool SessionKnown;
     /// <summary>RynthCore's server list (API v86) and the active server owner's settings; State null on older engines.</summary>
     public readonly RynthCore.Plugin.Shared.ServerStateClient ServerState = new();
-    /// <summary>ConquestAC-only data (tag Conquest); fed only while on ConquestAC.</summary>
-    public readonly ConquestData Conquest = new();
-    /// <summary>Aelrynth's leaderboards (tag Aelrynth); fed only while on Aelrynth.</summary>
-    public readonly AelrynthBoards Boards = new();
+    /// <summary>
+    /// The active server's Void DoT duration rule: its plugin's profile value "voidDotDurationScale"
+    /// (RynthConquest publishes Conquest's), 1 on every other server or without the plugin.
+    /// </summary>
+    public double VoidDotScale = 1.0;
 
     /// <summary>Titles the character holds (engine API v75); TitlesKnown false until the engine has the list.</summary>
     public readonly System.Collections.Generic.HashSet<int> EarnedTitles = new();
@@ -64,12 +83,52 @@ internal sealed class OracleContext
     /// <summary>Set by the plugin: runs a chat command through RynthCore's plugin dispatch (another plugin's window).</summary>
     public Func<string, bool> RunCommand = _ => false;
 
+    /// <summary>Set by the plugin: asks RynthILT to use a carried charm or Guardian Hand (its toggle id).</summary>
+    public Func<uint, bool> ToggleCharm = _ => false;
+
+    /// <summary>Set by the plugin: sends a verb to RynthILT's breeding tracker (RynthIltDataApi PetBreedingCommand).</summary>
+    public Func<string, bool> BreedingCommand = _ => false;
+
+    /// <summary>Set by the plugin: sends a verb to RynthILT's guardians (RynthIltDataApi GuardianCommand).</summary>
+    public Func<string, bool> GuardianCommand = _ => false;
+
+    /// <summary>Set by the plugin: "&lt;verb&gt; &lt;targets&gt;" for RynthNav's /rnav (go, route, arrow); false when RynthNav isn't there.</summary>
+    public Func<string, bool> SendNav = _ => false;
+
+    /// <summary>Set by the plugin: the name of a Parchment carried (null when none). Null here: the Quests tab doesn't look.</summary>
+    public Func<string?>? ParchmentFinder;
+
+    /// <summary>
+    /// Set by the plugin: RynthAi is loaded and so can take the Quests tab's "/ub give" (the Give
+    /// Parchment button). False disables the button with a tooltip.
+    /// </summary>
+    public Func<bool> UbGiveAvailable = () => false;
+    /// <summary>
+    /// The loaded RynthAi answered a "/ub give" with "Unrecognized /ub command": it has no such verb,
+    /// so the Give Parchment button stays disabled (set by the plugin from the chat line).
+    /// </summary>
+    public bool UbGiveMissing;
+    /// <summary>When the Give Parchment button last sent "/ub give" (NowMs), so a rejection in chat can be tied to it.</summary>
+    public long UbGiveSentMs = long.MinValue / 2;
+
     /// <summary>Set by the plugin: shows or hides the Quest Timers window.</summary>
     public Action<bool> SetQuestTimersWindow = _ => { };
     /// <summary>Set by the plugin: whether the Quest Timers window is showing.</summary>
     public Func<bool> QuestTimersWindowVisible = () => false;
 
     public Func<uint, int> Props => id => Character.Int(Host, id);
+
+    /// <summary>
+    /// A chat line seen just after the Give Parchment button sent "/ub give": RynthAi's "Unrecognized
+    /// /ub command" means this RynthAi has no such verb, so the button stays off. True when it did.
+    /// </summary>
+    public bool NoteChatLineForGive(string line, long nowMs)
+    {
+        if (nowMs - UbGiveSentMs >= 5000 || UbGiveMissing) return false;
+        if (line.IndexOf("Unrecognized /ub", StringComparison.OrdinalIgnoreCase) < 0) return false;
+        UbGiveMissing = true;
+        return true;
+    }
 
     /// <summary>A line in the player's chat window only (nothing is sent to the server).</summary>
     public void Print(string text)

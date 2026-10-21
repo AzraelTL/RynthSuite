@@ -38,6 +38,12 @@ public sealed class IltHubState
     /// <summary>True once the one-time UtilityBelt sidecar import has run for this character.</summary>
     public bool UbSidecarsImported;
 
+    /// <summary>
+    /// True once the RynthAi settings that moved to RynthILT on 2026-10-20 (the Pets tab's ACECustom
+    /// options, ...) were copied from this character's RynthAi files (IltMigration.ImportRynthAiSettings).
+    /// </summary>
+    public bool RynthAiSettingsImported;
+
     /// <summary>Last-seen server feature bits. Cache only — overwritten by every login refresh.</summary>
     public IltServerOptionsSnapshot ServerOptions = new();
 
@@ -47,6 +53,56 @@ public sealed class IltHubState
     public IltGearState Gear = new();
     public IltGamesState Games = new();
     public IltGuardianState Guardian = new();
+    /// <summary>Infinite Leaftide combat helpers (moved from RynthAi's profile 2026-10-20).</summary>
+    public IltCombatState Combat = new();
+
+    /// <summary>
+    /// The Vaulted Dungeons keeper's master switch (off by default): while off it does nothing (no
+    /// recalls, no /rc quit, no tab). RynthAi's "Vaulted Dungeons" setting until 2026-10-20 (copied once);
+    /// set in the ILT settings ("/ilt settings") or the engine's Settings > Navigation row (RynthAi
+    /// mirrors it through RynthILT.Hub GetSetting / SetSetting).
+    /// </summary>
+    public bool VaultedDungeonsEnabled;
+
+    /// <summary>ACECustom T11 gear (IltT11): the item-aug override (moved from RynthAi's profile 2026-10-20).</summary>
+    public IltT11State T11 = new();
+
+    /// <summary>The ILT sections of RynthAi's Remote tab (moved from RynthAi's huds.json 2026-10-20).</summary>
+    public IltRemoteState Remote = new();
+}
+
+// ── RynthAi's Remote tab ────────────────────────────────────────────────────
+
+public sealed class IltRemoteState
+{
+    /// <summary>The Remote tab's Bank section (ILT bank balances). Was RynthAi's MiniShowBank.</summary>
+    public bool ShowBank = true;
+    /// <summary>The Remote tab's Guardian line (the last Temple guardian answer). Was RynthAi's MiniShowGuardian.</summary>
+    public bool ShowGuardian = true;
+}
+
+// ── T11 ─────────────────────────────────────────────────────────────────────
+
+public sealed class IltT11State
+{
+    /// <summary>
+    /// The item augmentation count T11 wield gates use ("T11: Can Wield" in RynthAi's loot rules) instead
+    /// of the "/aug" reply's; -1 = automatic (read from /aug). "/ilt t11 augs &lt;n|auto&gt;". Was RynthAi's
+    /// T11ItemAugsOverride.
+    /// </summary>
+    public int ItemAugsOverride = -1;
+}
+
+// ── Combat ──────────────────────────────────────────────────────────────────
+
+public sealed class IltCombatState
+{
+    /// <summary>
+    /// When the Empyrean Handler channels its lethal ring and the character is inside it, have RynthAi
+    /// back-jump away and re-engage (IltRingEvade; RynthAi acts only while its macro runs with combat
+    /// on). On by default because it is gated that way. Was RynthAi's HandlerRingEvade.
+    /// </summary>
+    public bool HandlerRingEvade = true;
 }
 
 /// <summary>Cached result of the server-options check (see IltServerOptions).</summary>
@@ -110,8 +166,22 @@ public sealed class IltPetState
     public List<string> ShinyLog = new();
     /// <summary>The breeding tracker: rules this server showed, growth stage names, recent events (IltPetBreeding).</summary>
     public IltBreedingState Breeding = new();
-    // The Pets tab's own settings (roster, healing / cosmetic pets, refill path) are RynthAi's
-    // (its miniremote.json); older ilt-hub.json files still carry them, and they are ignored here.
+
+    // ACECustom's parts of the Pets tab (IltPetAutomation, moved from RynthAi 2026-10-20; copied once
+    // from RynthAi's miniremote.json by IltMigration.ImportRynthAiSettings). New names on purpose: an
+    // old ilt-hub.json copy still carries RynthAi's UsePyrealRefillPath / AutoCaptureEnabled /
+    // CaptureLensIndex from before 2026-10-13, and those stale values must not be read back.
+    /// <summary>
+    /// Summon from an EMPTY essence while the Summon Essence Refill charm is on (the server refills it
+    /// from banked pyreals). Still needs the server to confirm the feature (RynthAi.Hub's PetManager
+    /// asks AllowSummonOnEmpty).
+    /// </summary>
+    public bool RefillFromEmpty;
+    /// <summary>Use the chosen siphon lens on the nearest creature once it is weak enough (off by default).</summary>
+    public bool AutoCapture;
+    /// <summary>Index into PetCaptureRules.Lenses (Flawed to Asheron's).</summary>
+    public int CaptureLens;
+    // The Pets tab's own settings (roster, healing / cosmetic pets) are RynthAi's (its miniremote.json).
 }
 
 // ── Character ───────────────────────────────────────────────────────────────

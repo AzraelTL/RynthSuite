@@ -15,6 +15,15 @@ namespace RynthCore.Plugin.RynthILT.Hub;
 
 internal static class IltSalvage
 {
+    /// <summary>
+    /// Leaftide trinkets (compass, goggles, scarab, watch, puzzle box, tops): jewelry that takes the
+    /// Trinkets bench's recipes (UB-IT's IsLeaftideTrinketJewelry; RynthAi's TinkerCatalog.IsTrinket until
+    /// 2026-10-20). Sent in the profile's "trinkets" (RynthServer.Profile).
+    /// </summary>
+    internal static readonly string[] TrinketNames = { "compass", "goggles", "scarab", "watch", "puzzle box", "top" };
+    /// <summary>"top" but not "topaz".</summary>
+    internal static readonly string[] TrinketExcept = { "topaz" };
+
     // MaterialType (131) ids.
     private const int Wool = 8, BlackGarnet = 15, Diamond = 20, GreenJade = 24, Ruby = 38, TigerEye = 42, Tourmaline = 43,
         Turquoise = 44, WhiteQuartz = 46, YellowGarnet = 48, Leather = 52, GromnieHide = 54, Copper = 59, Pyreal = 62,

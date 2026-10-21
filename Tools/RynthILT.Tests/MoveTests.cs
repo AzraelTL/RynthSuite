@@ -34,7 +34,7 @@ internal static class MoveTests
         r.Add("move: off ILT nothing is sent, no tab or section shows; on ILT the login probe runs", DormantOffIlt);
         r.Add("move: the charms JSON for RynthILT.Data readers carries the Guardian Hands", CharmsReaderJson);
         r.Add("move: Character redirects to RynthOracle; Charms and Banking stay RynthILT's tabs", MovedSections);
-        r.Add("sections: RynthILT's manifest (rates, /fship, /qb) is valid schema-1 JSON with its own surfaces", SectionsManifest);
+        r.Add("sections: RynthILT's manifest (rates, /fship, /qb, and the ILT tabs it shows) is valid schema-1 JSON the engine places", SectionsManifest);
         // Last: Release() switches the table off for the rest of the process.
         r.Add("move: the RynthILT.Hub table: query, functions, release", HubTable);
     }
@@ -364,11 +364,28 @@ internal static class MoveTests
     {
         Check.Eq(sizeof(IltTabV1), 24 + 32 + 4 + 4 + 4, "IltTabV1: id, label, width, height, flags");
         Check.Eq((int)Marshal.OffsetOf<IltTabV1>(nameof(IltTabV1.Flags)), 64, "IltTabV1.Flags offset");
-        Check.Eq(sizeof(RynthIltHubApiV1), 8 + 9 * IntPtr.Size, "RynthIltHubApiV1: header + 9 functions");
+        // RynthILT.Hub grew on 2026-10-20 (append-only): readers accept any table at least BaseStructSize
+        // long (the first release's 9 functions) and check the appended ones with Has.
+        Check.Eq((int)RynthIltHubApiV1.BaseStructSize, 8 + 9 * IntPtr.Size, "RynthIltHubApiV1.BaseStructSize: the first release's 9 functions");
+        Check.Eq(RynthIltHubApiV1.AllowSummonOnEmptyOffset, 8 + 9 * IntPtr.Size, "AllowSummonOnEmpty right after Command");
+        Check.Eq((int)Marshal.OffsetOf<RynthIltHubApiV1>(nameof(RynthIltHubApiV1.AllowSummonOnEmpty)), RynthIltHubApiV1.AllowSummonOnEmptyOffset,
+            "AllowSummonOnEmptyOffset is where the field really is");
+        Check.Eq((int)Marshal.OffsetOf<RynthIltHubApiV1>(nameof(RynthIltHubApiV1.GetSubTabs)), RynthIltHubApiV1.GetSubTabsOffset,
+            "GetSubTabsOffset is where the field really is");
+        Check.Eq((int)Marshal.OffsetOf<RynthIltHubApiV1>(nameof(RynthIltHubApiV1.GetSetting)), RynthIltHubApiV1.GetSettingOffset,
+            "GetSettingOffset is where the field really is");
+        Check.Eq((int)Marshal.OffsetOf<RynthIltHubApiV1>(nameof(RynthIltHubApiV1.SetSetting)), RynthIltHubApiV1.SetSettingOffset,
+            "SetSettingOffset is where the field really is");
         // SessionStatsMore was appended (2026-10-13); readers accept any table at least
         // BaseStructSize long, so an older RynthAi still connects.
         // VaultedDungeonsEnabled was appended (2026-10-18): the Vaulted Dungeons master switch.
-        Check.Eq(sizeof(RynthAiHubApiV1), 8 + 12 * IntPtr.Size, "RynthAiHubApiV1: header + 12 functions");
+        // BackAwayFrom was appended (2026-10-20): the generic back-away RynthILT's Handler ring evade asks for.
+        // SetPlayerCounter too (2026-10-20): the T11 wield counters RynthILT reads from /aug.
+        Check.Eq(sizeof(RynthAiHubApiV1), 8 + 14 * IntPtr.Size, "RynthAiHubApiV1: header + 14 functions");
+        Check.Eq((int)Marshal.OffsetOf<RynthAiHubApiV1>(nameof(RynthAiHubApiV1.SetPlayerCounter)), RynthAiHubApiV1.SetPlayerCounterOffset,
+            "SetPlayerCounterOffset is where the field really is");
+        Check.Eq((int)Marshal.OffsetOf<RynthAiHubApiV1>(nameof(RynthAiHubApiV1.BackAwayFrom)), RynthAiHubApiV1.BackAwayFromOffset,
+            "BackAwayFromOffset is where the field really is");
         Check.Eq((int)RynthAiHubApiV1.BaseStructSize, 8 + 10 * IntPtr.Size, "RynthAiHubApiV1.BaseStructSize: the first release's 10 functions");
         Check.Eq(RynthAiHubApiV1.SessionStatsMoreOffset, (int)RynthAiHubApiV1.BaseStructSize, "SessionStatsMore right after the base table");
         Check.Eq(RynthAiHubApiV1.VaultedDungeonsEnabledOffset, 8 + 11 * IntPtr.Size, "VaultedDungeonsEnabled right after SessionStatsMore");
@@ -456,12 +473,15 @@ internal static class MoveTests
     /// </summary>
     private static void SectionsManifest()
     {
-        using var doc = System.Text.Json.JsonDocument.Parse(RynthILTPlugin.SectionsJson);
+        // No Hub (before the character's name is known): the always-there views only.
+        string bare = IltSectionsManifest.Build(IltSectionsManifest.TabsOf(null));
+        using var doc = System.Text.Json.JsonDocument.Parse(bare);
         var root = doc.RootElement;
         Check.Eq(root.GetProperty("version").GetInt32(), 1, "schema 1");
         var sections = root.GetProperty("sections");
-        Check.Eq(sections.GetArrayLength(), 1, "one section of RynthILT's own");
+        Check.Eq(sections.GetArrayLength(), 2, "two sections of RynthILT's own");
         Check.Eq(sections[0].GetProperty("id").GetString(), "quests", "a Quests section (the /qb list)");
+        Check.Eq(sections[1].GetProperty("id").GetString(), "games", "and Games (moved from RynthAi with the tabs)");
         var surfaces = new System.Collections.Generic.List<string>();
         foreach (var c in root.GetProperty("contributions").EnumerateArray())
         {
@@ -471,7 +491,38 @@ internal static class MoveTests
         Check.True(surfaces.SequenceEqual(new[] { RynthILTPlugin.RatesSurface, RynthILTPlugin.FellowshipSurface, RynthILTPlugin.QuestBonusSurface }),
                    "rates, fellowship, quest bonus: " + string.Join(",", surfaces));
         Check.True(surfaces.All(s => s.StartsWith("section:ilt-", StringComparison.Ordinal) && s.Length <= 64), "short section:ilt-* surfaces");
-        Check.True(RynthILTPlugin.SectionsJson.All(ch => ch < 128), "ASCII only");
+        Check.True(bare.All(ch => ch < 128), "ASCII only");
+
+        // The Mini Remote ILT tabs the Hub shows (RynthAi listed them until 2026-10-20): Gear not reported yet,
+        // Games hidden, Charms and Banking shown.
+        var tabs = new[]
+        {
+            new IltSectionsManifest.Tab("banking", 560, 520, Shown: true, Available: true),
+            new IltSectionsManifest.Tab("gear", 560, 520, Shown: true, Available: false),
+            new IltSectionsManifest.Tab("charms", 560, 520, Shown: true, Available: true),
+            new IltSectionsManifest.Tab("games", 520, 440, Shown: false, Available: false),
+            new IltSectionsManifest.Tab("character", 520, 440, Shown: true, Available: true),
+        };
+        string json = IltSectionsManifest.Build(tabs);
+        var m = RynthCore.Engine.UI.Sections.SectionManifestParser.Parse("RynthILT", json, out string error);
+        Check.Eq(error, string.Empty, "the engine's parser takes it");
+        Check.Eq(m.Contributions.Length, 6, "rates, fellowship, /qb, Banking, Gear, Charms");
+        var gear = m.Contributions.Single(c => c.Surface == "section:gear");
+        Check.True(gear.Section == "inventory" && !gear.Enabled && gear.Note.Length > 0, "Gear in Inventory, disabled with a note until reported");
+        Check.True(m.Contributions.Any(c => c.Surface == "section:charms" && c.Enabled) && m.Contributions.Any(c => c.Surface == "section:banking" && c.Enabled),
+                   "Charms and Banking stay RynthILT's tabs");
+        Check.False(m.Contributions.Any(c => c.Surface == "section:games"), "a hidden tab isn't listed");
+        Check.False(m.Contributions.Any(c => c.Surface == "section:character"), "Character moved out: never placed");
+        var iltOn = new RynthCore.Engine.UI.Sections.ServerState("ilt", "Infinite Leaftide", true, true, RynthCore.Engine.UI.Sections.ServerForce.Auto, true, "");
+        var on = RynthCore.Engine.UI.Sections.SectionCatalog.Build(new[] { m }, _ => false, new[] { iltOn });
+        Check.True(on.Single(v => v.Id == "inventory").Panes.Any(p => p.Title == "Charms" && p.Contribution?.Plugin == "RynthILT"),
+                   "on ILT the engine shows RynthILT's Charms in Inventory (drawn by RynthILT)");
+        var off = RynthCore.Engine.UI.Sections.SectionCatalog.Build(new[] { m }, _ => false, new[] { iltOn with { Active = false } });
+        Check.False(off.Single(v => v.Id == "inventory").Panes.Any(p => p.Title == "Charms"), "off ILT: none");
+        Check.True(IltSectionsManifest.TryTabOf("section:banking", out IltSection bank) && bank == IltSection.Banking, "section:banking draws Banking");
+        Check.False(IltSectionsManifest.TryTabOf("section:bank", out _), "only the tab's own id");
+        Check.False(IltSectionsManifest.TryTabOf("section:pets", out _), "pets is RynthAi's");
+        Check.False(IltSectionsManifest.TryTabOf("section:ilt-rates", out _), "not a tab"); 
         Check.True(RynthILTPlugin.IsParsedRemoteAction("servermenu") && RynthILTPlugin.IsParsedRemoteAction("ServerMenu")
                    && !RynthILTPlugin.IsParsedRemoteAction("prog"), "RynthCore's servermenu push is answered, never queued as a verb");
     }
@@ -520,8 +571,13 @@ internal static class MoveTests
         Check.Eq(t->Version, 1u, "Version 1");
         Check.Eq(t->StructSize, (uint)sizeof(RynthIltHubApiV1), "StructSize");
         Check.True(t->IsIltWorld != null && t->GetFeature != null && t->GetRates != null && t->GetForceIlt != null && t->SetForceIlt != null
-                   && t->GetTabs != null && t->RenderTab != null && t->RenderSection != null && t->Command != null, "every function is filled in");
+                   && t->GetTabs != null && t->RenderTab != null && t->RenderSection != null && t->Command != null
+                   && t->AllowSummonOnEmpty != null && t->GetSubTabs != null && t->GetSetting != null && t->SetSetting != null,
+                   "every function is filled in");
+        Check.True(RynthIltHubApiV1.Has(t, RynthIltHubApiV1.GetSubTabsOffset), "the appended functions are inside StructSize");
         Check.Eq((IntPtr)t, HubInterface.Query(RynthIltHubApiV1.InterfaceName, 1), "the same table each time");
+        Check.Eq((IntPtr)t, HubInterface.Query(RynthIltHubApiV1.NeutralInterfaceName, 1),
+                 "and under the server-neutral name RynthAi asks the active server's owner for (RynthServer.Hub)");
 
         // No plugin instance here (not logged in): every function answers "nothing".
         Check.Eq(t->IsIltWorld(), 0, "not ILT before login");
@@ -529,6 +585,11 @@ internal static class MoveTests
         Check.Eq(t->GetFeature(key), -1, "feature unknown before login");
         Check.Eq(t->GetTabs(null, 0), 0, "no tabs before login");
         Check.Eq(t->Command(key), 0, "no command taken before login");
+        Check.Eq(t->AllowSummonOnEmpty(), 0, "no summon from empty before login");
+        byte* pets = stackalloc byte[] { (byte)'p', (byte)'e', (byte)'t', (byte)'s', 0 };
+        Check.Eq(t->GetSubTabs(pets, null, 0), 0, "no Pets sub-tabs before login");
+        Check.Eq(t->GetSetting(pets), -1, "no setting offered before login");
+        Check.Eq(t->SetSetting(pets, 1), 0, "and none taken");
 
         HubInterface.Release();
         Check.Eq(t->Version, 0u, "Release zeroes Version (callers re-query)");

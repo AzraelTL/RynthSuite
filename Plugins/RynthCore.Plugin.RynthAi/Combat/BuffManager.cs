@@ -1987,10 +1987,15 @@ public partial class BuffManager : IDisposable
         // for the wand and back (slow, and the 10-06 stalls began at those switches), so a stamina
         // potion listed in Consumables goes before it. A potion drunk under 2.5 s ago: no Revitalize
         // on top of it. In Magic stance (a caster) Revitalize stays first.
+        int sentBefore = _vitalActionsSent;
         if (curStamPct < stamThreshold && AttemptStaminaChain())
         {
             _isRechargingStamina = true;
-            if (_restamRun) _restamRunCasts++;
+            // Only a cast, kit or potion actually sent counts toward the run's cap. The chain also
+            // answers "handled" while it waits for the last cast to finish, and counting those ticks
+            // ended every run after one Robustification (2.3 s of waiting = the 4-cast cap): Re-stam To
+            // 90 stopped near 60 (Drakkon, 2026-10-20).
+            if (_restamRun && _vitalActionsSent != sentBefore) _restamRunCasts++;
             return true;
         }
 
@@ -2077,11 +2082,21 @@ public partial class BuffManager : IDisposable
     private bool _restamRun;
     private int _restamRunCasts;
     internal const int RestamRunMaxCasts = 4;
+    // Vital casts, kits and potions actually sent (a wait for the last one isn't one).
+    private int _vitalActionsSent;
 
     /// <summary>The stamina % to recharge under now (see the fields above).</summary>
     internal static int StaminaLine(bool inCombat, int stamPct, LegacyUiSettings s, ref bool run, ref int casts)
     {
-        if (!inCombat) { run = false; return s.TopOffStam; }
+        if (!inCombat)
+        {
+            // A recharge started in the fight finishes to Re-stam To when the fight ends, instead of
+            // dropping to the top-off line (Top Stam can be lower than Re-stam To).
+            if (run && s.RestamTo > s.RestamAt && stamPct < s.RestamTo && casts < RestamRunMaxCasts)
+                return Math.Max(s.RestamTo, s.TopOffStam);
+            run = false;
+            return s.TopOffStam;
+        }
         if (s.RestamTo <= s.RestamAt) { run = false; return s.RestamAt; }
         if (stamPct < s.RestamAt)
         {
@@ -2272,6 +2287,7 @@ public partial class BuffManager : IDisposable
             return VitalNo($"the client refused the cast (spell {spellId})");
         }
         sent = true;
+        _vitalActionsSent++;
         _lastVitalCastAt = DateTime.Now;
         if (IsRecoveryVital(what)) NoteRecoveryAttempt();
         NoteCastIssued(spellId);
@@ -2329,6 +2345,7 @@ public partial class BuffManager : IDisposable
             _host.Log($"[RynthAi] Vitals: drinking {rule.Name} ({rule.Type})" + (potion.Id != rule.Id ? " from a new stack." : "."));
             _host.UseFor(unchecked((uint)potion.Id), "Buff", $"vitals: drink {rule.Name} ({rule.Type}) from the Items list");
             _lastPotionAt = DateTime.Now;
+            _vitalActionsSent++;
             _lastCastAttempt = DateTime.Now;
             if (IsHealthPotionType(types)) NoteHealSent(rule.Name);
             return true;
@@ -2345,6 +2362,7 @@ public partial class BuffManager : IDisposable
             _host.Log($"[RynthAi] Vitals: using {wo.Name} from the pack ({kind}).");
             _host.UseFor(unchecked((uint)wo.Id), "Buff", $"vitals: {kind} potion from the pack");
             _lastPotionAt = DateTime.Now;
+            _vitalActionsSent++;
             _lastCastAttempt = DateTime.Now;
             if (IsHealthPotionType(types)) NoteHealSent(wo.Name ?? "health potion");
             return true;
@@ -2528,6 +2546,7 @@ public partial class BuffManager : IDisposable
         if (HeldCastBlocksItemUse(out _)) return false;
         _host.Log($"[RynthAi] Vitals: using {kit.Name} from the pack.");
         _host.UseOnFor(unchecked((uint)kit.Id), playerId, "Buff", "vitals: stamina kit on yourself");
+        _vitalActionsSent++;
         _lastCastAttempt = DateTime.Now;
         MarkKitUsed(stamina: true);
         return true;

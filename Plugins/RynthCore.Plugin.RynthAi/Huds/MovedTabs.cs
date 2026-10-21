@@ -4,8 +4,8 @@
 // RynthOracle's Character tab ("/ro character"), its ILT session rates to RynthCore's Mini Remote
 // "Session Stats" section (RynthILT's own "section:ilt-rates"), and the force-server override to
 // RynthCore Options > Diagnostics ("/rc diagnostics"). Infinite Leaftide's own screens stay
-// RynthILT's: Charms and Banking are still Mini Remote ILT tabs (SectionsManifest places them on
-// the rail), drawn by RynthILT.
+// RynthILT's: Charms and Banking are still Mini Remote ILT tabs (RynthILT's own manifest places
+// them on the rail since 2026-10-20), drawn by RynthILT.
 // Old saved tab ids, links and "/ra hub open|tab <name>" land on the new home through CommandFor.
 //
 // Pure: the host tests check the mapping offline.

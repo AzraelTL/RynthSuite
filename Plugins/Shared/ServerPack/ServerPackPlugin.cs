@@ -14,11 +14,33 @@
 // Server-specific features: add files to the server's project implementing the partial hooks below
 // (ServerLoginComplete, ServerTick, ServerChatCommand, ...). Unimplemented hooks compile away.
 //
-// Threads: OnTick, login/logout and the engine's export calls run on the plugin pump. OnChatBarEnter
-// runs on AC's main thread, so it only queues. The card draws on the render thread (OnRender,
-// RynthPluginRenderEmbed) and queues its commands for the tick.
+// What the shared code gives a server's own features (added 2026-10-20, when RynthOracle's and
+// RynthInventory's Conquest and Aelrynth features moved into RynthConquest and RynthAelrynth, so a
+// shared plugin carries nothing for one server):
+//   ServerPages(list)          pages of its own (ServerPackPages.cs): sub-tabs of the Mini Remote's
+//                              Server section, only while its server is active, and tabs of the
+//                              /rserver window. Draw runs on the render thread.
+//   ServerChatText(...)        every incoming chat line (pump thread), to read the server's replies
+//                              and hide the ones answering the plugin's own requests (eat).
+//   ServerChatBar(text)        every line sent through the chat bar (AC's thread: note it only),
+//                              to tell the player's typed command from the plugin's own.
+//   Settings                  the plugin's own settings file (ServerPackSettings.cs), loaded before
+//                              ServerInitialize; MigrateOnce imports a setting from its old home.
+//   SetProfileValue(key, n)    a live number in its "RynthServer.Profile" ("values"), for other
+//                              plugins that apply a server rule without knowing the server.
+//   ServerCommandVerbs(list)   its own "/rserver <verb>" words, handled in ServerChatCommand.
+//   RunOnTick(action)          work for the next tick (a page's button, on the render thread).
+//   Send(command)              a chat command as if typed (pump thread, logged in only);
+//   LogTagged(text)            the engine log, "[RynthConquest] ..."; ChatLine(text) the chat window.
+// The tick, chat and command hooks only run while a character is logged in; each
+// should check Active itself, since the plugin can be loaded for a world that isn't its server.
+//
+// Threads: OnTick, login/logout, chat lines and the engine's export calls run on the plugin pump.
+// OnChatBarEnter runs on AC's main thread, so it only queues. The card and the pages draw on the
+// render thread (OnRender, RynthPluginRenderEmbed) and queue their commands for the tick.
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using ImGuiNET;
 using RynthCore.PluginCore;
@@ -40,10 +62,19 @@ public sealed partial class ServerPackPlugin : RynthPluginBase
     private readonly ServerPackModel _model;
     private readonly ServerPackUi _ui;
     private readonly string _sectionsJson;
+    // The server's own pages (ServerPages), validated; what was left out is logged at Initialize.
+    private readonly List<ServerPage> _pages;
+    private readonly List<string> _pageNotes = new();
+    private readonly ServerPackSettings _settings = new(ServerPackSettings.DefaultPath(RynthPluginInfo.Name));
+    private readonly ServerProfileValues _profileValues = new();
     // RynthCore commands from the card (render thread), run on the next tick.
     private readonly ConcurrentQueue<string> _engineCommands = new();
     // "/rserver ..." lines from OnChatBarEnter, run on the next tick.
     private readonly ConcurrentQueue<string[]> _commands = new();
+    // The server code's work for the tick (RunOnTick: its pages' buttons).
+    private readonly ConcurrentQueue<Action> _tickActions = new();
+    // The server's own "/rserver" verbs (ServerCommandVerbs).
+    private readonly HashSet<string> _serverVerbs = new(StringComparer.OrdinalIgnoreCase);
     private volatile bool _loginComplete;
     private volatile string? _world;
     private bool _wasActive;
@@ -52,8 +83,14 @@ public sealed partial class ServerPackPlugin : RynthPluginBase
     {
         ServerPackInfo info = ServerData.Create();
         _model = new ServerPackModel(info);
-        _ui = new ServerPackUi(_model, RynthPluginInfo.Name + " " + Marshal.PtrToStringAnsi(VersionPointer), () => _world);
-        _sectionsJson = ServerPackModel.BuildSectionsJson(info, RynthPluginInfo.Name);
+        var pages = new List<ServerPage>();
+        ServerPages(pages);
+        _pages = ServerPackPages.Validate(pages, _pageNotes.Add);
+        var verbs = new List<string>();
+        ServerCommandVerbs(verbs);
+        foreach (string v in verbs) if (!string.IsNullOrWhiteSpace(v)) _serverVerbs.Add(v.Trim());
+        _ui = new ServerPackUi(_model, RynthPluginInfo.Name + " " + Marshal.PtrToStringAnsi(VersionPointer), () => _world, _pages);
+        _sectionsJson = ServerPackModel.BuildSectionsJson(info, RynthPluginInfo.Name, _pages);
     }
 
     internal ServerPackInfo Info => _model.Info;
@@ -79,8 +116,52 @@ public sealed partial class ServerPackPlugin : RynthPluginBase
     partial void ServerTick(bool active);
     /// <summary>"/rserver &lt;verb&gt; ..." verbs the shared code doesn't know; set handled to stop the help text.</summary>
     partial void ServerChatCommand(string[] parts, ref bool handled);
+    /// <summary>
+    /// The server's own "/rserver" verbs (lower case), so "/rserver vault" reaches ServerChatCommand
+    /// instead of being read as another server's id. Called once, from the constructor.
+    /// </summary>
+    partial void ServerCommandVerbs(List<string> verbs);
     /// <summary>Extra lines for "/rserver info".</summary>
     partial void ServerInfoLines(Action<string> line);
+    /// <summary>The server's own pages (ServerPackPages.cs). Called once, from the constructor (no Host yet).</summary>
+    partial void ServerPages(List<ServerPage> pages);
+    /// <summary>
+    /// An incoming chat line (pump thread, logged in only): set <paramref name="eat"/> to keep it out of
+    /// the chat window (it comes in true when an earlier plugin already ate it).
+    /// </summary>
+    partial void ServerChatText(string text, int chatType, ref bool eat);
+    /// <summary>
+    /// A line sent through the chat bar, typed or another plugin's command (trimmed), before
+    /// "/rserver" is looked at. AC's main thread: only note it (interlocked state or a queue).
+    /// </summary>
+    partial void ServerChatBar(string text);
+
+    // ── What the server's own code uses ──────────────────────────────────
+
+    /// <summary>The plugin's settings file (loaded before ServerInitialize). Pump thread.</summary>
+    internal ServerPackSettings Settings => _settings;
+
+    /// <summary>The live numbers of the profile ("values"). Any thread.</summary>
+    internal ServerProfileValues ProfileValues => _profileValues;
+
+    /// <summary>The pages this plugin draws.</summary>
+    internal IReadOnlyList<ServerPage> Pages => _pages;
+
+    /// <summary>Publishes a live number in the "RynthServer.Profile" JSON ("values"). Any thread.</summary>
+    internal void SetProfileValue(string key, double value) => _profileValues.Set(key, value);
+
+    /// <summary>Runs <paramref name="action"/> on the next tick while logged in (dropped at logout). Any thread.</summary>
+    internal void RunOnTick(Action action)
+    {
+        if (action != null) _tickActions.Enqueue(action);
+    }
+
+    /// <summary>Sends a chat command as if typed; false when nothing went out. Pump thread.</summary>
+    internal bool Send(string command)
+        => _loginComplete && !string.IsNullOrWhiteSpace(command) && Host.HasInvokeChatParser && Host.InvokeChatParser(command);
+
+    /// <summary>The plugin's log, tagged with its name.</summary>
+    internal void LogTagged(string message) => Host.Log($"[{RynthPluginInfo.Name}] {message}");
 
     public override int Initialize()
     {
@@ -89,6 +170,9 @@ public sealed partial class ServerPackPlugin : RynthPluginBase
         // Mini Remote's included), never a second copy of ImGui (ImGuiNativeBinding.cs). Found and fixed
         // by SilentKelpie (rynth PR #12); re-implemented here.
         RynthCore.Plugin.Shared.ImGuiNativeBinding.Ensure(msg => Host.Log($"[{RynthPluginInfo.Name}] {msg}"));
+        foreach (string note in _pageNotes) LogTagged(note);
+        _settings.Load();
+        if (_settings.LastError.Length > 0) LogTagged($"Settings ({_settings.FilePath}) not read: {_settings.LastError}; using defaults.");
         ServerInitialize();
         return 0;
     }
@@ -108,7 +192,9 @@ public sealed partial class ServerPackPlugin : RynthPluginBase
         _world = null;
         while (_commands.TryDequeue(out _)) { }
         while (_engineCommands.TryDequeue(out _)) { }
+        while (_tickActions.TryDequeue(out _)) { }
         _model.Clear();
+        _profileValues.Clear();
         ServerLogout();
     }
 
@@ -123,6 +209,11 @@ public sealed partial class ServerPackPlugin : RynthPluginBase
         {
             if (!Host.HasInvokeChatParser || !Host.InvokeChatParser(command))
                 ChatLine($"[{RynthPluginInfo.Name}] RynthCore didn't take: " + command);
+        }
+        while (_tickActions.TryDequeue(out Action? action))
+        {
+            try { action(); }
+            catch (Exception ex) { LogTagged($"A queued action failed: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         bool active = Active;
@@ -173,7 +264,20 @@ public sealed partial class ServerPackPlugin : RynthPluginBase
     /// into the engine's current window and context (popped-out windows have their own).
     /// <paramref name="wantHeight"/> is the height it used. False until login. Render thread.
     /// </summary>
-    internal bool RenderEmbeddedCard(out float wantHeight)
+    internal bool RenderEmbeddedCard(out float wantHeight) => RenderEmbedded(_ui.RenderBody, "Server card", out wantHeight);
+
+    /// <summary>
+    /// RynthPluginRenderEmbed "section:server-&lt;id&gt;.&lt;page&gt;": one of the server's pages
+    /// (ServerPages) in RynthCore's Mini Remote. False for a page this plugin doesn't have, or before login.
+    /// </summary>
+    internal bool RenderEmbeddedPage(string pageId, out float wantHeight)
+    {
+        wantHeight = 0;
+        ServerPage? page = _pages.Find(p => p.Id == pageId);
+        return page != null && RenderEmbedded(page.Draw, "Page " + page.Label, out wantHeight);
+    }
+
+    private bool RenderEmbedded(Action draw, string what, out float wantHeight)
     {
         wantHeight = 0;
         if (!_loginComplete) return false;
@@ -184,16 +288,27 @@ public sealed partial class ServerPackPlugin : RynthPluginBase
         try
         {
             float startY = ImGui.GetCursorPosY();
-            _ui.RenderBody();
+            draw();
             wantHeight = MathF.Max(40f, ImGui.GetCursorPosY() - startY + 4f);
             return true;
         }
         catch (Exception ex)
         {
-            Host.Log($"[{RynthPluginInfo.Name}] Server card failed: {ex.Message}");
+            Host.Log($"[{RynthPluginInfo.Name}] {what} failed: {ex.Message}");
             return false;
         }
         finally { ImGui.SetCurrentContext(previous); }
+    }
+
+    // ── Chat ─────────────────────────────────────────────────────────────
+
+    /// <summary>Incoming chat (pump thread): the server's own code reads it (ServerChatText).</summary>
+    public override void OnChatWindowText(string? text, int chatType, ref int eat)
+    {
+        if (!_loginComplete || string.IsNullOrEmpty(text)) return;
+        bool eaten = eat != 0;
+        ServerChatText(text, chatType, ref eaten);
+        if (eaten) eat = 1;
     }
 
     // ── Commands ─────────────────────────────────────────────────────────
@@ -202,6 +317,7 @@ public sealed partial class ServerPackPlugin : RynthPluginBase
     {
         if (!_loginComplete || string.IsNullOrEmpty(text)) return;
         string trimmed = text.Trim();
+        ServerChatBar(trimmed);
         if (!trimmed.Equals(ChatCommand, StringComparison.OrdinalIgnoreCase)
             && !trimmed.StartsWith(ChatCommand + " ", StringComparison.OrdinalIgnoreCase))
             return;
@@ -216,8 +332,9 @@ public sealed partial class ServerPackPlugin : RynthPluginBase
         _commands.Enqueue(parts);
     }
 
-    private static bool IsVerb(string word) =>
-        word.ToLowerInvariant() is "show" or "hide" or "toggle" or "info" or "help" or "on" or "off" or "auto";
+    private bool IsVerb(string word) =>
+        word.ToLowerInvariant() is "show" or "hide" or "toggle" or "info" or "help" or "on" or "off" or "auto"
+        || _serverVerbs.Contains(word);
 
     /// <summary>Drops the server id: "/rserver coldeve info" -> "/rserver info".</summary>
     private static string[] Shift(string[] parts)

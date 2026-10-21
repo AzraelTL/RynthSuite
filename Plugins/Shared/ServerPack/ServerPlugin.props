@@ -17,7 +17,8 @@
     engine loads the plugin only for its server) and into RynthPluginInfo (the plugin's own use).
 
     Server-specific features go in the project as more files, through the partial hooks in
-    ServerPackPlugin.cs (ServerTick, ServerChatCommand, ...), so the shared code stays the same for all.
+    ServerPackPlugin.cs (ServerTick, ServerChatCommand, ServerChatText, ServerPages, ...), so the
+    shared code stays the same for all (the hooks and helpers are listed at the top of that file).
   -->
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
@@ -44,6 +45,11 @@
     <Compile Include="$(MSBuildThisFileDirectory)..\ImGuiNativeBinding.cs" Link="Shared\ImGuiNativeBinding.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)ServerPackInfo.cs" Link="ServerPack\ServerPackInfo.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)ServerPackModel.cs" Link="ServerPack\ServerPackModel.cs" />
+    <!-- The server's own pages, settings file, reply window and Refresh row (ServerPackPlugin.cs lists the hooks). -->
+    <Compile Include="$(MSBuildThisFileDirectory)ServerPackPages.cs" Link="ServerPack\ServerPackPages.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)ServerPackSettings.cs" Link="ServerPack\ServerPackSettings.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)ServerChatRequest.cs" Link="ServerPack\ServerChatRequest.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)ServerPackRefresh.cs" Link="ServerPack\ServerPackRefresh.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)ServerPackUi.cs" Link="ServerPack\ServerPackUi.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)ServerPackPlugin.cs" Link="ServerPack\ServerPackPlugin.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)ServerPackExports.cs" Link="ServerPack\ServerPackExports.cs" />

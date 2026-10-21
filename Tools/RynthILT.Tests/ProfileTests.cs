@@ -18,6 +18,7 @@ internal static unsafe class ProfileTests
     {
         r.Add("profile: RynthILT serves RynthServer.Profile for ilt", Interface);
         r.Add("profile: ILT's salvage reaches the Crafting tab's reader (Leather after the cap, jewelry stack)", Salvage);
+        r.Add("profile: ILT's trinkets reach the Crafting tab's reader (RynthAi's TinkerCatalog rule until 2026-10-20)", Trinkets);
     }
 
     private static void Interface()
@@ -43,6 +44,16 @@ internal static unsafe class ProfileTests
         Check.Eq(ProfileInterface.CurrentJson(true, "InfiniteLeaftide"), json, "unchanged state: the same JSON");
         Check.False(JsonDocument.Parse(ProfileInterface.CurrentJson(false, null)).RootElement.GetProperty("active").GetBoolean(),
             "before the Hub is up: not active");
+    }
+
+    private static void Trinkets()
+    {
+        var rule = ServerTrinketRule.Parse(ProfileInterface.CurrentJson(true, "InfiniteLeaftide"));
+        Check.True(rule != ServerTrinketRule.None, "the profile carries a trinket rule");
+        foreach (string t in new[] { "Ornate Compass", "Tinker's Goggles", "Jade Scarab", "Pocket Watch", "Puzzle Box", "Spinning Top" })
+            Check.True(rule.IsTrinket(t), t + " is a trinket");
+        foreach (string j in new[] { "Yellow Topaz Ring", "Gold Necklace", "Silver Bracelet" })
+            Check.False(rule.IsTrinket(j), j + " is Jewelry");
     }
 
     private static void Salvage()

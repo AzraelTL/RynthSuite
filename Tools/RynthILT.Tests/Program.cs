@@ -48,6 +48,12 @@ internal static class Program
         ChunkTargetTests.Register(runner);
         RingChainTests.Register(runner);
         VaultedDungeonsTests.Register(runner);
+        PetCaptureRulesTests.Register(runner);
+        PetAutomationTests.Register(runner);
+        RingEvadeTests.Register(runner);
+        VaultedSwitchTests.Register(runner);
+        T11Tests.Register(runner);
+        RemoteTabTests.Register(runner);
         // Before DataApiTests: its last test releases the RynthILT.Data table, which the breeding version test queries.
         BreedingTests.Register(runner);
         DataApiTests.Register(runner);

@@ -20,6 +20,8 @@
 // Fellowship.cs), Zone Share (ZoneShareManager) and the fellowship luminance share.
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Text;
 
 namespace RynthCore.Plugin.RynthILT.Hub;
 
@@ -44,6 +46,16 @@ internal enum IltKnown
     /// <summary>Off in ILT: off with the ILT world unless chat shows it on.</summary>
     ProfileOff,
 }
+
+/// <summary>The quest bonus list as the profile JSON carries it ("questBonus"), for RynthOracle's Quests tab.</summary>
+/// <param name="Disabled">The server has /qb turned off.</param>
+/// <param name="Generation">Bumped per parsed "/qb list"; 0 = not loaded this session.</param>
+/// <param name="Count">The server's quest bonus count; -1 = unknown.</param>
+/// <param name="Status">One line on the last request ("loading...", "12 completed, 3 incomplete", ...).</param>
+/// <param name="Completed">Completed bonus flags, sorted.</param>
+/// <param name="Incomplete">Incomplete bonus flags, sorted.</param>
+internal sealed record IltQuestBonusInfo(bool Disabled, int Generation, long Count, string Status,
+                                         IReadOnlyList<string> Completed, IReadOnlyList<string> Incomplete);
 
 internal static class IltFeatureCatalog
 {
@@ -256,6 +268,83 @@ internal static class IltFeatureCatalog
 
     /// <summary>The fellowship member limit: ACECustom's 29 on an ILT world, retail's 9 elsewhere.</summary>
     public static int FellowshipMax(bool iltWorld) => iltWorld ? IltFellowshipMax : RetailFellowshipMax;
+
+    /// <summary>
+    /// The "RynthILT.Server" profile JSON (schema in Plugins/Shared/RynthIltServerApi.cs). Pure:
+    /// everything comes in as arguments, so the tests build it without a client. Plain ASCII.
+    /// </summary>
+    public static string BuildProfileJson(bool iltWorld, string world, bool forced, string source, DateTime checkedUtc,
+                                          Func<string, IltTri> bit, IltQuestBonusInfo? questBonus = null)
+    {
+        var sb = new StringBuilder(4096);
+        sb.Append("{\"ilt\":").Append(iltWorld ? "true" : "false");
+        sb.Append(",\"world\":\"").Append(Escape(world)).Append('"');
+        sb.Append(",\"forced\":").Append(forced ? "true" : "false");
+        sb.Append(",\"source\":\"").Append(Escape(source)).Append('"');
+        sb.Append(",\"checked\":\"")
+          .Append(checkedUtc == DateTime.MinValue ? "" : checkedUtc.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture))
+          .Append('"');
+
+        sb.Append(",\"features\":[");
+        for (int i = 0; i < All.Length; i++)
+        {
+            IltFeatureInfo f = All[i];
+            if (i > 0) sb.Append(',');
+            sb.Append("{\"key\":\"").Append(Escape(f.Key))
+              .Append("\",\"label\":\"").Append(Escape(f.Label))
+              .Append("\",\"group\":\"").Append(Escape(f.Group))
+              .Append("\",\"state\":").Append(((int)StateOf(f, iltWorld, bit)).ToString(CultureInfo.InvariantCulture))
+              .Append(",\"where\":\"").Append(Escape(f.Where)).Append("\"}");
+        }
+        sb.Append(']');
+
+        int State(string key) => (int)StateOf(Find(key)!, iltWorld, bit);
+        sb.Append(",\"fellowship\":{\"maxMembers\":").Append(FellowshipMax(iltWorld).ToString(CultureInfo.InvariantCulture))
+          .Append(",\"zoneShare\":").Append(State("zone_share").ToString(CultureInfo.InvariantCulture))
+          .Append(",\"blackjack\":").Append(State("fellowship_blackjack").ToString(CultureInfo.InvariantCulture))
+          .Append(",\"luminanceShare\":").Append(State("fellowship_luminance").ToString(CultureInfo.InvariantCulture))
+          .Append('}');
+
+        // The /qb list (ILT worlds only): RynthOracle's Quests tab draws it.
+        if (questBonus != null && iltWorld)
+        {
+            sb.Append(",\"questBonus\":{\"disabled\":").Append(questBonus.Disabled ? "true" : "false")
+              .Append(",\"generation\":").Append(questBonus.Generation.ToString(CultureInfo.InvariantCulture))
+              .Append(",\"count\":").Append(questBonus.Count.ToString(CultureInfo.InvariantCulture))
+              .Append(",\"status\":\"").Append(Escape(questBonus.Status)).Append('"');
+            AppendList(sb, "completed", questBonus.Completed);
+            AppendList(sb, "incomplete", questBonus.Incomplete);
+            sb.Append('}');
+        }
+        sb.Append('}');
+        return sb.ToString();
+
+        static void AppendList(StringBuilder b, string name, IReadOnlyList<string> items)
+        {
+            b.Append(",\"").Append(name).Append("\":[");
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (i > 0) b.Append(',');
+                b.Append('"').Append(Escape(items[i])).Append('"');
+            }
+            b.Append(']');
+        }
+    }
+
+    /// <summary>JSON string body: quotes, backslashes and control characters escaped, anything non-ASCII as \uXXXX.</summary>
+    private static string Escape(string? s)
+    {
+        if (string.IsNullOrEmpty(s)) return string.Empty;
+        var sb = new StringBuilder(s.Length + 8);
+        foreach (char c in s)
+        {
+            if (c == '"') sb.Append("\\\"");
+            else if (c == '\\') sb.Append("\\\\");
+            else if (c < 0x20 || c > 0x7E) sb.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+            else sb.Append(c);
+        }
+        return sb.ToString();
+    }
 
     /// <summary>The chat listing for "/ra hub features": one line per feature, ASCII only.</summary>
     public static List<string> BuildChatLines(bool iltWorld, Func<string, IltTri> bit)

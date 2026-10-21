@@ -7,6 +7,7 @@
 // account limit, botting policy, its features), the commands it adds, its links, and how to set an
 // account up for it in the launcher. Render thread only.
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using ImGuiNET;
 using RynthCore.Plugin.Shared;
@@ -24,6 +25,7 @@ internal sealed class ServerPackUi
     private readonly string _pluginLabel;
     private readonly Func<string?> _world;
     private readonly string _windowTitle;
+    private readonly IReadOnlyList<ServerPage> _pages;
     private string _status = string.Empty;
 
     /// <summary>The standalone window is open ("/rserver").</summary>
@@ -31,21 +33,42 @@ internal sealed class ServerPackUi
 
     /// <param name="pluginLabel">"RynthColdeve 0.1.0", for the title and the card.</param>
     /// <param name="world">The world name the client reports now (null when unknown).</param>
-    public ServerPackUi(ServerPackModel model, string pluginLabel, Func<string?> world)
+    /// <param name="pages">The server's own pages: tabs of the window after the card.</param>
+    public ServerPackUi(ServerPackModel model, string pluginLabel, Func<string?> world, IReadOnlyList<ServerPage>? pages = null)
     {
         _model = model;
         _pluginLabel = pluginLabel;
         _world = world;
+        _pages = pages ?? Array.Empty<ServerPage>();
         _windowTitle = model.Info.Name + " server (" + pluginLabel + ")##server_" + model.Info.Id;
     }
 
-    /// <summary>The standalone window, while open.</summary>
+    /// <summary>The standalone window, while open: the card, and the server's pages as tabs when it has some.</summary>
     public void RenderWindow()
     {
         if (!WindowOpen) return;
-        ImGui.SetNextWindowSize(new Vector2(460, 520), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(new Vector2(_pages.Count > 0 ? 560 : 460, 520), ImGuiCond.FirstUseEver);
         bool open = WindowOpen;
-        if (ImGui.Begin(_windowTitle, ref open)) RenderBody();
+        if (ImGui.Begin(_windowTitle, ref open))
+        {
+            if (_pages.Count == 0) RenderBody();
+            else if (ImGui.BeginTabBar("##server_tabs_" + _model.Info.Id))
+            {
+                if (ImGui.BeginTabItem("Server##card"))
+                {
+                    RenderBody();
+                    ImGui.EndTabItem();
+                }
+                foreach (ServerPage page in _pages)
+                {
+                    if (!ImGui.BeginTabItem(page.Label + "##page_" + page.Id)) continue;
+                    if (ImGui.BeginChild("##page_body_" + page.Id)) page.Draw();
+                    ImGui.EndChild();
+                    ImGui.EndTabItem();
+                }
+                ImGui.EndTabBar();
+            }
+        }
         ImGui.End();
         WindowOpen = open;
     }

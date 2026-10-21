@@ -1,9 +1,11 @@
 // PetsTab.cs — The Mini Remote's Pets tab.
 // Originally SilentKelpie's IltPets (ILT Hub). Summoning is every server's, so the tab stayed in
-// RynthAi when the ILT Hub went to the RynthILT plugin (2026-10-13). The ACECustom bits it reads
-// (the refill / mastery charm server flags, whether this is an ILT world) come from RynthILT
-// (RynthILT.Hub GetFeature / IsIltWorld; unknown without it, which never spends pyreals); the
-// /pets and /shinies logs moved to RynthILT, which draws them at the bottom of this tab.
+// RynthAi when the ILT Hub went to the RynthILT plugin (2026-10-13). What is a server's own lives
+// in that server's plugin and is drawn here through its hub (ServerHubClient, RynthILT.Hub): RynthILT
+// draws ACECustom's pet charms, siphon auto-capture and the /pets and /shinies logs under the
+// roster, adds the Breeding sub-tab, and answers whether an empty essence may be summoned
+// (2026-10-20: charms, capture and that gate moved out of this file). Without a server plugin the
+// tab is the retail one.
 //
 //   * Pet roster (UtilityBelt Pets-tab style): every carried pet essence with three stat
 //     lines (bond / level / craft · sex / mutations / potency / mastery · ratings / uses /
@@ -18,18 +20,14 @@
 //       - Cosmetic: the tick picks a display pet; "Keep cosmetic pet out" summons it in
 //         peace mode and dismisses it when PetManager needs the slot for a fight.
 //     Summon / Despawn act on the highlighted row (or the type's chosen pet).
-//   * Pet charms: Summon Essence Refill (server refills an empty essence from banked
-//     pyreals) and Universal Summoning Mastery, read from the charm appraisal text and the
-//     player bools the server stamps. Feeds PetManager.AllowSummonOnEmpty.
+//   * Summon from an empty essence: PetManager.AllowSummonOnEmpty asks the server plugin
+//     (RynthILT.Hub AllowSummonOnEmpty: ACECustom's refill charm); no server plugin = never.
 //   * Healing pet (UB HealingBuddy subset): summons a heal pet when HP drops, dismisses it
 //     after the heal lands, holds PetManager's combat summons while it is out.
-//   * Auto siphon capture (ACECustom MonsterCapture): when enabled, uses the chosen lens on the
-//     nearest attackable creature within 5 m once it is <=20% health or under 20 HP (Asheron's
-//     Lens skips the health gate). Resonance still needs a prior failed capture on the server.
-//   * /pets and /shinies logs: RynthILT's (RynthILT.Hub section "pets-logs", ILT only).
-//   * Breeding sub-tab (Infinite Leaftide only): the tab becomes Roster | Breeding when RynthILT
-//     offers it (an ILT world whose server hasn't reported pet breeding off). Its whole body is
-//     RynthILT's pet breeding tracker (RynthILT.Hub section "pets-breeding"); this tab only hosts it.
+//   * The server plugin's sections under the roster (RynthILT: "pets-charms", "pets-capture",
+//     "pets-logs"); each draws nothing off its server.
+//   * Sub-tabs: the tab becomes Roster | ... when the server plugin offers sub-tabs for it
+//     (GetSubTabs "pets"; RynthILT's Breeding). Each sub-tab's whole body is the plugin's section.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -60,17 +58,6 @@ internal sealed class PetsTab
     private long _lastHealThink;
     private string _healStatus = "idle";
 
-    // Auto siphon-lens capture (ACECustom MonsterCapture).
-    private long _lastCaptureThink;
-    private long _captureCooldownUntil;
-    private volatile string _captureStatus = "off";
-    private const long CaptureThinkMs = 250;
-    private const long CaptureCooldownMs = 2500;
-    private const long CaptureFailBackoffMs = 8000;
-    // Hard cap on lens uses: the loop stops on reply strings we only guess at, so it is also bounded
-    // per creature and over all creatures (PetCaptureThrottle).
-    private readonly PetCaptureThrottle _captureThrottle = new();
-
     // Roster snapshot (rebuilt on the pump thread, read by the render thread).
     private volatile PetStats[] _pets = Array.Empty<PetStats>();
     private long _lastPetScan;
@@ -89,11 +76,6 @@ internal sealed class PetsTab
     public string HudPetName => _hudPetName;
     /// <summary>Mini Remote pet status: "Out", "Ready", "Empty" or "Healing" (empty when there is no pet).</summary>
     public string HudPetStatus => _hudPetStatus;
-
-    // Charm / supply status cached for the render thread.
-    private volatile bool _uiRefillActive;
-    private volatile bool _uiMasteryActive;
-    private volatile bool _uiHasCasting = true;
 
     // Render-thread only: highlighted row and the sorted view cache.
     private int _highlightId;
@@ -227,38 +209,14 @@ internal sealed class PetsTab
         return _ctx.Inventory.Items().FirstOrDefault(wo => ClassifyKind(wo, out _) == PetKind.Healing);
     }
 
-    // ── Charms / gates ──────────────────────────────────────────────────────
-
-    /// <summary>Summon Essence Refill charm is carried and switched on (or the server stamped the player bool).</summary>
-    public bool RefillCharmActive()
-    {
-        if (_ctx.Inventory.PlayerBool(MiniRemoteInventory.BoolPyrealRefillActive)) return true;
-        var charm = _ctx.Inventory.FindByWcid(MiniRemoteInventory.WcidSummonRefillCharm);
-        return charm != null && _ctx.Inventory.CharmStatus(charm) == CharmState.On;
-    }
-
-    public bool MasteryCharmActive()
-    {
-        if (_ctx.Ilt.IsOff(RynthIltHub.FeatureUniversalMastery)) return false;
-        if (_ctx.Inventory.PlayerBool(MiniRemoteInventory.BoolUniversalMasteryActive)) return true;
-        var charm = _ctx.Inventory.FindByWcid(MiniRemoteInventory.WcidUniversalMasteryCharm);
-        return charm != null && _ctx.Inventory.CharmStatus(charm) == CharmState.On;
-    }
+    // ── Gates ───────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// PetManager hook: summon from an empty essence (spends banked pyreals) only when the
-    /// player opted in, the refill charm is active, and the server has positively confirmed
-    /// the feature: either /ilt features reported pet_refill on, or the server stamped the
-    /// player's refill bool. An unknown feature state never spends.
+    /// PetManager hook: summon from an empty essence only when the server plugin says the server
+    /// refills it (RynthILT: ACECustom's Summon Essence Refill charm, opted in and confirmed by the
+    /// server). Without a server plugin, or when it is unsure, never: an empty essence isn't used.
     /// </summary>
-    public bool AllowSummonOnEmpty()
-    {
-        if (!S.UsePyrealRefillPath || !_ctx.Ilt.IsIltWorld || !RefillCharmActive()) return false;
-        bool confirmed = _ctx.Ilt.IsOn(RynthIltHub.FeaturePetRefill)
-                         || _ctx.Inventory.PlayerBool(MiniRemoteInventory.BoolPyrealRefillActive);
-        if (!confirmed) RynthLog.Trace(LogCat.Pets, "summon-on-empty refused: pet_refill not confirmed by the server");
-        return confirmed;
-    }
+    public bool AllowSummonOnEmpty() => _ctx.ServerHub.AllowSummonOnEmpty();
 
     /// <summary>PetManager hook: hold combat summons while the heal pet cycle is running.</summary>
     public bool HoldCombatSummons() => _heal != HealState.Idle;
@@ -293,20 +251,11 @@ internal sealed class PetsTab
         {
             _lastPetScan = nowMs;
             RebuildPetSnapshot(autoAppraise: true);
-            // Host reads (and appraisal requests) happen here, never on the render thread.
-            _uiRefillActive = RefillCharmActive();
-            _uiMasteryActive = MasteryCharmActive();
-            _uiHasCasting = _ctx.Inventory.HasCastingSupplies();
         }
         if (nowMs - _lastHealThink >= 250)
         {
             _lastHealThink = nowMs;
             TickHealing(nowMs);
-        }
-        if (nowMs - _lastCaptureThink >= CaptureThinkMs)
-        {
-            _lastCaptureThink = nowMs;
-            TickCapture(nowMs);
         }
         if (nowMs - _lastPresenceThink >= 1000)
         {
@@ -354,49 +303,8 @@ internal sealed class PetsTab
             }
         }
 
-        // ACECustom MonsterCapture replies — back off after a refuse so we don't burn lenses.
-        if (S.AutoCaptureEnabled && text.Length > 0)
-        {
-            long now = MiniRemoteContext.NowMs;
-            if (PetCaptureLines.IsSuccess(text))
-            {
-                _captureStatus = "captured";
-                _captureThrottle.RecordSuccess();
-                _captureCooldownUntil = now + CaptureCooldownMs;
-            }
-            else if (ContainsAny(text,
-                    "too strong",
-                    "blind rage",
-                    "cannot be siphoned",
-                    "cannot be captured",
-                    "No creatures nearby",
-                    "already dead",
-                    "already being captured",
-                    "hasn't failed a capture",
-                    "echo has faded",
-                    "Failed to consume"))
-            {
-                _captureStatus = "refused: " + Truncate(text, 48);
-                _captureCooldownUntil = now + CaptureFailBackoffMs;
-            }
-            else if (ContainsAny(text, "siphon failed", "lens shatters", "resisted your capture", "resonance fades"))
-            {
-                _captureStatus = "failed (creature may enrage)";
-                _captureCooldownUntil = now + CaptureFailBackoffMs;
-            }
-        }
         return false;
     }
-
-    private static bool ContainsAny(string text, params string[] parts)
-    {
-        foreach (string p in parts)
-            if (text.IndexOf(p, StringComparison.OrdinalIgnoreCase) >= 0) return true;
-        return false;
-    }
-
-    private static string Truncate(string s, int max)
-        => s.Length <= max ? s : s[..(max - 3)] + "...";
 
     public void OnLogout()
     {
@@ -406,9 +314,6 @@ internal sealed class PetsTab
         _lastSummonEssenceId = 0;
         _cosmeticOutEssenceId = 0;
         _cosmeticNextAt = 0;
-        _captureCooldownUntil = 0;
-        _captureStatus = "off";
-        _captureThrottle.Reset();
     }
 
     // ── Healing pet ─────────────────────────────────────────────────────────
@@ -478,154 +383,6 @@ internal sealed class PetsTab
     }
 
     // ── Active pet ──────────────────────────────────────────────────────────
-
-    // ── Auto siphon capture (ACECustom MonsterCapture) ───────────────────────
-
-    /// <summary>
-    /// When Auto Capture is on, use the chosen siphon lens on the nearest attackable creature
-    /// within 5 m once ACECustom's health gate is met (≤20% or under 20 HP; Asheron's skips it).
-    /// The server picks the nearest creature itself — we only fire when that nearest candidate is
-    /// already weak enough, so a full-health neighbour closer than the wounded target won't waste a lens.
-    /// </summary>
-    private void TickCapture(long now)
-    {
-        if (!S.AutoCaptureEnabled)
-        {
-            _captureStatus = "off";
-            return;
-        }
-        if (_ctx.Ilt.Loaded && _ctx.Ilt.IsOff(RynthIltHub.FeatureMonsterCapture))
-        {
-            _captureStatus = "monster capture disabled on this server";
-            return;
-        }
-        if (now < _captureCooldownUntil)
-        {
-            long left = (_captureCooldownUntil - now + 999) / 1000;
-            if (!_captureStatus.StartsWith("waiting", StringComparison.Ordinal))
-                _captureStatus = $"waiting {left}s";
-            return;
-        }
-        if (_ctx.Inventory.IsBusy) { _captureStatus = "busy"; return; }
-
-        var lens = PetCaptureRules.LensAt(S.CaptureLensIndex);
-        var lensItem = _ctx.Inventory.FindByWcid(lens.Wcid);
-        if (lensItem == null)
-        {
-            _captureStatus = $"no {lens.Name} carried";
-            return;
-        }
-
-        if (!TryFindNearestCaptureTarget(out WorldObject? target, out double distM, out uint curHp, out uint maxHp))
-        {
-            _captureStatus = "no attackable creature within 5 m";
-            return;
-        }
-
-        if (!PetCaptureRules.InRange(distM))
-        {
-            _captureStatus = $"{target!.Name} at {distM:0.0} m (need <={PetCaptureRules.CaptureRangeM:0} m)";
-            return;
-        }
-
-        if (!PetCaptureRules.CanAttempt(lens, curHp, maxHp))
-        {
-            float pct = maxHp > 0 ? curHp * 100f / maxHp : -1f;
-            _captureStatus = pct >= 0
-                ? $"{target!.Name} at {pct:0}% / {curHp} HP (need <={PetCaptureRules.CaptureMaxHealthFraction:P0} or <{PetCaptureRules.CaptureMaxHealthPoints} HP)"
-                : $"{target!.Name}: health unknown";
-            return;
-        }
-
-        if (!_captureThrottle.MayAttempt(target!.Id, now))
-        {
-            _captureStatus = $"{target.Name}: {PetCaptureThrottle.MaxTriesPerTarget} tries, no capture; left alone for {_captureThrottle.BlockedSecondsLeft(target.Id, now)}s";
-            return;
-        }
-
-        if (!_ctx.Inventory.Use(lensItem))
-        {
-            _captureStatus = "UseObject refused";
-            return;
-        }
-        _captureThrottle.RecordAttempt(target.Id, now);
-        if (_captureThrottle.Exhausted)
-        {
-            // Backstop: this many lenses with no recognized capture means something is off. Stop, don't keep burning them.
-            S.AutoCaptureEnabled = false;
-            RynthLog.Write(LogCat.Pets,
-                $"[Pets] auto-capture: {PetCaptureThrottle.MaxTriesWithoutSuccess} lens uses without a capture reply; auto-capture switched off");
-        }
-
-        float shown = maxHp > 0 ? curHp * 100f / maxHp : 0f;
-        _captureStatus = $"using {lens.Name} on {target!.Name} ({shown:0}% / {curHp} HP)";
-        _captureCooldownUntil = now + CaptureCooldownMs;
-        RynthLog.Write(LogCat.Pets,
-            $"[Pets] auto-capture: {lens.Name} -> 0x{target.Id:X8} '{target.Name}' d={distM:0.0}m hp={curHp}/{maxHp}");
-    }
-
-    /// <summary>
-    /// Nearest attackable landscape creature within capture range, with vitals from the host when
-    /// available else the cache health ratio (fraction-only gate).
-    /// </summary>
-    private bool TryFindNearestCaptureTarget(out WorldObject? best, out double bestDist, out uint curHp, out uint maxHp)
-    {
-        best = null;
-        bestDist = double.MaxValue;
-        curHp = maxHp = 0;
-        var cache = _ctx.Inventory.Cache;
-        if (cache == null) return false;
-        uint playerId = _ctx.Inventory.PlayerId;
-        if (playerId == 0) return false;
-        int pid = unchecked((int)playerId);
-        string ownPrefix = _ctx.CharName.Length > 0 ? _ctx.CharName + "'s " : string.Empty;
-
-        foreach (var wo in cache.GetLandscape())
-        {
-            if (wo == null || wo.Id == pid) continue;
-            if (wo.ObjectClass != AcObjectClass.Monster) continue;
-            if (ownPrefix.Length > 0 && wo.Name.StartsWith(ownPrefix, StringComparison.Ordinal)) continue;
-            // Skip corpses / non-attackable when the host can tell.
-            if (_ctx.Host.HasObjectIsAttackable && !_ctx.Host.ObjectIsAttackable(unchecked((uint)wo.Id)))
-                continue;
-
-            double d = cache.Distance(pid, wo.Id);
-            if (d < 0 || d > PetCaptureRules.CaptureRangeM || d >= bestDist) continue;
-
-            if (!TryReadCreatureVitals(wo.Id, cache, out uint c, out uint m))
-                continue;
-            if (c == 0) continue; // dead
-
-            best = wo;
-            bestDist = d;
-            curHp = c;
-            maxHp = m;
-        }
-        return best != null;
-    }
-
-    /// <summary>
-    /// Absolute vitals via TryGetTargetVitals when bound; else cache health ratio as a 0–1000 scale
-    /// so only the fraction half of ACECustom's gate can fire.
-    /// </summary>
-    private bool TryReadCreatureVitals(int id, WorldObjectCache cache, out uint cur, out uint max)
-    {
-        cur = max = 0;
-        if (_ctx.Host.HasGetTargetVitals
-            && _ctx.Host.TryGetTargetVitals(unchecked((uint)id), out uint h, out uint mh, out _, out _, out _, out _)
-            && mh > 0)
-        {
-            cur = h;
-            max = mh;
-            return true;
-        }
-        float ratio = cache.GetHealthRatio(id);
-        if (ratio < 0f) return false;
-        // Synthetic scale: ratio 0.20 → 200/1000 so IsWeakEnough's fraction half matches.
-        max = 1000;
-        cur = (uint)Math.Clamp((int)Math.Round(ratio * 1000f), 1, 1000);
-        return true;
-    }
 
     /// <summary>The live "&lt;Me&gt;'s …" creature (server pet naming), or null.</summary>
     private WorldObject? FindOwnPet()
@@ -909,28 +666,54 @@ internal sealed class PetsTab
 
     // ── UI (render thread) ──────────────────────────────────────────────────
 
-    /// <summary>Set from any thread: the next frame opens the Breeding sub-tab ("/ra hub open breeding").</summary>
-    private volatile bool _selectBreeding;
+    /// <summary>Set from any thread: the sub-tab the next frame opens ("/ra hub open breeding"); null = none.</summary>
+    private volatile string? _selectSubTab;
 
-    /// <summary>Shows the Breeding sub-tab on the next frame (any thread).</summary>
-    public void SelectBreeding() => _selectBreeding = true;
+    /// <summary>Shows sub-tab <paramref name="id"/> (a server plugin's section id) on the next frame (any thread).</summary>
+    public void SelectSubTab(string id) => _selectSubTab = id;
+
+    /// <summary>The sub-tab a command asked for and the next frame will open; null = none. For the tests.</summary>
+    internal string? PendingSubTab => _selectSubTab;
+
+    /// <summary>The sub-tabs the server plugin adds to this tab now (RynthILT's Breeding); empty without one.</summary>
+    public IReadOnlyList<ServerTabInfo> SubTabs() => _ctx.ServerHub.SubTabs(RynthIltHub.TabParentPets);
 
     /// <summary>
-    /// RynthILT offers the Breeding sub-tab: it calls this world Infinite Leaftide and the server
-    /// hasn't reported pet breeding off. False without RynthILT. Any thread.
+    /// The shown sub-tab a "/ra hub open|tab &lt;name&gt;" names: its label ("Breeding"), its id, or its id
+    /// without the "pets-" prefix ("breeding"; at least four letters of it, "breed"), case-insensitive.
+    /// Null when the server plugin offers none such.
     /// </summary>
-    public bool BreedingOffered => _ctx.Ilt.IsIltWorld && !_ctx.Ilt.IsOff(RynthIltHub.FeaturePetBreeding);
+    public string? FindSubTab(string name)
+    {
+        string n = (name ?? string.Empty).Trim();
+        if (n.Length == 0) return null;
+        foreach (ServerTabInfo t in SubTabs())
+        {
+            if (!t.Shown) continue;
+            string shortId = t.Id.StartsWith(SubTabPrefix, StringComparison.OrdinalIgnoreCase) ? t.Id[SubTabPrefix.Length..] : t.Id;
+            if (t.Label.Equals(n, StringComparison.OrdinalIgnoreCase) || t.Id.Equals(n, StringComparison.OrdinalIgnoreCase)
+                || shortId.Equals(n, StringComparison.OrdinalIgnoreCase)
+                || (n.Length >= 4 && shortId.StartsWith(n, StringComparison.OrdinalIgnoreCase)))
+                return t.Id;
+        }
+        return null;
+    }
+
+    private const string SubTabPrefix = RynthIltHub.TabParentPets + "-";
 
     /// <summary>
-    /// The Pets tab: the universal roster, and on Infinite Leaftide the Roster | Breeding sub-tabs
-    /// (Breeding is drawn by RynthILT).
+    /// The Pets tab: the universal roster, and Roster | ... sub-tabs when the server plugin adds some
+    /// (each drawn by that plugin).
     /// </summary>
     public void Render()
     {
         var settings = _ctx.Settings;
         if (settings == null) { ImGui.TextDisabled("Not logged in."); return; }
 
-        if (!BreedingOffered)
+        var subTabs = SubTabs();
+        bool any = false;
+        foreach (ServerTabInfo t in subTabs) any |= t.Shown;
+        if (!any)
         {
             RenderRoster(settings);
             return;
@@ -941,19 +724,34 @@ internal sealed class PetsTab
             RenderRoster(settings);
             ImGui.EndTabItem();
         }
-        ImGuiTabItemFlags breedFlags = _selectBreeding ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
-        _selectBreeding = false;
-        if (BeginTab(BreedingTabLabel, breedFlags))
+        string? select = System.Threading.Interlocked.Exchange(ref _selectSubTab, null);
+        foreach (ServerTabInfo t in subTabs)
         {
-            // RynthILT's tracker; an older RynthILT (before 0.3.1) has no such section and draws nothing.
-            if (!_ctx.Ilt.RenderSection(RynthIltHub.SectionPetBreeding))
-                ImGui.TextDisabled("This RynthILT has no pet breeding tracker; update RynthILT to 0.3.1 or later.");
+            if (!t.Shown) continue;
+            ImGuiTabItemFlags flags = select != null && select.Equals(t.Id, StringComparison.OrdinalIgnoreCase)
+                ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
+            if (!BeginTab(SubTabLabel(t), flags)) continue;
+            if (!_ctx.ServerHub.RenderSection(t.Id))
+                SafeImGui.TextDisabled("Not ready (the server plugin isn't drawing it).");
             ImGui.EndTabItem();
         }
         ImGui.EndTabBar();
     }
 
-    private static readonly byte[] BreedingTabLabel = System.Text.Encoding.UTF8.GetBytes("Breeding##petbreeding\0");
+    // Sub-tab labels as NUL-terminated UTF-8, built once per label (the tab bar runs every frame).
+    private readonly Dictionary<string, byte[]> _subTabLabels = new(StringComparer.Ordinal);
+
+    private byte[] SubTabLabel(ServerTabInfo t)
+    {
+        string key = t.Label + "##petsub_" + t.Id;
+        if (!_subTabLabels.TryGetValue(key, out byte[]? label))
+        {
+            label = new byte[System.Text.Encoding.UTF8.GetByteCount(key) + 1];
+            System.Text.Encoding.UTF8.GetBytes(key, 0, key.Length, label, 0);
+            _subTabLabels[key] = label;
+        }
+        return label;
+    }
 
     /// <summary>
     /// BeginTabItem with flags but no close button (ImGui.NET pairs the flags overload with p_open,
@@ -965,58 +763,18 @@ internal sealed class PetsTab
             return ImGuiNative.igBeginTabItem(label, null, flags) != 0;
     }
 
-    /// <summary>The universal roster: types, summons, ILT charms, healing pets and RynthILT's /pets logs.</summary>
+    /// <summary>The universal roster: types, summons, healing pets, and the server plugin's sections.</summary>
     private void RenderRoster(LegacyUiSettings settings)
     {
         RenderRosterHeader(settings);
         RenderRosterTable();
-        // The tab is universal; the charms and the /pets and /shinies logs are ILT's (the logs RynthILT's).
-        bool ilt = _ctx.Ilt.IsIltWorld;
-        if (ilt)
-        {
-            ImGui.Separator();
-            RenderCharms();
-            ImGui.Separator();
-            RenderCapture();
-        }
+        // The server plugin's own pet features (RynthILT: ACECustom's charms and siphon capture);
+        // each draws its own separator, and nothing off its server.
+        _ctx.ServerHub.RenderSection(RynthIltHub.SectionPetCharms);
+        _ctx.ServerHub.RenderSection(RynthIltHub.SectionPetCapture);
         ImGui.Separator();
         RenderHealing();
-        _ctx.Ilt.RenderSection(RynthIltHub.SectionPetLogs);
-    }
-
-    /// <summary>ACECustom siphon-lens auto-capture (ILT only): enable + which lens to use.</summary>
-    private void RenderCapture()
-    {
-        ImGui.TextColored(LegacyDashboardRenderer.ColTeal, "Monster capture");
-        bool captureOff = _ctx.Ilt.IsOff(RynthIltHub.FeatureMonsterCapture);
-        ImGui.BeginDisabled(captureOff);
-        bool en = S.AutoCaptureEnabled;
-        if (ImGui.Checkbox("Auto-capture when a creature is weak enough", ref en))
-        {
-            S.AutoCaptureEnabled = en;
-            _captureThrottle.Reset();
-        }
-        if (ImGui.IsItemHovered())
-        {
-            SafeImGui.SetTooltip(
-                "Uses the selected siphon lens on the nearest attackable creature within 5 m once it is\n" +
-                "at or below 20% health or under 20 HP (ACECustom MonsterCapture). Asheron's Lens skips\n" +
-                "the health gate. Resonance Lens still needs a prior failed capture on the server.\n" +
-                "Off by default. Stops on its own after 5 tries on one creature (it is left alone for 2 min)\n" +
-                "or 15 lens uses in a row with no capture.");
-        }
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(120);
-        int lens = Math.Clamp(S.CaptureLensIndex, 0, PetCaptureRules.LensNames.Length - 1);
-        if (ImGui.Combo("##petcapturelens", ref lens, PetCaptureRules.LensNames, PetCaptureRules.LensNames.Length))
-            S.CaptureLensIndex = lens;
-        if (ImGui.IsItemHovered())
-            SafeImGui.SetTooltip("Which siphon lens to use. Must be carried in your pack.");
-        ImGui.EndDisabled();
-        if (captureOff)
-            SafeImGui.TextDisabled("Monster capture is disabled on this server.");
-        else
-            SafeImGui.TextDisabled("Status: " + _captureStatus);
+        _ctx.ServerHub.RenderSection(RynthIltHub.SectionPetLogs);
     }
 
     /// <summary>Type / Sort combos, action buttons, the active-summon line and per-type options.</summary>
@@ -1188,22 +946,6 @@ internal sealed class PetsTab
         "Nether"    => new Vector4(0.75f, 0.50f, 0.90f, 1f),
         _           => new Vector4(0.95f, 0.95f, 0.95f, 1f),
     };
-
-    private void RenderCharms()
-    {
-        ImGui.TextColored(LegacyDashboardRenderer.ColTeal, "Pet charms");
-        bool refillOff = _ctx.Ilt.IsOff(RynthIltHub.FeaturePetRefill);
-        ImGui.TextUnformatted("Summon Essence Refill: " + (refillOff ? "disabled on this server" : _uiRefillActive ? "ON" : "off / not carried"));
-        ImGui.BeginDisabled(refillOff);
-        bool usePath = S.UsePyrealRefillPath;
-        if (ImGui.Checkbox("Summon from empty essences while the refill charm is ON (spends banked pyreals)", ref usePath))
-            S.UsePyrealRefillPath = usePath;
-        ImGui.EndDisabled();
-        ImGui.TextUnformatted("Universal Summoning Mastery: "
-            + (_ctx.Ilt.IsOff(RynthIltHub.FeatureUniversalMastery) ? "disabled on this server" : _uiMasteryActive ? "ON" : "off / not carried"));
-        if (!_ctx.Ilt.IsOff(RynthIltHub.FeatureRequireComps) && !_uiHasCasting)
-            ImGui.TextColored(LegacyDashboardRenderer.ColAmber, "No spell components or Infinite Casting Stone carried.");
-    }
 
     private void RenderHealing()
     {

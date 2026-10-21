@@ -40,11 +40,12 @@ public sealed class HudState
     public bool MiniShowPet = true;
     public bool MiniShowGems = true;
     public bool MiniShowToggles = true;
+    /// <summary>Obsolete since 2026-10-20 (kept so huds.json loads): the Bank section's switch is RynthILT's (copied once).</summary>
     public bool MiniShowBank = true;
     public bool MiniShowRebuff = true;
     /// <summary>Chat translator row: on/off, receive / send language swap.</summary>
     public bool MiniShowTranslate = true;
-    /// <summary>Temple guardian row: the last riddle answer with a Give button (only while one is recent).</summary>
+    /// <summary>Obsolete since 2026-10-20 (kept so huds.json loads): the Guardian line's switch is RynthILT's (copied once).</summary>
     public bool MiniShowGuardian = true;
     /// <summary>Gem grid slots, row-major from the top-left (empty Name = unassigned).</summary>
     public List<HudItemEntry> MiniRemoteSlots = new();

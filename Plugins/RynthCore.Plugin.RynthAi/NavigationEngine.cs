@@ -2970,9 +2970,24 @@ internal sealed class NavigationEngine
         }
     }
 
+    // Already stopped, StopMovement sends a reminder at most this often (as StartForward re-asserts).
+    private const long StopReassertMs = 1000;
+    private long _lastStopSentMs;
+    private bool _stopSent;
+
     private void StopMovement()
     {
+        // The pause, chat, portal, settle and idle paths call this every tick. It sent autorun-off and
+        // both turn keys each time even with the character standing still: in portal space the game
+        // thread takes none of them, 137 piled up and ran 12.7 s late on the far side, against the next
+        // route leg (Dargoth Hera's report, 2026-10-19). Now it sends when something moves, and a
+        // reminder once a second while stopped (something else may have started the character).
+        bool moving = _isMovingForward || _isTurning || _tier1TurnDir != 0;
         _isTurning = false;
+        long now = Now;
+        if (!moving && _stopSent && now - _lastStopSentMs < StopReassertMs) return;
+        _stopSent = true;
+        _lastStopSentMs = now;
         StopForward();
         ClearTurnMotions();
     }

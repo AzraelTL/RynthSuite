@@ -1,17 +1,37 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!-- RynthConquest: the Conquest (ConquestAC) server plugin. The build is shared
-       (..\Shared\ServerPack\ServerPlugin.props); ServerData.cs holds what is known about the server. -->
+       (..\Shared\ServerPack\ServerPlugin.props); ServerData.cs holds what is known about the server.
+       Conquest's own features (ConquestPlugin.cs, Conquest\) came from RynthOracle on 2026-10-20: the
+       bank and its auto-deposit, augmentations, levels past 275, fellowships, custom quests and the
+       /top boards, as pages of the Mini Remote's Server section. -->
   <PropertyGroup>
     <AssemblyName>RynthCore.Plugin.RynthConquest</AssemblyName>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <RynthPluginServerId>conquest</RynthPluginServerId>
     <RynthPluginServerName>Conquest</RynthPluginServerName>
     <RynthPluginServerHosts>acconquest.ddns.net</RynthPluginServerHosts>
     <RynthPluginServerWorldNames>Conquest|ConquestAC</RynthPluginServerWorldNames>
-    <RynthPluginDescription>Conquest only: the server card (rules, account limits, botting policy, links, account setup) in the Mini Remote.</RynthPluginDescription>
+    <RynthPluginDescription>Conquest only: the server card, and Conquest's bank (with auto-deposit), augmentations, levels past 275, fellowships, custom quests and leaderboards in the Mini Remote.</RynthPluginDescription>
   </PropertyGroup>
 
   <Import Project="..\Shared\ServerPack\ServerPlugin.props" />
+
+  <ItemGroup>
+    <!-- RynthOracle's /myquests parser and its helpers (linked source, so both read the flags alike):
+         the custom quest worklist's status. -->
+    <Compile Include="..\RynthCore.Plugin.RynthOracle\Data\QuestFlags.cs" Link="Shared\QuestFlags.cs" />
+    <Compile Include="..\RynthCore.Plugin.RynthOracle\Data\TimeText.cs" Link="Shared\TimeText.cs" />
+    <Compile Include="..\RynthCore.Plugin.RynthOracle\Data\Csv.cs" Link="Shared\Csv.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Oracle of Dereth's Conquest custom quest list (MIT, by Advis Eveldan / advis61). -->
+    <EmbeddedResource Include="Resources\customquests.csv" LogicalName="RynthConquest.customquests.csv" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="THIRD_PARTY_NOTICES.md" CopyToPublishDirectory="PreserveNewest" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 
 </Project>

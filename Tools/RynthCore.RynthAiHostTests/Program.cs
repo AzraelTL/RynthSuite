@@ -92,13 +92,17 @@ internal static class Program
         TargetingTests.Register(runner);
         LootAddItemTests.Register(runner);
         GiveTests.Register(runner);
+        UbCompatTests.Register(runner);
+        MetaAuditTests.Register(runner);
+        MetaSampleCompatTests.Register(runner);
         IdRefusalTests.Register(runner);
         DungeonMapBakeTests.Register(runner);
         MonsterEditorTests.Register(runner);
         InstallPathsTests.Register(runner);
         PetRefillTests.Register(runner);
         AutoStackTests.Register(runner);
-        RingEvadeTests.Register(runner);
+        BackAwayTests.Register(runner);
+        ServerPluginForwardTests.Register(runner);
         IgnoreMonsterTests.Register(runner);
         WorldCacheTypedTests.Register(runner);
         NavOverlayTests.Register(runner);
@@ -106,6 +110,7 @@ internal static class Program
         HazardEscapeTests.Register(runner);
         ManaStoneChoiceTests.Register(runner);
         CustomDebuffTests.Register(runner);
+        DebuffRenewTests.Register(runner);
         ProfileLoadTests.Register(runner);
         ActivityInterfaceTests.Register(runner);
         CastNoDamageTests.Register(runner);
@@ -141,7 +146,8 @@ internal static class Program
         LauncherSwapTests.Register(runner);
         MissileCraftingTests.Register(runner);
         SelfRatingsTests.Register(runner);
-        IltClientLookupTests.Register(runner);
+        ServerHubClientLookupTests.Register(runner);
+        UbMtSafetyTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }

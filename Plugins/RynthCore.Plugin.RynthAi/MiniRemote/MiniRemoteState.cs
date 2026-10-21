@@ -100,9 +100,9 @@ public sealed class PetTabState
     public int PetTimeoutSeconds = 30;
 
     /// <summary>
-    /// Allow a combat summon from an EMPTY essence when the Summon Essence Refill Charm is
-    /// active (ACECustom: the server refills from banked pyreals). Still requires the server
-    /// flag to be on (RynthILT reports it).
+    /// Obsolete since 2026-10-20 (unused here, kept so miniremote.json still loads): the "summon from
+    /// empty essences" opt-in of ACECustom's refill charm. It is RynthILT's now, which copied this
+    /// value once (IltMigration.ImportRynthAiSettings).
     /// </summary>
     public bool UsePyrealRefillPath;
 
@@ -120,10 +120,11 @@ public sealed class PetTabState
     /// <summary>Seconds to wait before re-summoning the cosmetic pet after it despawns.</summary>
     public int CosmeticRespawnSeconds = 15;
 
-    // Auto siphon-lens capture (ACECustom MonsterCapture; Mini Remote > Pets).
-    /// <summary>When on, use the selected siphon lens on a nearby creature once it is weak enough.</summary>
+    // Obsolete since 2026-10-20, as UsePyrealRefillPath: ACECustom's siphon auto-capture moved to
+    // RynthILT (IltPetAutomation), which copied these once. Unused here; kept so old files load.
+    /// <summary>Obsolete: auto-capture's switch (RynthILT's now).</summary>
     public bool AutoCaptureEnabled;
-    /// <summary>Index into <see cref="PetCaptureRules.Lenses"/> (Flawed to Asheron).</summary>
+    /// <summary>Obsolete: auto-capture's lens (RynthILT's now).</summary>
     public int CaptureLensIndex;
 }
 
@@ -256,7 +257,6 @@ internal sealed class MiniRemoteStore
         s.Pet.RosterKind = Math.Clamp(s.Pet.RosterKind, 0, 2);
         s.Pet.RosterSort = Math.Clamp(s.Pet.RosterSort, 0, 6);
         s.Pet.CosmeticRespawnSeconds = Math.Clamp(s.Pet.CosmeticRespawnSeconds, 5, 600);
-        s.Pet.CaptureLensIndex = Math.Clamp(s.Pet.CaptureLensIndex, 0, PetCaptureRules.Lenses.Length - 1);
         s.Quests ??= new QuestsTabState();
         s.Quests.QuestFilter ??= string.Empty;
         s.Quests.QuestFavorites ??= new();

@@ -73,6 +73,10 @@ internal sealed class SellItem
     public string RuleName { get; init; } = string.Empty;
     public string Location { get; init; } = string.Empty;
     public int SortSlot { get; init; }
+    /// <summary>The item's max stack size (0 = unknown); a stack below it is a partial.</summary>
+    public int MaxStack { get; init; }
+    /// <summary>Weenie class id (0 = unknown): only the same weenie merges.</summary>
+    public uint Wcid { get; init; }
 
     public bool IsNote => Class == AcObjectClass.TradeNote || (ItemType & AutoVendorPlanner.ItemTypePromissoryNote) != 0;
     public int UnitValue => StackSize > 1 ? Value / StackSize : Value;
@@ -96,6 +100,7 @@ internal enum PlanKind : byte
     Sell = 2,
     Split = 3,
     Fatal = 4,
+    Merge = 5,
 }
 
 internal readonly record struct BuyLine(Listing Item, int Amount);
@@ -109,12 +114,16 @@ internal sealed class VendorPlan
     public long Total { get; init; }
     public SellItem? SplitItem { get; init; }
     public int SplitAmount { get; init; }
+    /// <summary>Merge: SplitItem goes onto MergeTarget.</summary>
+    public SellItem? MergeTarget { get; init; }
     public string Message { get; init; } = string.Empty;
 
     public static VendorPlan Done() => new() { Kind = PlanKind.Done };
     public static VendorPlan Fatal(string msg) => new() { Kind = PlanKind.Fatal, Message = msg };
     public static VendorPlan Split(SellItem item, int amount, string why) =>
         new() { Kind = PlanKind.Split, SplitItem = item, SplitAmount = amount, Message = why };
+    public static VendorPlan Merge(SellItem source, SellItem target, string why) =>
+        new() { Kind = PlanKind.Merge, SplitItem = source, MergeTarget = target, Message = why };
 }
 
 /// <summary>What the manager read about an inventory item for UB's "safe to get rid of" checks.</summary>
@@ -430,7 +439,7 @@ internal static class AutoVendorPlanner
                 if (single != null)
                     return new VendorPlan { Kind = PlanKind.Sell, Sells = new List<SellItem> { single }, Total = VendorPays(v, true, single.Value) };
 
-                return VendorPlan.Split(item, 1, $"one {item.Name} to afford {nextBuy.Name}");
+                return SplitClean(v, sells, item, 1, $"one {item.Name} to afford {nextBuy.Name}");
             }
 
             // Can't sell the whole stack? Split off what the pyreals will fit.
@@ -441,7 +450,7 @@ internal static class AutoVendorPlanner
                     int newStack = unit > 0 ? (int)Math.Floor((p.FreeMainSlots - 2) * (double)Math.Max(1, p.PyrealStackSize) / unit) : 0;
                     newStack = Math.Min(newStack, stack - 1);
                     if (newStack > 0)
-                        return VendorPlan.Split(item, newStack, "the pyreals for the whole stack won't fit");
+                        return SplitClean(v, sells, item, newStack, "the pyreals for the whole stack won't fit");
                     return VendorPlan.Fatal($"AutoVendor Fatal - No inventory room to sell {item.Name}");
                 }
                 break;
@@ -456,6 +465,57 @@ internal static class AutoVendorPlanner
 
         return VendorPlan.Done();
     }
+
+    /// <summary>
+    /// A split lands on another partial stack of the same item when there is one, instead of making
+    /// a new stack (the stack split from doesn't count), so the split-off amount never shows up to be
+    /// sold. Drakkon's Gold Peas looped split-wait-split for good once two partial stacks existed
+    /// (2026-10-19). So: first merge partials down to one; with one partial left, sell it whole if it
+    /// fits, else split from it (nothing else partial for the new stack to join); with none, split as
+    /// asked. An unknown max stack size keeps the old plain split.
+    /// </summary>
+    internal static VendorPlan SplitClean(VendorView v, IReadOnlyList<SellItem> sells, SellItem item, int amount, string why)
+    {
+        if (item.MaxStack <= 1)
+            return VendorPlan.Split(item, amount, why);
+
+        var partials = sells
+            .Where(s => SameItem(s, item) && s.StackSize > 0 && s.StackSize < item.MaxStack)
+            .OrderByDescending(s => s.StackSize)
+            .ToList();
+
+        // A partial that fits is sold whole first: the stack a split just made, or any leftover. (Merging
+        // it back instead looped split-merge-split three times a second, 2026-10-19.)
+        SellItem? fits = partials.FirstOrDefault(s => s.StackSize <= amount);
+        if (fits != null)
+            return new VendorPlan { Kind = PlanKind.Sell, Sells = new List<SellItem> { fits }, Total = VendorPays(v, fits.IsNote, fits.Value) };
+
+        // Every partial is too big to sell whole: merge them down to one before splitting.
+        if (partials.Count >= 2)
+            return VendorPlan.Merge(partials[^1], partials[0], $"one partial {item.Name} stack, so the split makes a new stack");
+
+        if (partials.Count == 1 && partials[0].Id != item.Id)
+            return VendorPlan.Split(partials[0], amount, why);
+
+        return VendorPlan.Split(item, amount, why);
+    }
+
+    /// <summary>The unit value carrying the most units (ties: the higher value, the safe side for a vendor's max).</summary>
+    internal static int MostCarriedUnit(IReadOnlyDictionary<int, long> unitsByValue)
+    {
+        int best = 0;
+        long bestUnits = -1;
+        foreach (var (unit, units) in unitsByValue)
+            if (units > bestUnits || (units == bestUnits && unit > best))
+            {
+                best = unit;
+                bestUnits = units;
+            }
+        return best;
+    }
+
+    private static bool SameItem(SellItem a, SellItem b) =>
+        a.Wcid != 0 && b.Wcid != 0 ? a.Wcid == b.Wcid : string.Equals(a.Name, b.Name, StringComparison.Ordinal);
 
     // ── /ub vendor addsell (UB AddItemToSellList) ────────────────────────────
 

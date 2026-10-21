@@ -1,8 +1,20 @@
+// Moved here from RynthOracle (Data/AelrynthBoards.cs) on 2026-10-20: Aelrynth-only features live in RynthAelrynth.
 using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
+using RynthCore.Plugin.ServerPack;
 
-namespace RynthCore.Plugin.RynthOracle.Data;
+namespace RynthCore.Plugin.RynthAelrynth;
+
+/// <summary>A row of a leaderboard.</summary>
+internal sealed class BoardRow
+{
+    public int Rank;
+    public string Name = "";
+    public string Value = "";
+    public string Extra = "";
+    public bool IsYou;
+}
 
 /// <summary>A board in Aelrynth's /top overview.</summary>
 internal sealed class AelrynthBoardSummary
@@ -26,7 +38,7 @@ internal sealed class TrialDungeon
 }
 
 /// <summary>
-/// Aelrynth's leaderboards (tag Aelrynth), read from the replies of the server's own commands
+/// Aelrynth's leaderboards, read from the replies of the server's own commands
 /// (ACEPublic Mods: Aeshnidae.Leaderboard /top, Aeshnidae.Trials /trial; one Broadcast line
 /// each, numbers with thousands separators). Formats (Commands.cs):
 ///   /top               "Leaderboards - N characters, refreshed X. /top &lt;board&gt; ..."
@@ -38,8 +50,8 @@ internal sealed class TrialDungeon
 ///   /trial &lt;dungeon&gt;   "Dungeon (LLLL) - top 10, best per character, any tier:"
 ///                      then "  r. m:ss  Name (tier T, K kills, d MMM)" and "  records per tier/you/this week" lines
 /// Entry lines only count right after their header (within a few seconds), so ordinary chat
-/// can't add rows. The two commands share /top with ConquestAC's very different reply, which is
-/// why each parser only runs on its own server.
+/// can't add rows. Conquest answers /top in a very different shape (RynthConquest's parser), which is
+/// why each server plugin reads only its own server's replies.
 /// </summary>
 internal sealed class AelrynthBoards
 {
@@ -81,7 +93,7 @@ internal sealed class AelrynthBoards
 
     private Block _block;
     private long _blockMs;
-    private readonly ChatRequest _topReq = new(), _trialReq = new();
+    private readonly ServerChatRequest _topReq = new(), _trialReq = new();
 
     public void Clear()
     {
@@ -110,7 +122,7 @@ internal sealed class AelrynthBoards
 
     private void Start(Block b, long now) { _block = b; _blockMs = now; }
 
-    /// <summary>A chat line: true when it was a leaderboard reply; <paramref name="ours"/> = it answers RynthOracle's request.</summary>
+    /// <summary>A chat line: true when it was a leaderboard reply; <paramref name="ours"/> = it answers RynthAelrynth's request.</summary>
     public bool OnChatLine(string text, long now, out bool ours)
     {
         ours = false;
@@ -255,7 +267,7 @@ internal sealed class AelrynthBoards
         return false;
     }
 
-    private bool Mine(ChatRequest req, long now, out bool ours)
+    private bool Mine(ServerChatRequest req, long now, out bool ours)
     {
         ours = req.Awaiting(now);
         req.Extend(now);

@@ -2,8 +2,9 @@
 // (RynthILT.Hub section "pets-logs").
 // Originally the roster-capture part of SilentKelpie's IltPets (ILT Hub, RynthAi); split out and
 // moved to RynthILT 2026-10-13. The Pets tab itself (essence roster, combat / healing / cosmetic
-// pets, the refill charm path) stayed in RynthAi (MiniRemote/PetsTab.cs): summoning is every
-// server's, these two commands are ACECustom's.
+// pets) stayed in RynthAi (MiniRemote/PetsTab.cs): summoning is every server's, these two commands
+// are ACECustom's (as are the pet charms, the refill path and siphon capture: IltPetAutomation,
+// moved 2026-10-20).
 using System;
 using System.Collections.Generic;
 using ImGuiNET;

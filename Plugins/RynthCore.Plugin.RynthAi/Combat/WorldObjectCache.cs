@@ -616,6 +616,19 @@ public class WorldObjectCache
                 _inventory.Remove(id);
                 _landscape.Add(id);
             }
+            else if (uid < 0x80000000u)
+            {
+                // A static id is a world object (a door, a sign, a lever), never something carried.
+                // One created before its position was readable - a dungeon's objects arrive while the
+                // character is still in portal space - was filed as inventory here for good, so the
+                // door scans (which walk the landscape) never saw the door: "Open Doors" on, a closed
+                // door in the way, no door use at all (Dargoth Hera, Infested Mine, 2026-10-19). It is
+                // Unknown landscape, as when its position is known; the scans read the position then.
+                _creatures.Remove(id);
+                _inventory.Remove(id);
+                _landscape.Add(id);
+                cls = AcObjectClass.Unknown;
+            }
             else
             {
                 _inventory.Add(id);

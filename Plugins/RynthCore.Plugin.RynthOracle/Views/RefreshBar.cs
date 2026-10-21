@@ -8,7 +8,7 @@ namespace RynthCore.Plugin.RynthOracle.Views;
 /// <summary>
 /// The Refresh button every page of the Oracle window starts with, and the status line beside it.
 /// What "refresh" means depends on where a page's data comes from:
-///   - data the server owns (quest flags, ConquestAC's bank and boards, Aelrynth's /top and /trial)
+///   - data the server owns (the quest flags)
 ///     is asked for again with the same command the page always used, and the line waits for the
 ///     reply;
 ///   - data read from the game client (level, buffs, titles, fellowship) is re-read at once instead
@@ -33,13 +33,8 @@ internal sealed partial class OracleView
     private DateTime _refreshAtUtc, _refreshDoneUtc;
     private readonly Dictionary<string, long> _refreshSent = new();
 
-    /// <summary>The tab, plus the sub-page a tab has (Conquest's views, the boards), so a status line stays with its own page.</summary>
-    private string RefreshScope(string tab) => tab switch
-    {
-        TabConquest => tab + _conquestView,
-        TabBoards => tab + _aelrynthView + _conquestBoard,
-        _ => tab,
-    };
+    /// <summary>The page a status line belongs to (each tab is one page).</summary>
+    private static string RefreshScope(string tab) => tab;
 
     private void DrawRefreshRow(UiWindow w, TabDef def)
     {
@@ -90,16 +85,6 @@ internal sealed partial class OracleView
 
     private const string TooSoon = "That was just asked for; wait a few seconds before asking again.";
 
-    /// <summary>Sends one chat command (the page's own) and waits for <paramref name="state"/> to change.</summary>
-    private RefreshResult Ask(string key, Func<long> state, Func<string> command)
-    {
-        if (CoolingDown(key)) return new RefreshResult(TooSoon);
-        long before = state();
-        string cmd = command();
-        if (!_c.Send(cmd)) return new RefreshResult($"Couldn't send {cmd} (not in the world).");
-        return new RefreshResult($"Sent {cmd}.", () => state() != before);
-    }
-
     /// <summary>/myquests (refused for 5 s after the last one); the line waits for the new flags.</summary>
     private RefreshResult RefreshQuests(string before = "")
     {
@@ -107,6 +92,8 @@ internal sealed partial class OracleView
         int rev = f.Revision;
         if (_c.RequestQuests()) return new RefreshResult(before + "Asked the server for your quest flags (/myquests).", () => f.Revision != rev);
         if (f.Loading) return new RefreshResult(before + "Your quest flags are already being read.", () => f.Revision != rev);
+        int wait = f.ThrottleSecondsLeft(_c.NowMs);
+        if (wait > 0) return new RefreshResult(before + $"The server answers one /myquests a minute; try again in {wait}s (the flags shown are kept).");
         return new RefreshResult(before + "Your quest flags were asked for a moment ago; wait a few seconds before asking again.");
     }
 
@@ -137,6 +124,16 @@ internal sealed partial class OracleView
         return new RefreshResult("Re-read your buffs and dropped the spell timers that ran out. Timers on targets are learned from your casts.");
     }
 
+    /// <summary>The Pet Breeding tab: RynthILT appraises every essence again; the line waits for the new snapshot.</summary>
+    private RefreshResult RefreshBreeding()
+    {
+        if (CoolingDown("breeding")) return new RefreshResult(TooSoon);
+        object before = _c.Breeding;
+        if (!_c.BreedingCommand(RynthCore.Plugin.Shared.IltBreedingView.RefreshVerb()))
+            return new RefreshResult("RynthILT didn't take that (not loaded, or older than 0.3.1).");
+        return new RefreshResult("Asked RynthILT to appraise your essences again.", () => !ReferenceEquals(_c.Breeding, before));
+    }
+
     private RefreshResult RefreshFellowship()
     {
         _c.Fellowship.Invalidate();
@@ -151,63 +148,4 @@ internal sealed partial class OracleView
         string pack = cat.PackServer.Length > 0 ? $" + {cat.ServerCount} {cat.PackServer}" : "";
         return new RefreshResult($"Reloaded the quest list ({cat.RetailCount} retail{pack}) and asked RynthCore which server this is.");
     }
-
-    private RefreshResult RefreshBoards()
-    {
-        if (_c.Server.Is(ServerTags.Conquest))
-        {
-            ConquestData cq = _c.Conquest;
-            ConquestBoard b = cq.Boards[Math.Clamp(_conquestBoard, 0, cq.Boards.Count - 1)];
-            return Ask("board" + b.Key, () => b.UpdatedUtc.Ticks, () => cq.RequestBoard(b, _c.NowMs));
-        }
-        AelrynthBoards a = _c.Boards;
-        return _aelrynthView switch
-        {
-            1 => Ask("top me", () => a.Revision, () => a.RequestTop("me", _c.NowMs)),
-            2 => Ask("trial", () => a.Revision, () => a.RequestTrial("", _c.NowMs)),
-            _ => Ask("top " + _aelrynthBoardArg, () => a.Revision,
-                     () => a.RequestTop(a.BoardTitle.Length > 0 ? _aelrynthBoardArg : "", _c.NowMs)),
-        };
-    }
-
-    private string BoardsHelp()
-    {
-        if (_c.Server.Is(ServerTags.Conquest))
-        {
-            ConquestBoard b = _c.Conquest.Boards[Math.Clamp(_conquestBoard, 0, _c.Conquest.Boards.Count - 1)];
-            return $"Sends {b.Command} and reads the reply.";
-        }
-        return _aelrynthView switch
-        {
-            1 => "Sends /top me and reads the reply.",
-            2 => "Sends /trial and reads the dungeon list.",
-            _ => "Sends /top (every board's leader), or asks again for the board that is open.",
-        };
-    }
-
-    private RefreshResult RefreshConquest()
-    {
-        ConquestData cq = _c.Conquest;
-        switch (_conquestView)
-        {
-            case 0: return Ask("bank", () => cq.BankUtc.Ticks, () => cq.RequestBank(_c.NowMs));
-            case 1: return Ask("augs", () => cq.AugsUtc.Ticks, () => cq.RequestAugs(_c.NowMs));
-            case 2: return Ask("enl", () => cq.EnlUtc.Ticks, () => cq.RequestEnl(_c.NowMs));
-            case 3:
-                _c.RereadCharacter();
-                return Ask("bonus", () => cq.BonusUtc.Ticks, () => cq.RequestBonus(_c.NowMs));
-            case 4: return Ask("fship", () => cq.FshipUtc.Ticks, () => cq.RequestFships(_c.NowMs));
-            default: return RefreshQuests();
-        }
-    }
-
-    private string ConquestHelp() => _conquestView switch
-    {
-        0 => "Sends /b and reads your balances.",
-        1 => "Sends /augs and reads your advanced augmentations.",
-        2 => "Sends /enl augs and reads your enlightenment augmentations.",
-        3 => "Re-reads your level, and sends /bonus for the experience bonuses.",
-        4 => "Sends /fship list and reads the fellowships looking for members.",
-        _ => "Sends /myquests: the custom quests' status comes from your quest flags.",
-    };
 }

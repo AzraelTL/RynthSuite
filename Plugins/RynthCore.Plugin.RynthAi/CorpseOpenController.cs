@@ -577,6 +577,8 @@ public sealed partial class RynthAiPlugin
     public override void OnVendorClose(uint vendorId)
     {
         _metaManager?.OnVendorClose(vendorId);
+        // /mt vendor addbuy / addsell lists belong to the vendor that was open.
+        ClearMtVendorLists();
 
         var autoVendor = _autoVendor;
         if (autoVendor != null)

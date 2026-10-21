@@ -1,4 +1,6 @@
-// PetCaptureRules.cs — ACECustom MonsterCapture thresholds for siphon lenses (pure; no host).
+// IltPetCaptureRules.cs — ACECustom MonsterCapture thresholds for siphon lenses (pure; no host).
+// Moved from RynthAi's Pets tab (MiniRemote/PetCaptureRules.cs) 2026-10-20 with the auto-capture
+// itself (IltPetAutomation): monster capture is ACECustom's, so it is RynthILT's.
 //
 // Copied from ACECustom Source/ACE.Server/Entity/MonsterCapture.cs so the client can tell when
 // a creature is weak enough to siphon before using a lens. Keep these numbers in lockstep with
@@ -7,10 +9,10 @@
 using System;
 using System.Collections.Generic;
 
-namespace RynthCore.Plugin.RynthAi.MiniRemote;
+namespace RynthCore.Plugin.RynthILT.Hub;
 
 /// <summary>One siphon lens the Pets tab can auto-use (name, WCID, whether health is gated).</summary>
-public readonly struct PetCaptureLens
+internal readonly struct PetCaptureLens
 {
     public PetCaptureLens(string name, uint wcid, bool bypassesHealthGate)
     {
@@ -30,7 +32,7 @@ public readonly struct PetCaptureLens
 /// A creature is weak enough when its health fraction is ≤ 20% OR its current HP is under 20
 /// (whichever comes first). Asheron's Lens skips that check.
 /// </summary>
-public static class PetCaptureRules
+internal static class PetCaptureRules
 {
     /// <summary>A lens targets the nearest attackable creature within this many meters.</summary>
     public const float CaptureRangeM = 5.0f;
@@ -100,12 +102,12 @@ public static class PetCaptureRules
 }
 
 /// <summary>
-/// A brake on the auto-capture loop. The Pets tab fires a lens every couple of seconds and only stops
+/// A brake on the auto-capture loop. Auto-capture fires a lens every couple of seconds and only stops
 /// on reply strings it guesses at, so an unrecognized reply (or a creature the server never lets go of)
 /// would burn lenses without end. This caps consecutive tries per target and, as a backstop, consecutive
 /// tries over all targets; both reset on a recognized success. Pure: the tests drive it.
 /// </summary>
-public sealed class PetCaptureThrottle
+internal sealed class PetCaptureThrottle
 {
     /// <summary>Lens uses on one creature, with no success in between, before it is left alone.</summary>
     public const int MaxTriesPerTarget = 5;

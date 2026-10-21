@@ -440,7 +440,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         // A new goto (not the re-plan after "no route over land") may re-plan once again.
         if (!landReplan) { _landReplanned = false; _enterPortal = enter.Length > 0 ? _nextEnterPortal : ""; _nextEnterPortal = ""; }
         // Whatever was running stops first: a refused goto must not leave the old one half-changed.
-        if (_gotoActive) { _gotoActive = false; _route = null; _portalWait = false; ResetHub(); Host.SetAutoRun(false); Host.StopCompletely(); HideMarkers("a new goto"); }
+        if (_gotoActive) { _gotoActive = false; _route = null; _portalWait = false; ResetHub(); AutoRun.Stop(); HideMarkers("a new goto"); }
         double twx = NavCoords.WorldX(tew), twy = NavCoords.WorldY(tns);
         int gLbX = (int)Math.Floor(twx / 192.0), gLbY = (int)Math.Floor(twy / 192.0);
         if (double.IsNaN(twx) || double.IsNaN(twy) || gLbX < 0 || gLbX > 255 || gLbY < 0 || gLbY > 255)
@@ -524,6 +524,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
             Say($"goto: the target's landblock 0x{goalLb:X4} has no tile; walking as far as the navmesh goes");
 
         SetTrip(_route, name, tns, tew, recalls, enter, live: true);
+        AutoRun.Forget();   // the d-pad or another plugin may have moved since: the first call goes out
         _gotoActive = true;
         _gotoName = name; _gotoType = type;
         _walkHaveLast = false;
@@ -624,14 +625,14 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         // A teleport on a walking leg is never planned: a portal we touched by accident. Stop.
         bool portalingNow = Host.HasIsPortaling && Host.IsPortaling();
         double jump = _walkHaveLast ? Math.Sqrt((_wx - _walkLastWx) * (_wx - _walkLastWx) + (_wy - _walkLastWy) * (_wy - _walkLastWy)) : 0;
-        if (portalingNow && !_walkHaveLast) { Host.SetAutoRun(false); return; }   // still arriving from the last step's teleport
+        if (portalingNow && !_walkHaveLast) { AutoRun.Run(false); return; }   // still arriving from the last step's teleport
         // The client can show portal space a second or more AFTER the position jump that ended a
         // recall or portal step (seen live: @lifestone jumped at 19:45:11, portal space began at
         // 19:45:12). That portal space is the step's own: wait it out, and count the landing from
         // its end, rather than calling it a stray portal.
         if (portalingNow && NowMs - _lastLandMs < SettleAfterTeleportMs)
         {
-            Host.SetAutoRun(false);
+            AutoRun.Run(false);
             _walkHaveLast = false;
             _lastLandMs = NowMs;
             return;
@@ -701,7 +702,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         if (_coarseHoldTicks > 0 && _coarse == null && _gotoActive)
         {
             _coarseHoldTicks--;
-            Host.SetAutoRun(false);
+            AutoRun.Run(false);
             lock (_gate) _status = "planning the way…";
             return;
         }
@@ -740,7 +741,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
             }
             else if (_blindTicks++ == BlindPushTicks)
             {
-                Host.SetAutoRun(false);
+                AutoRun.Run(false);
             }
             return;
         }
@@ -818,7 +819,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         ResetHub();
         _avoid.Clear(); _coarseHoldTicks = 0;
         ResetBlocked();
-        Host.SetAutoRun(false); Host.StopCompletely();
+        AutoRun.Stop();
         lock (_gate) _status = status;
         Host.Log($"[RynthNav] goto: {status}");
         Say(status == "arrived" && _gotoName.Length > 0 ? $"goto: arrived at {_gotoName}" : $"goto: {status}");
@@ -841,7 +842,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
 
         if (teleported)
         {
-            Host.SetAutoRun(false); Host.StopCompletely();
+            AutoRun.Stop();
             _portalWait = false;
             _lastLandMs = NowMs;
             Host.Log($"[RynthNav] teleport detected (lb 0x{_prePortalLb:X4}->0x{CurrentLandblock:X4}, moved {moved:F0}u) — next leg");
@@ -871,7 +872,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
                 double away = Math.Atan2(-dew, -dns) * 180.0 / Math.PI;
                 DriveTo(away);
             }
-            else { Host.SetAutoRun(false); Host.StopCompletely(); }
+            else AutoRun.Halt();
             _portalWaitTicks = 0;
             _portalTryStartMs = NowMs;   // the cooldown isn't a failed try
             if (!_cooldownSaid) { _cooldownSaid = true; Host.Log($"[RynthNav] waiting {(PortalCooldownMs - sinceTeleport) / 1000.0:F1} s before the portal (teleported {sinceTeleport} ms ago)"); }

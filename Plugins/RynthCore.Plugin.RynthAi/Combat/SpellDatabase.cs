@@ -13,6 +13,9 @@ public static class SpellDatabase
     // names ("Slithering Flames"), so a wall is found by its category and ranked by its power.
     private static readonly Dictionary<int, (int Category, int Power)> _spellMeta = new();
     private static readonly Dictionary<int, List<int>> _idsByCategory = new();
+    // How long an enchantment lasts, in seconds before Archmage's Endurance (column 6): the
+    // debuff renewal times landed debuffs by it (2026-10-20). Absent or 0: no timer.
+    private static readonly Dictionary<int, int> _durations = new();
     private static bool _loaded = false;
 
     private static readonly Dictionary<int, string> _builtinSpells = new Dictionary<int, string>
@@ -45,6 +48,7 @@ public static class SpellDatabase
         _spellNames.Clear();
         _spellMeta.Clear();
         _idsByCategory.Clear();
+        _durations.Clear();
         _loaded = false;
 
         try
@@ -76,6 +80,8 @@ public static class SpellDatabase
                             _idsByCategory[category] = ids = new List<int>();
                         ids.Add(spellId);
                     }
+                    if (columns.Length >= 6 && int.TryParse(columns[5].Trim(), out int seconds) && seconds > 0)
+                        _durations[spellId] = seconds;
                 }
             }
 
@@ -136,6 +142,9 @@ public static class SpellDatabase
         category = 0; power = 0;
         return false;
     }
+
+    /// <summary>How long the spell's enchantment lasts in seconds (before Archmage's Endurance), 0 when it has none.</summary>
+    public static int DurationSeconds(int spellId) => _durations.TryGetValue(spellId, out int s) ? s : 0;
 
     /// <summary>Every spell id of a category (ACE SpellCategory), in data order.</summary>
     public static IReadOnlyList<int> IdsInCategory(int category)

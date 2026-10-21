@@ -86,6 +86,8 @@ internal static class IltSettingsStore
 [JsonSerializable(typeof(List<IltBankTransaction>), TypeInfoPropertyName = "IltBankTransactionList")]
 [JsonSerializable(typeof(IltAugCostFile))]
 [JsonSerializable(typeof(IltLegacyProfileFlags))]
+[JsonSerializable(typeof(IltLegacyMiniRemote))]
+[JsonSerializable(typeof(IltLegacyHuds))]
 [JsonSourceGenerationOptions(
     WriteIndented = true,
     IncludeFields = true,

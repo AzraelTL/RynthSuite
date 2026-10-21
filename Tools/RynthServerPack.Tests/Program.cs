@@ -13,6 +13,10 @@ internal static class Program
         var runner = new Runner();
         ServerPackModelTests.Register(runner);
         ServerProjectsTests.Register(runner);
+        ServerPackHooksTests.Register(runner);
+        ConquestTests.Register(runner);
+        AelrynthTests.Register(runner);
+        VaultTests.Register(runner);
         return runner.Run("RynthServerPack tests", args.Length > 0 ? args[0] : null);
     }
 }

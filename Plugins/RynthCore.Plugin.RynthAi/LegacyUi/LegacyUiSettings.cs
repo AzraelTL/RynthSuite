@@ -38,6 +38,15 @@ public sealed class LegacyUiSettings
     public bool EnableRaycasting = true;
     public bool MetaDebug;
 
+    /// <summary>
+    /// "Allow metas to send keystrokes (/mt send)". Off by default (2026-10-19). Mag-Tools' /mt send,
+    /// click, movement, strafe, client minimize|restore and the key fallback of /mt jump post raw
+    /// key and mouse messages to the game window; with this off they log once and do nothing.
+    /// Deliberately not in the expression settings map, /mt opt or the phone's settings: a meta
+    /// must not be able to switch it on for itself.
+    /// </summary>
+    public bool AllowMetaKeystrokes;
+
     public int MovementMode;
     public float NavStopTurnAngle = 20f;
     public float NavResumeTurnAngle = 10f;
@@ -207,9 +216,10 @@ public sealed class LegacyUiSettings
     // setting loads it as on.
     public bool TargetLock = true;
     public int RingRange = 5;
-    // Empyrean Handler lethal ring (CombatManager.HandleChatForRingEvade): when the Handler channels the
-    // ring and the character is inside its danger radius, back-jump away and re-engage. Only acts while
-    // the macro is running with combat on. On by default because it is gated that way.
+    // Obsolete since 2026-10-20 (unused here, kept so profiles still load and carry it): the Empyrean
+    // Handler lethal-ring evade is Infinite Leaftide's and lives in RynthILT now (its ILT settings,
+    // "/ilt settings"), which copied this value once. RynthAi keeps only the generic back-away it
+    // asks for (CombatManager.BackAwayFrom, RynthAi.Hub BackAwayFrom).
     public bool HandlerRingEvade = true;
     public int ApproachRange = 4;
     public int MinRingTargets = 4;
@@ -257,10 +267,10 @@ public sealed class LegacyUiSettings
 
     public bool BoostNavPriority;
     /// <summary>
-    /// Options > Navigation > Vaulted Dungeons: the MASTER switch of RynthILT's Vaulted Dungeons
-    /// keeper (Infinite Leaftide / ACECustom only). Off by default. RynthILT reads it through
-    /// "RynthAi.Hub" VaultedDungeonsEnabled; while it is off the keeper does nothing (no recalls,
-    /// no /rc quit, no tab). This is the one place the switch lives.
+    /// Obsolete since 2026-10-20 (kept so profiles still load and carry it): the Vaulted Dungeons
+    /// keeper's master switch is RynthILT's own setting now, copied from here once. RynthAi only
+    /// mirrors RynthILT's value into the engine's Settings > Navigation row (ServerSettingGet / Set)
+    /// and answers this old value through RynthAi.Hub VaultedDungeonsEnabled for an older RynthILT.
     /// </summary>
     public bool EnableVaultedDungeons;
     public bool BoostLootPriority;
@@ -414,9 +424,9 @@ public sealed class LegacyUiSettings
     public int GiveQueueIntervalMs = 0;
 
     /// <summary>
-    /// Item augmentation count used for T11 wield gates in loot rules ("T11: Can Wield").
-    /// -1 = automatic (read from the server's "/aug" reply). ACECustom doesn't send the count
-    /// at login, so this is the fallback when "/aug" is unavailable. Set with /ra t11 augs.
+    /// Obsolete since 2026-10-20 (kept so profiles still load and carry it): the item augmentation
+    /// count override for the T11 "Can Wield" loot key is RynthILT's now ("/ilt t11 augs", copied from
+    /// here once), and RynthILT reports the counters it reads from "/aug" (RynthAi.Hub SetPlayerCounter).
     /// </summary>
     public int T11ItemAugsOverride = -1;
 
@@ -608,7 +618,9 @@ public sealed class LegacyUiSettings
     public int BuffMinSkillLevelTier7 = 335;
     public int BuffMinSkillLevelTier8 = 435;
 
-    public bool EnableManaTapping   = false;
+    // On for a new character (2026-10-20): with it off only stones already charged refill worn gear, and
+    // nothing charges them, so suits ran dry for players who never found the switch. A saved profile keeps its choice.
+    public bool EnableManaTapping   = true;
     public int  ManaTapMinMana      = 2500;
     public int  ManaStoneKeepCount  = 5;
 
@@ -951,7 +963,7 @@ public sealed class ItemsBridgePayload
 {
     public List<ItemRule>       Weapons           { get; set; } = new();
     public List<ConsumableRule> Consumables       { get; set; } = new();
-    public bool                 EnableManaTapping { get; set; }
+    public bool                 EnableManaTapping { get; set; } = true;   // absent from an old profile = the new default
     public int                  ManaTapMinMana    { get; set; }
     public int                  ManaStoneKeepCount { get; set; }
     public string               CurrentTargetName { get; set; } = string.Empty;
@@ -1138,6 +1150,12 @@ public sealed class SettingsBridgePayload
     // Nullable since 0 became a real value (2026-10-08): a file without it keeps the default.
     public int? AttackSpellIntervalMs { get; set; }
     public bool CastDispelSelf { get; set; }
+    // VTank's options page (the engine's Classic dashboard, Main tab; 2026-10-19). Nullable: an engine
+    // without them sends none, and the saved values stay.
+    public bool? UseDispelItems { get; set; }
+    public bool? AutoFellowMgmt { get; set; }
+    public bool? MChargesWhenOff { get; set; }
+    public int? CustomPetRange { get; set; }
     public int MinRingTargets { get; set; }
     public int BlastRange { get; set; }
     public int MinBlastTargets { get; set; } = 3;   // absent from an older engine: keep the default
@@ -1168,8 +1186,9 @@ public sealed class SettingsBridgePayload
     // Navigation
     public bool BoostNavPriority { get; set; }
     /// <summary>
-    /// Options > Navigation > Vaulted Dungeons: the keeper's master switch (off by default). Nullable:
-    /// an engine that predates the row omits it, and absent = unchanged (never switches it off or on).
+    /// Options > Navigation > Vaulted Dungeons: RynthILT's keeper master switch, mirrored (RynthILT.Hub
+    /// GetSetting / SetSetting). Null when no server plugin offers it (no RynthILT, or off ILT): the
+    /// engine row then hides. Received: absent = unchanged; a value goes to RynthILT.
     /// </summary>
     public bool? EnableVaultedDungeons { get; set; }
     public float FollowNavMin { get; set; }

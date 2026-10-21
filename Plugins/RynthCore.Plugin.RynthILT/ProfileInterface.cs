@@ -29,6 +29,9 @@ internal static unsafe class ProfileInterface
         {
             Emulator = "ACE",
             Salvage = IltSalvage.Rows,
+            // Leaftide trinkets (UB-IT's IsLeaftideTrinketJewelry): the Crafting tab's Trinkets bench, not Jewelry.
+            TrinketNames = IltSalvage.TrinketNames,
+            TrinketExcept = IltSalvage.TrinketExcept,
             Source = "RynthILT; salvage from UB-IT's LeaftideImbueHelper (via SilentKelpie)",
         };
 

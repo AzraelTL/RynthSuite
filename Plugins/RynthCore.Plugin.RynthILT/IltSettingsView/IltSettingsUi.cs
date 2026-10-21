@@ -1,8 +1,10 @@
 // IltSettingsUi.cs - The "ILT settings" view: RynthILT's copy of the Infinite Leaftide settings.
 //
 // Drawn in its own window ("/ilt settings"). Shows RynthCore's verdict and reason, this character's
-// Auto / On / Off override, the ILT world names (edited through RynthCore), and every ILT feature
-// with the state RynthILT's Hub read from the server (IltSettingsModel has where each comes from).
+// Auto / On / Off override, the ILT world names (edited through RynthCore), this character's ILT
+// options (the settings that moved here from RynthAi on 2026-10-20: the Empyrean Handler ring
+// evade, ...; saved in the Hub's state), and every ILT feature with the state RynthILT's Hub read
+// from the server (IltSettingsModel has where each comes from).
 // Edits are RynthCore commands, queued for the plugin tick; the next server-list poll shows the
 // result. Render thread only.
 using System;
@@ -25,6 +27,7 @@ internal sealed class IltSettingsUi
     private readonly IltSettingsModel _model;
     private readonly Action<string> _runCommand;
     private readonly Func<bool> _refreshFeatures;
+    private readonly Func<IltHubController?> _hub;
     private string _newName = string.Empty;
     private string _status = string.Empty;
 
@@ -33,11 +36,13 @@ internal sealed class IltSettingsUi
 
     /// <param name="runCommand">Queues a RynthCore command (run on the plugin tick).</param>
     /// <param name="refreshFeatures">Asks the Hub to read the server's features again; false before it exists.</param>
-    public IltSettingsUi(IltSettingsModel model, Action<string> runCommand, Func<bool> refreshFeatures)
+    /// <param name="hub">This character's Hub (its options live in the Hub's state); null before login.</param>
+    public IltSettingsUi(IltSettingsModel model, Action<string> runCommand, Func<bool> refreshFeatures, Func<IltHubController?>? hub = null)
     {
         _model = model;
         _runCommand = runCommand;
         _refreshFeatures = refreshFeatures;
+        _hub = hub ?? (() => null);
     }
 
     /// <summary>The standalone window, while open.</summary>
@@ -55,6 +60,8 @@ internal sealed class IltSettingsUi
     public void RenderBody()
     {
         RenderVerdict();
+        ImGui.Separator();
+        RenderCharacterOptions();
         ImGui.Separator();
         RenderFeatures();
         if (_status.Length > 0)
@@ -121,6 +128,38 @@ internal sealed class IltSettingsUi
             string cmd = IltSettingsModel.NamesCommand(false, _newName, out string err);
             if (Send(cmd, err, "Removing '" + _newName.Trim() + "'...")) _newName = string.Empty;
         }
+    }
+
+    /// <summary>
+    /// This character's Infinite Leaftide options: the ones that were RynthAi settings until
+    /// 2026-10-20 (copied over once). Saved with the Hub's state.
+    /// </summary>
+    private void RenderCharacterOptions()
+    {
+        ImGui.TextUnformatted("This character");
+        IltHubController? hub = _hub();
+        if (hub == null)
+        {
+            ImGui.TextDisabled("Shown once this character is logged in.");
+            return;
+        }
+        IltHubState st = hub.State;
+        bool vaulted = st.VaultedDungeonsEnabled;
+        if (ImGui.Checkbox("Vaulted Dungeons (the keeper's master switch)##iltvaulted", ref vaulted)) st.VaultedDungeonsEnabled = vaulted;
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Off by default. While off the Vaulted Dungeons keeper does nothing: no recalls, no /rc quit, no Mini\n"
+                             + "Remote tab. On: the \"Vaulted Dungeons\" tab shows, where you pick a dungeon and a tied Portal Recall\n"
+                             + "Gem and start it (/ilt vaulted on). Also in RynthCore's Settings > Navigation (it was a RynthAi setting).");
+        bool ring = st.Combat.HandlerRingEvade;
+        if (ImGui.Checkbox("Evade the Empyrean Handler's lethal ring##iltring", ref ring)) st.Combat.HandlerRingEvade = ring;
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("When an Empyrean Handler channels its lethal ring and you are within 12 yards (or RynthAi's\n"
+                             + "Ring Range if larger), RynthAi back-jumps away and re-engages. Only while RynthAi's macro\n"
+                             + "is running with combat on. On by default (it was RynthAi's \"Evade Handler Ring\").");
+        int augs = st.T11.ItemAugsOverride;
+        SafeImGui.TextDisabled(augs >= 0
+            ? $"T11 item augmentations: fixed at {augs:N0} for RynthAi's loot rules (/ilt t11 augs auto to read /aug)"
+            : "T11 item augmentations: read from /aug (/ilt t11 augs <n> fixes them; /ilt t11 shows the counters)");
     }
 
     /// <summary>

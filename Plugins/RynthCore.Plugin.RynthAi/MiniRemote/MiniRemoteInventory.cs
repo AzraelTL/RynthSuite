@@ -3,9 +3,8 @@
 // ILT Hub went to the RynthILT plugin 2026-10-13, which has its own copy for its ILT features).
 //
 // One place for: WCID lookups (cached), stack / use counts, "is it equipped", appraisal requests
-// (throttled), the Summon Essence Refill / Universal Summoning Mastery charm status (ACECustom
-// items the Pets tab's refill path reads; harmless anywhere else) and player int/bool reads.
-// Pump-thread only.
+// (throttled) and player int/bool reads. (The ACECustom pet charms' status went to RynthILT with
+// the charms, 2026-10-20.) Pump-thread only.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -14,16 +13,12 @@ using RynthCore.PluginSdk;
 
 namespace RynthCore.Plugin.RynthAi.MiniRemote;
 
-/// <summary>Charm ON / OFF read from its appraisal text.</summary>
-internal enum CharmState { Unknown = -1, Off = 0, On = 1 }
-
 internal sealed class MiniRemoteInventory
 {
-    // ── Well-known WCIDs (ACECustom content the Pets tab recognises) ─────────
+    // ── Well-known WCIDs ────────────────────────────────────────────────────
+    /// <summary>Encapsulated Spirit (pet essence refills; never a pet itself).</summary>
     public const uint WcidEncapsulatedSpirit = 49485;
-    public const uint WcidSummonRefillCharm = 78780030;
-    public const uint WcidUniversalMasteryCharm = 78780031;
-    public static readonly uint[] WcidInfiniteCastingStone = { 777700019, 777700055 };
+    // ACECustom's pet charms and the Infinite Casting Stone moved to RynthILT (IltPetAutomation) 2026-10-20.
 
     // ── Property ids ────────────────────────────────────────────────────────
     public const uint IntStackSize = 12;
@@ -32,9 +27,6 @@ internal sealed class MiniRemoteInventory
     public const uint IntNumTimesTinkered = 171;
     public const uint IntImbuedEffect = 179;
     public const uint IntMaterialType = 131;
-    public const uint StrUse = 14;
-    public const uint BoolPyrealRefillActive = 9049;
-    public const uint BoolUniversalMasteryActive = 50038;
 
     private readonly RynthCoreHost _host;
     private readonly Func<WorldObjectCache?> _cache;
@@ -124,31 +116,6 @@ internal sealed class MiniRemoteInventory
 
     public IEnumerable<WorldObject> AllByWcid(params uint[] wcids)
         => Items().Where(wo => Array.IndexOf(wcids, Wcid(wo)) >= 0);
-
-    /// <summary>
-    /// True when the player carries spell components or an Infinite Casting Stone that isn't
-    /// known to be switched OFF (an OFF stone doesn't waive components).
-    /// </summary>
-    public bool HasCastingSupplies()
-        => AllByWcid(WcidInfiniteCastingStone).Any(stone => CharmStatus(stone) != CharmState.Off)
-           || Items().Any(wo => wo.ObjectClass == AcObjectClass.SpellComponent);
-
-    /// <summary>
-    /// ON/OFF/Unknown from the appraisal Use text ("... Status: ON"). Requests appraisal
-    /// (throttled) when the text isn't loaded yet.
-    /// </summary>
-    public CharmState CharmStatus(WorldObject charm)
-    {
-        string use = Str(charm, StrUse);
-        if (use.Length == 0)
-        {
-            RequestAppraisal(charm);
-            return CharmState.Unknown;
-        }
-        if (use.Contains("Status: ON", StringComparison.OrdinalIgnoreCase)) return CharmState.On;
-        if (use.Contains("Status: OFF", StringComparison.OrdinalIgnoreCase)) return CharmState.Off;
-        return CharmState.Unknown;
-    }
 
     // ── Actions ─────────────────────────────────────────────────────────────
 

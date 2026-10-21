@@ -391,6 +391,50 @@ internal static class Program
         var p5 = AutoVendorPlanner.PlanNext(v, none, new List<SellItem>(), Pack(0));
         Eq(p5.Kind, PlanKind.Done, "nothing to do");
 
+        // A split lands on another partial stack of the same item, so the planner never splits while one
+        // exists (Drakkon's Gold Peas looped split-wait-split, 2026-10-19). Peas: 25,000 each, max 100.
+        SellItem Pea(uint id, int stack) => new() { Id = id, Name = "Gold Pea", Value = 25_000 * stack, StackSize = stack,
+                                                    Class = AcObjectClass.Misc, ItemType = 0x40000000, RuleName = "S: Peas", MaxStack = 100, Wcid = 9001 };
+        // 88 free main slots: (88 - 2) * 25000 / 25000 = 86 peas fit.
+        var twoPartials = AutoVendorPlanner.PlanNext(v, none, new List<SellItem> { Pea(1, 100), Pea(2, 91), Pea(3, 88) }, Pack(0, free: 88));
+        Eq(twoPartials.Kind, PlanKind.Merge, "two partials: merge first");
+        Eq(twoPartials.SplitItem!.Id, 3u, "the smaller partial goes...");
+        Eq(twoPartials.MergeTarget!.Id, 2u, "...onto the bigger one");
+
+        // Right after a split: the new stack (38) fits and is sold, never merged back onto the source (62).
+        var justSplit = AutoVendorPlanner.PlanNext(v, none, new List<SellItem> { Pea(1, 62), Pea(2, 38), Pea(3, 100) }, Pack(0, free: 40));
+        Eq(justSplit.Kind, PlanKind.Sell, "the freshly split stack is sold...");
+        Eq(justSplit.Sells.Single().Id, 2u, "...not merged back");
+        var justSplit2 = AutoVendorPlanner.PlanNext(v, none, new List<SellItem> { Pea(1, 100), Pea(2, 62), Pea(3, 38) }, Pack(0, free: 40));
+        Eq(justSplit2.Kind, PlanKind.Sell, "same with a full stack first");
+        Eq(justSplit2.Sells.Single().Id, 3u, "the 38");
+
+        var onePartialFits = AutoVendorPlanner.PlanNext(v, none, new List<SellItem> { Pea(1, 100), Pea(2, 79) }, Pack(0, free: 88));
+        Eq(onePartialFits.Kind, PlanKind.Sell, "one partial that fits: sold whole, no split");
+        Eq(onePartialFits.Sells.Single().Id, 2u, "the partial");
+
+        var onePartialBig = AutoVendorPlanner.PlanNext(v, none, new List<SellItem> { Pea(1, 100), Pea(2, 95) }, Pack(0, free: 88));
+        Eq(onePartialBig.Kind, PlanKind.Split, "one partial too big: split...");
+        Eq(onePartialBig.SplitItem!.Id, 2u, "...from the partial itself (nothing else for it to join)");
+        Eq(onePartialBig.SplitAmount, 86, "86 fit");
+
+        var allFull = AutoVendorPlanner.PlanNext(v, none, new List<SellItem> { Pea(1, 100), Pea(2, 100) }, Pack(0, free: 88));
+        Eq(allFull.Kind, PlanKind.Split, "all full: plain split");
+        Eq(allFull.SplitItem!.Id, 1u, "from the first");
+
+        var otherItem = new SellItem { Id = 5, Name = "Silver Pea", Value = 50, StackSize = 50, MaxStack = 100, Wcid = 9002, Class = AcObjectClass.Misc, ItemType = 0x40000000 };
+        var notSame = AutoVendorPlanner.PlanNext(v, none, new List<SellItem> { Pea(1, 100), otherItem }, Pack(0, free: 88));
+        Eq(notSame.Kind, PlanKind.Split, "another item's partial doesn't count");
+        Eq(notSame.SplitItem!.Id, 1u, "gold split as asked");
+
+        // Stale stack values: a split leaves 100 peas' value on a small stack, a merge leaves a small value on a big one.
+        Eq(AutoVendorPlanner.MostCarriedUnit(new Dictionary<int, long> { [25_000] = 800, [1_250_000] = 2, [3_000] = 100 }), 25_000, "most peas carry the true price");
+        Eq(AutoVendorPlanner.MostCarriedUnit(new Dictionary<int, long> { [25_000] = 50, [30_000] = 50 }), 30_000, "tie: the higher value");
+        Eq(AutoVendorPlanner.MostCarriedUnit(new Dictionary<int, long>()), 0, "nothing: 0 (no override)");
+
+        var unknownMax = AutoVendorPlanner.PlanNext(v, none, new List<SellItem> { S(1, "Gem", 100_000, stack: 100), S(2, "Gem", 50_000, stack: 50) }, Pack(0, free: 3));
+        Eq(unknownMax.Kind, PlanKind.Split, "unknown max stack: the old plain split");
+
         // Payout estimate uses the vendor's buy rate (ACE floor(value * rate + 0.1)).
         var half = Vendor(buy: 0.5f);
         var p6 = AutoVendorPlanner.PlanNext(half, none, new List<SellItem> { S(1, "Salvage", 101) }, Pack(0));

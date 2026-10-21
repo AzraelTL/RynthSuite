@@ -1,7 +1,9 @@
 using System;
 using System.Text;
+using System.Text.Json;
 using RynthCore.Plugin.RynthILT;
 using RynthCore.Plugin.RynthILT.Hub;
+using RynthCore.Plugin.Shared;
 using RynthCore.RynthAiTests.Harness;
 
 namespace RynthILT.Tests;
@@ -15,7 +17,10 @@ internal static class FeatureCatalogTests
     {
         r.Add("features: banking, guardian, attributes, augs, paragon x3, split arrows, T11 and fellowship are listed", Listed);
         r.Add("features: state follows the server bit on ILT, built-ins are on, nothing is known off ILT", States);
+        r.Add("features: profile JSON is valid ASCII with features and the fellowship rules", ProfileJson);
         r.Add("features: the interface copies the JSON only when it fits, NUL-terminated", InterfaceWrite);
+        r.Add("features: the /qb list rides the profile JSON on ILT worlds only", QuestBonusJson);
+        r.Add("features: the RynthILT.Server table: query, filled in, release", ServerTable);
         r.Add("features: the ILT profile is on with the world; a refusal in chat turns a feature off", ProfileOnWithTheWorld);
         r.Add("features: probed features read checking; options ILT runs off are off until chat shows them", ProbedAndOffInIlt);
         r.Add("features: charms are on with the ILT world unless refused; rows describe themselves", Charms);
@@ -119,6 +124,75 @@ internal static class FeatureCatalogTests
         Check.Eq(IltFeatureCatalog.StateText(IltTri.Unknown), "checking", "unknown reads 'checking'");
         Check.Eq(IltFeatureCatalog.FellowshipMax(true), 29, "ILT fellowships hold 29");
         Check.Eq(IltFeatureCatalog.FellowshipMax(false), 9, "retail fellowships hold 9");
+    }
+
+    private static void ProfileJson()
+    {
+        string json = IltFeatureCatalog.BuildProfileJson(true, "Infinite \"Leaftide\"", false, "probe",
+            new DateTime(2026, 10, 13, 21, 25, 37, DateTimeKind.Utc),
+            key => key == IltFeature.FBlackjack ? IltTri.Off : IltTri.On);
+        bool ascii = true;
+        foreach (char c in json) if (c < 0x20 || c > 0x7E) ascii = false;
+        Check.True(ascii, "plain printable ASCII");
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        JsonElement root = doc.RootElement;
+        Check.True(root.GetProperty("ilt").GetBoolean(), "ilt");
+        Check.Eq(root.GetProperty("world").GetString(), "Infinite \"Leaftide\"", "quotes in the world name survive");
+        Check.Eq(root.GetProperty("checked").GetString(), "2026-10-13T21:25:37Z", "checked time in UTC");
+        Check.Eq(root.GetProperty("features").GetArrayLength(), IltFeatureCatalog.All.Length, "every feature in the JSON");
+        JsonElement fel = root.GetProperty("fellowship");
+        Check.Eq(fel.GetProperty("maxMembers").GetInt32(), 29, "fellowship size");
+        Check.Eq(fel.GetProperty("zoneShare").GetInt32(), 1, "Zone Share on (built in)");
+        Check.Eq(fel.GetProperty("blackjack").GetInt32(), 0, "Fellowship Blackjack off (server bit)");
+
+        string off = IltFeatureCatalog.BuildProfileJson(false, "", false, "", DateTime.MinValue, _ => IltTri.On);
+        using JsonDocument d2 = JsonDocument.Parse(off);
+        Check.Eq(d2.RootElement.GetProperty("fellowship").GetProperty("maxMembers").GetInt32(), 9, "off ILT: retail size");
+        Check.Eq(d2.RootElement.GetProperty("checked").GetString(), "", "never checked: empty time");
+    }
+
+    private static void QuestBonusJson()
+    {
+        var qb = new IltQuestBonusInfo(false, 2, 41, "2 completed, 1 incomplete",
+                                       new[] { "flag\"one", "flagTwo" }, new[] { "flagThree" });
+        string json = IltFeatureCatalog.BuildProfileJson(true, "Infinite Leaftide", false, "probe", DateTime.MinValue, _ => IltTri.On, qb);
+        using JsonDocument doc = JsonDocument.Parse(json);
+        JsonElement q = doc.RootElement.GetProperty("questBonus");
+        Check.False(q.GetProperty("disabled").GetBoolean(), "enabled");
+        Check.Eq(q.GetProperty("generation").GetInt32(), 2, "generation");
+        Check.Eq(q.GetProperty("count").GetInt64(), 41L, "count");
+        Check.Eq(q.GetProperty("status").GetString(), "2 completed, 1 incomplete", "status");
+        Check.Eq(q.GetProperty("completed").GetArrayLength(), 2, "completed flags");
+        Check.Eq(q.GetProperty("completed")[0].GetString(), "flag\"one", "quotes in a flag survive");
+        Check.Eq(q.GetProperty("incomplete")[0].GetString(), "flagThree", "incomplete flags");
+        Check.True(doc.RootElement.TryGetProperty("fellowship", out _), "the fellowship rules are still there");
+
+        string off = IltFeatureCatalog.BuildProfileJson(false, "", false, "", DateTime.MinValue, _ => IltTri.On, qb);
+        using JsonDocument d2 = JsonDocument.Parse(off);
+        Check.False(d2.RootElement.TryGetProperty("questBonus", out _), "off ILT: no /qb list");
+    }
+
+    private static unsafe void ServerTable()
+    {
+        Check.Eq(ServerInterface.Query("RynthILT.Hub", 1), IntPtr.Zero, "another interface's name: not ours");
+        Check.Eq(ServerInterface.Query(RynthIltServerApiV1.InterfaceName, 2), IntPtr.Zero, "a newer version than we have: none");
+        var t = (RynthIltServerApiV1*)ServerInterface.Query(RynthIltServerApiV1.InterfaceName, 1);
+        Check.True(t != null && t->Version == 1 && t->StructSize == (uint)sizeof(RynthIltServerApiV1) && t->GetProfileJson != null,
+                   "v1 is served and filled in");
+
+        // Before login the profile is the not-ILT default; the copy is NUL-terminated and valid JSON.
+        byte* buf = stackalloc byte[262144];
+        int n = t->GetProfileJson(buf, 262144);
+        Check.True(n > 0 && n < 262144 && buf[n] == 0, "the default profile fits and is NUL-terminated");
+        using JsonDocument doc = JsonDocument.Parse(Encoding.UTF8.GetString(buf, n));
+        Check.False(doc.RootElement.GetProperty("ilt").GetBoolean(), "not an ILT world before login");
+        Check.Eq(t->GetProfileJson(buf, 8), n, "too small: the length comes back");
+
+        ServerInterface.Release();
+        Check.Eq(t->Version, 0u, "Release zeroes Version (readers re-query)");
+        Check.Eq(t->GetProfileJson(buf, 64), 0, "answers 0 after release");
+        Check.Eq(ServerInterface.Query(RynthIltServerApiV1.InterfaceName, 1), IntPtr.Zero, "not served after release");
     }
 
     private static unsafe void InterfaceWrite()

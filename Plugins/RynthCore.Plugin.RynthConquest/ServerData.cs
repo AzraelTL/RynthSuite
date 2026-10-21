@@ -16,6 +16,7 @@ internal static class ServerData
                 "Live events and deep crafting.",
                 "Has a PK system on a PvE server.",
                 "RynthOracle has a Conquest quest pack (quests.conquest.csv).",
+                "RynthConquest's pages (Server section, or /rserver): bank and auto-deposit, augmentations, levels past 275, fellowships, custom quests, leaderboards.",
             },
             Discord = "https://discord.gg/Gsadhhv72S",
             Website = "https://dsc.gg/conquerac",
