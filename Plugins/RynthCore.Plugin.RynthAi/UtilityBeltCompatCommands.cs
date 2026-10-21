@@ -140,11 +140,11 @@ public sealed partial class RynthAiPlugin
                 UbNoEquivalent(cmd, "RynthSort reads its rules itself");
                 return true;
 
-            // ── A server's own commands (ub-IT's ACECustom verbs): the server plugin's (RynthILT) ──
+            // ── A server's own commands (ub-IT's server verbs): the active server plugin's, if it takes them ──
             case "qblist":
             case "augs":
                 if (!TryForwardToServerPlugin(new[] { "/ra", "ub", cmd }))
-                    UbNoEquivalent(cmd, "it is a server plugin's command (Infinite Leaftide: RynthILT), and none is loaded");
+                    UbNoEquivalent(cmd, "it is a server plugin's command, and no loaded server plugin takes it");
                 return true;
 
             // ── RynthCore's window placement ────────────────────────────────────

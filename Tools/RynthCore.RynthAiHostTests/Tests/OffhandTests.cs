@@ -114,6 +114,22 @@ internal static class OffhandTests
         Check.Eq(OffhandPlanner.Choose(OffhandMode.Weapon, MainHandKind.OneHandedMelee, 30, all, true, true, false).Id, 10,
             "no slot-wield call on the engine: no dual wield, the shield");
         Check.Eq(P(OffhandMode.Auto, MainHandKind.OneHandedMelee, l: new[] { main }).Id, 0, "the main weapon is never its own off hand");
+
+        // Drakkon, 2026-10-21: Frost and Acid Hand Wraps, the off-hand pick Frost. Against a monster
+        // weak to frost, Frost is the main weapon; the off hand gets Acid, not nothing (Auto with no
+        // shield listed used to leave it empty).
+        var frost = new OffhandCandidate(30, "Frost Hand Wraps", false, false);
+        var acid = new OffhandCandidate(40, "Acid Hand Wraps", false, false);
+        var wraps = new[] { frost, acid };
+        OffhandPlan swapped = OffhandPlanner.Choose(OffhandMode.Auto, MainHandKind.OneHandedMelee, 30, wraps, true, false, true, 30, "Default offhand");
+        Check.Eq(swapped.Id, 40, "the off-hand pick is in the main hand: the other weapon goes in the off hand");
+        Check.True(swapped.Source.Contains("main hand"), "and the log says why: " + swapped.Source);
+        Check.Eq(OffhandPlanner.Choose(OffhandMode.Auto, MainHandKind.OneHandedMelee, 40, wraps, true, false, true, 30, "Default offhand").Id, 30,
+            "Acid in the main hand: the pick, Frost, as before");
+        Check.Eq(OffhandPlanner.Choose(OffhandMode.Auto, MainHandKind.OneHandedMelee, 30, wraps, false, false, true, 30, "Default offhand").Id, 0,
+            "without Dual Wield: still nothing (no shield listed)");
+        Check.Eq(OffhandPlanner.Choose(OffhandMode.Auto, MainHandKind.OneHandedMelee, 30, new[] { frost, shield }, true, false, true, 30, "Default offhand").Id, 10,
+            "no other weapon listed: the mode (here the shield)");
     }
 
     // ── The rig ───────────────────────────────────────────────────────────────

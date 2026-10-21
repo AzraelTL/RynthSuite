@@ -8,7 +8,7 @@ using RynthCore.Plugin.Shared;
 namespace RynthCore.RynthAiHostTests.Fakes;
 
 /// <summary>
-/// A stand-in for a server plugin's "RynthILT.Hub" table (Plugins/Shared/RynthIltHubApi.cs), so the
+/// A stand-in for a server plugin's "RynthServer.Hub" table (Plugins/Shared/RynthServerHubApi.cs), so the
 /// tests can check what RynthAi does WITH a server plugin (RynthILT) as well as without one. Its
 /// functions answer from the static state below; RynthAi's ServerHubClient takes the table through
 /// UseTableForTests. The render functions draw nothing (no ImGui frame in the tests): they only
@@ -35,7 +35,7 @@ internal static unsafe class FakeServerHub
     /// <summary>GetText: id -> text (missing = "").</summary>
     public static readonly Dictionary<string, string> Texts = new(StringComparer.OrdinalIgnoreCase);
 
-    private static RynthIltHubApiV1* _table;
+    private static RynthServerHubApiV1* _table;
 
     public static void Reset()
     {
@@ -58,9 +58,9 @@ internal static unsafe class FakeServerHub
         {
             if (_table == null)
             {
-                var t = (RynthIltHubApiV1*)NativeMemory.AllocZeroed((nuint)sizeof(RynthIltHubApiV1));
-                t->StructSize = (uint)sizeof(RynthIltHubApiV1);
-                t->IsIltWorld = &IsIltWorld;
+                var t = (RynthServerHubApiV1*)NativeMemory.AllocZeroed((nuint)sizeof(RynthServerHubApiV1));
+                t->StructSize = (uint)sizeof(RynthServerHubApiV1);
+                t->IsServerWorld = &IsIltWorld;
                 t->GetFeature = &GetFeature;
                 t->GetTabs = &GetTabs;
                 t->RenderTab = &RenderTab;
@@ -71,7 +71,7 @@ internal static unsafe class FakeServerHub
                 t->GetSetting = &GetSetting;
                 t->SetSetting = &SetSetting;
                 t->GetText = &GetText;
-                t->Version = RynthIltHubApiV1.InterfaceVersion;
+                t->Version = RynthServerHubApiV1.InterfaceVersion;
                 _table = t;
             }
             return (IntPtr)_table;
@@ -99,7 +99,7 @@ internal static unsafe class FakeServerHub
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static int GetTabs(IltTabV1* tabs, int capacity) => 0;
+    private static int GetTabs(ServerHubTabV1* tabs, int capacity) => 0;
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int RenderTab(byte* id) => 0;
@@ -150,7 +150,7 @@ internal static unsafe class FakeServerHub
     private static int AllowSummonOnEmpty() => AllowEmpty ? 1 : 0;
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static int GetSubTabs(byte* parent, IltTabV1* tabs, int capacity)
+    private static int GetSubTabs(byte* parent, ServerHubTabV1* tabs, int capacity)
     {
         string p = Utf8(parent) ?? string.Empty;
         if (!SubTabs.TryGetValue(p, out var list)) return 0;
@@ -161,7 +161,7 @@ internal static unsafe class FakeServerHub
                 Write(list[i].Label, tabs[i].Label, 32);
                 tabs[i].Width = 0;
                 tabs[i].Height = 0;
-                tabs[i].Flags = RynthIltHub.TabShown | RynthIltHub.TabAvailable;
+                tabs[i].Flags = RynthServerHub.TabShown | RynthServerHub.TabAvailable;
             }
         return list.Count;
     }

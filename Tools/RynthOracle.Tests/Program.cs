@@ -46,24 +46,19 @@ namespace RynthOracle.Tests
             Catalog();
             Servers();
             EngineServers();
-            IltProfile();
-            ServerFeatures();
+            QuestPackHook();
+            NoServerNames();
             QuestNotes();
             Void();
             TimerAlerts();
             Pages();
             CharacterExtras();
-            Charms();
-            Breeding();
             Legendary();
-            DynamicStamps();
             GoToParsing();
             Loaders();
             MergedList();
             MarkersReachable();
             GoToButtons();
-            Trackers();
-            GiveParchment();
             Throttle();
             Events();
             QuestTexts();
@@ -207,24 +202,25 @@ namespace RynthOracle.Tests
         private static void Catalog()
         {
             var retail = new QuestCatalog();
-            retail.Load("", msg => Console.WriteLine(msg));
+            retail.Load(null, msg => Console.WriteLine(msg));
             bool bundled = retail.UsingBundled;
             Check(bundled || System.IO.File.Exists(QuestCatalog.DownloadedPath), "bundled list used (no download present)");
             if (bundled)
             {
                 Check(retail.RetailCount == 3565 && retail.ServerCount == 0 && retail.PackServer == "", $"another server: retail only ({retail.RetailCount}+{retail.ServerCount})");
+                // The same quests on the same servers as before the packs moved into their server plugins.
                 var lev = new QuestCatalog();
-                lev.Load("Levistras", null);
-                Check(lev.RetailCount == 3565 && lev.ServerCount == 464 && lev.PackServer == "Levistras", $"Levistras pack: {lev.RetailCount}+{lev.ServerCount}");
+                lev.Load(TestPacks.Levistras, null);
+                Check(lev.RetailCount == 3565 && lev.ServerCount == 464 && lev.PackServer == "Levistras" && lev.PackSource == "from RynthLevistras",
+                      $"Levistras pack (RynthLevistras's): {lev.RetailCount}+{lev.ServerCount}");
                 var cq = new QuestCatalog();
-                cq.Load("Conquest", null);
-                Check(cq.RetailCount == 3565 && cq.ServerCount == 546, $"Conquest pack: {cq.RetailCount}+{cq.ServerCount}");
-                Check(!retail.TryGet("trigram4", out _) && cq.TryGet("trigram4", out Quest tq) && tq.Server == "Conquest", "a Conquest-only quest only loads on ConquestAC");
+                cq.Load(TestPacks.Conquest, null);
+                Check(cq.RetailCount == 3565 && cq.ServerCount == 546, $"Conquest pack (RynthConquest's): {cq.RetailCount}+{cq.ServerCount}");
+                Check(!retail.TryGet("trigram4", out _) && cq.TryGet("trigram4", out Quest tq) && tq.Server == "Conquest", "a Conquest-only quest only loads with Conquest's pack");
             }
-            Check(QuestCatalog.EmbeddedPacks().OrderBy(x => x).SequenceEqual(new[] { "aelrynth", "conquest", "levistras" }), "embedded packs: " + string.Join(",", QuestCatalog.EmbeddedPacks()));
 
             var cat = new QuestCatalog();
-            cat.Load("Aelrynth", msg => Console.WriteLine(msg));
+            cat.Load(TestPacks.Aelrynth, msg => Console.WriteLine(msg));
             if (bundled)
             {
                 Check(cat.PackServer == "Aelrynth" && cat.ServerCount == 712 && cat.HiddenCount == 38 && cat.RetailCount == 3565 - 38,
@@ -268,63 +264,56 @@ namespace RynthOracle.Tests
             Check(st != null && st.HasActive && st.IsActive("ILT") && st.ActivePlugin == "RynthILT" && !st.Picked, "engine state: active ILT, detected");
             Check(st!.Servers.Count == 2 && st.Find("aelrynth") != null && st.Find("x") == null && st.Revision == 3, "engine state: rows");
 
-            // Identity from it.
-            ServerIdentity.FromEngine(st, "Launcher Profile", out string tag, out string world, out string source);
-            Check(tag == ServerTags.InfiniteLeaftide && world == "InfiniteLeaftide", "engine: ILT active is the ILT tag: " + source);
+            // Identity from it: the active server, its name and the plugin asked for its quest pack.
+            ServerIdentity.FromEngine(st, "Launcher Profile", out string id, out string name, out string plugin, out string world, out string source);
+            Check(id == "ilt" && name == "Infinite Leaftide" && plugin == "RynthILT" && world == "InfiniteLeaftide", "engine: the active server and its plugin: " + source);
             Check(source.Contains("host matches"), "engine: the reason is shown: " + source);
 
             var picked = RynthCore.Plugin.Shared.EngineServerState.Parse(EngineJson("conquest", "ConquestAC", "RynthConquest", "conquest", "",
                 EngineRow("ilt", false, "off"), EngineRow("conquest", true, "on", "RynthConquest")))!;
-            ServerIdentity.FromEngine(picked, "Leaftide Box", out tag, out world, out source);
-            Check(tag == ServerTags.Conquest && world == "Leaftide Box", "engine: a pick beats the world name (and the world falls back): " + source);
+            ServerIdentity.FromEngine(picked, "Leaftide Box", out id, out _, out plugin, out world, out source);
+            Check(id == "conquest" && plugin == "RynthConquest" && world == "Leaftide Box", "engine: a pick beats the world name (and the world falls back): " + source);
             Check(source.Contains("picked by hand"), "engine: a pick says so: " + source);
 
             var off = RynthCore.Plugin.Shared.EngineServerState.Parse(EngineJson("", "", "", "mixed", "InfiniteLeaftide", EngineRow("ilt", false, "off")))!;
-            ServerIdentity.FromEngine(off, "", out tag, out _, out source);
-            Check(tag == "", "engine: ILT forced off stays off despite the Leaftide world name: " + source);
+            ServerIdentity.FromEngine(off, "", out id, out _, out plugin, out _, out source);
+            Check(id == "" && plugin == "" && source.Contains("no server active"), "engine: ILT forced off stays off despite the Leaftide world name: " + source);
 
             var unknown = RynthCore.Plugin.Shared.EngineServerState.Parse(EngineJson("", "", "", "auto", "Levistras", EngineRow("ilt", false, "auto")))!;
-            ServerIdentity.FromEngine(unknown, "", out tag, out _, out source);
-            Check(tag == ServerTags.Levistras, "engine: a world the engine has no server for still tags by name: " + source);
+            ServerIdentity.FromEngine(unknown, "", out id, out _, out _, out world, out source);
+            Check(id == "" && world == "Levistras", "engine: a world the engine has no server for is no server (no plugin, so no pack): " + source);
+            ServerIdentity.FromEngine(null, "Levistras", out id, out _, out _, out world, out source);
+            Check(id == "" && world == "Levistras" && source.Contains("older than API v86"), "no server list (an older engine): no server: " + source);
 
             var coldeve = RynthCore.Plugin.Shared.EngineServerState.Parse(EngineJson("coldeve", "Coldeve", "RynthColdeve", "auto", "Coldeve", EngineRow("coldeve", true, "auto", "RynthColdeve")))!;
-            ServerIdentity.FromEngine(coldeve, "", out tag, out _, out source);
-            Check(tag == "" && source.Contains("Coldeve"), "engine: a server without Oracle pages has no tag: " + source);
-
-            Check(ServerIdentity.TagForEngineId("AELRYNTH") == ServerTags.Aelrynth && ServerIdentity.TagForEngineId(null) == "", "engine id to tag");
-            Check(ServerIdentity.EngineIdForTag(ServerTags.Aelrynth) == "aelrynth" && ServerIdentity.EngineIdForTag("") == "", "tag to engine id");
+            ServerIdentity.FromEngine(coldeve, "", out id, out _, out plugin, out _, out source);
+            Check(id == "coldeve" && plugin == "RynthColdeve" && source.Contains("Coldeve"), "engine: any active server is the server, with its plugin: " + source);
 
             // The owner's profile, read leniently (a server plugin's, and RynthILT's).
             var prof = RynthCore.Plugin.Shared.ServerProfileView.Parse(
                 "{\"schema\":1,\"id\":\"coldeve\",\"name\":\"Coldeve\",\"plugin\":\"RynthColdeve\",\"ruleset\":\"PvE\",\"emulator\":\"ACE\",\"botting\":\"forbidden\",\"bottingNote\":\"no bots\",\"accountLimit\":\"3 accounts\"}");
             Check(prof != null && prof.Botting == "forbidden" && prof.Summary() == "PvE, ACE; botting forbidden - no bots; accounts: 3 accounts", "profile: server plugin: " + prof?.Summary());
-            var iltProf = RynthCore.Plugin.Shared.ServerProfileView.Parse("{\"ilt\":true,\"features\":[{\"key\":\"bank\",\"state\":1},{\"key\":\"x\",\"state\":0},{\"key\":\"y\",\"state\":1}]}");
-            Check(iltProf != null && iltProf.Ilt && iltProf.FeaturesOn == 2 && iltProf.Summary() == "ILT world, 2 Leaftide features on", "profile: RynthILT: " + iltProf?.Summary());
+            var iltProf = RynthCore.Plugin.Shared.ServerProfileView.Parse("{\"ilt\":true,\"features\":[{\"key\":\"bank\",\"state\":1}]}");
+            Check(iltProf != null && iltProf.Summary() == "no details", "profile: a server's own fields are its plugin's, not the shared view's: " + iltProf?.Summary());
             Check(RynthCore.Plugin.Shared.ServerProfileView.Parse("") == null && RynthCore.Plugin.Shared.ServerProfileView.Parse("[1]") == null, "profile: junk is null");
-            // A user's server-name list (ub-Rythai's ILT Auto list) against the engine's verdict.
-            string[] list = { "InfiniteLeaftide", "Conquest" };
-            Check(RynthCore.Plugin.Shared.EngineServerState.MatchesNameList(null, "Infinite Leaftide", list), "names: no engine, the world name decides (spaces ignored)");
-            Check(!RynthCore.Plugin.Shared.EngineServerState.MatchesNameList(null, "Coldeve", list), "names: no engine, another world");
-            Check(RynthCore.Plugin.Shared.EngineServerState.MatchesNameList(st, "Launcher Profile", list), "names: ILT active matches a Leaftide name whatever the world");
-            Check(RynthCore.Plugin.Shared.EngineServerState.MatchesNameList(picked, "", list), "names: a picked Conquest matches by id");
-            Check(!RynthCore.Plugin.Shared.EngineServerState.MatchesNameList(coldeve, "InfiniteLeaftide", list), "names: Coldeve active beats a Leaftide world name");
-            Check(!RynthCore.Plugin.Shared.EngineServerState.MatchesNameList(off, "InfiniteLeaftide", list), "names: ILT listed and off stays off");
-            Check(RynthCore.Plugin.Shared.EngineServerState.MatchesNameList(unknown, "Conquest", list), "names: a server the engine doesn't list still matches by world");
         }
 
         private static void Servers()
         {
-            Check(ServerIdentity.TagForWorld("Aeshnidae") == ServerTags.Aelrynth, "Aeshnidae (the live world name) is Aelrynth");
-            Check(ServerIdentity.TagForWorld("Aelrynth Staging") == ServerTags.Aelrynth, "Aelrynth Staging");
-            Check(ServerIdentity.TagForWorld("Conquest") == ServerTags.Conquest, "Conquest");
-            Check(ServerIdentity.TagForWorld("Levistras") == ServerTags.Levistras, "Levistras");
-            Check(ServerIdentity.TagForWorld("Coldeve") == "" && ServerIdentity.TagForWorld("") == "", "other servers have no tag");
-            Check(ServerIdentity.TagForWorld("InfiniteLeaftide") == ServerTags.InfiniteLeaftide, "Infinite Leaftide is the ILT tag (the Quests tab's stamps and guardians, Pet Breeding)");
+            // RynthOracle has no server tags or world-name rules of its own since 2026-10-21: RynthCore's list decides.
+            Check(typeof(ServerIdentity).Assembly.GetType("RynthCore.Plugin.RynthOracle.Data.ServerTags") == null, "no server tags in RynthOracle");
+            Check(typeof(ServerIdentity).GetMethod("TagForWorld", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic) == null,
+                  "no world-name detection in RynthOracle");
             var id = new ServerIdentity();
             id.Force("", "Coldeve");
-            Check(id.Allows(null) && id.Allows("") && !id.Allows(ServerTags.Conquest) && !id.Allows(ServerTags.Aelrynth), "untagged everywhere, tagged nowhere else");
-            id.Force(ServerTags.Conquest, "Conquest");
-            Check(id.Allows(ServerTags.Conquest) && !id.Allows(ServerTags.Aelrynth), "Conquest features only on ConquestAC");
+            Check(id.ServerId == "" && id.DisplayName == "no server" && id.WorldName == "Coldeve" && id.Known, "no server active: retail");
+            id.Force("conquest", "Conquest", "RynthConquest");
+            Check(id.ServerId == "conquest" && id.Plugin == "RynthConquest" && id.DisplayName == "conquest", "a server and the plugin asked for its pack");
+            int rev = id.Revision;
+            id.Force("conquest", "Conquest", "RynthConquest");
+            Check(id.Revision == rev, "the same identity again: no change");
+            id.Reset();
+            Check(!id.Known && id.ServerId == "", "logout: forgotten");
 
             // Tabs per server.
             var c = new OracleContext { InWorld = true };
@@ -333,10 +322,10 @@ namespace RynthOracle.Tests
             string[] none = view.VisibleTabs();
             Check(!none.Contains("Leaderboards") && !none.Contains("Conquest"), "no server tabs on other servers: " + string.Join(",", none));
             // A server's own pages are its server plugin's since 2026-10-20 (RynthConquest, RynthAelrynth).
-            c.Server.Force(ServerTags.Aelrynth, "Aeshnidae");
+            c.Server.Force("aelrynth", "Aeshnidae");
             string[] ael = view.VisibleTabs();
             Check(!ael.Contains("Leaderboards") && !ael.Contains("Conquest"), "Aelrynth: no leaderboards in RynthOracle: " + string.Join(",", ael));
-            c.Server.Force(ServerTags.Conquest, "Conquest");
+            c.Server.Force("conquest", "Conquest");
             string[] cq = view.VisibleTabs();
             Check(!cq.Contains("Leaderboards") && !cq.Contains("Conquest"), "Conquest: no Conquest tab and no leaderboards in RynthOracle: " + string.Join(",", cq));
             foreach (string old in new[] { "Conquest", "Leaderboards" })
@@ -437,8 +426,8 @@ namespace RynthOracle.Tests
         private static OracleContext Context()
         {
             var c = new OracleContext { InWorld = true, NowMs = 10_000_000, UtcNow = DateTime.UtcNow };
-            c.Server.Force(ServerTags.Aelrynth, "Aeshnidae");
-            c.Catalog.Load("Aelrynth", null);
+            c.Server.Force("aelrynth", "Aeshnidae", "RynthAelrynth");
+            c.Catalog.Load(TestPacks.Aelrynth, null);
             c.Flags.OnChatLine("30minattributes - 4 solves (1719432000)\"x\" -1 1800", 0);
             c.Flags.OnChatLine("societyribbonsperdaytimer - 1 solves (" + DateTimeOffset.UtcNow.ToUnixTimeSeconds() + ")\"x\" -1 72000", 0);
             c.Flags.OnChatLine("societyribbonsperdaycounter - 30 solves (1719432000)\"x\" 200 0", 0);
@@ -482,7 +471,7 @@ namespace RynthOracle.Tests
             // Every tab on each server, including the server-specific ones (with data in them).
             c.EarnedTitles.Add(1);
             c.TitlesKnown = true;
-            foreach (string server in new[] { ServerTags.Aelrynth, ServerTags.Conquest, ServerTags.InfiniteLeaftide, "" })
+            foreach (string server in new[] { "aelrynth", "conquest", "" })
             {
                 c.Server.Force(server, server);
                 foreach (string tab in view.VisibleTabs())
@@ -493,7 +482,7 @@ namespace RynthOracle.Tests
                     main.End();
                     ParseAll(host, $"{server}/{tab}", out int ops);
                     Check(ops > 5 && ops < 1400, $"{server}/{tab}: {ops} ops");
-                    if (server == ServerTags.Aelrynth) Console.WriteLine($"  {(server.Length > 0 ? server : "other")}/{tab}: {ops} ops, {main.Body.Length} bytes");
+                    if (server == "aelrynth") Console.WriteLine($"  {(server.Length > 0 ? server : "other")}/{tab}: {ops} ops, {main.Body.Length} bytes");
                     main.MarkSubmitted(true);
                 }
             }
@@ -668,7 +657,7 @@ namespace RynthOracle.Tests
                 OracleView.TabTitles, OracleView.TabVoid, OracleView.TabFellowship, OracleView.TabAbout };
             OracleContext c = Context();
             var view = new OracleView(c);
-            foreach (string server in new[] { ServerTags.Aelrynth, ServerTags.Conquest, ServerTags.InfiniteLeaftide, "" })
+            foreach (string server in new[] { "aelrynth", "conquest", "" })
             {
                 c.Server.Force(server, server);
                 string[] tabs = view.VisibleTabs();
@@ -814,7 +803,7 @@ namespace RynthOracle.Tests
             void Press(string scope) => Click("refresh." + scope);
 
             // A Refresh button on every tab, on every server.
-            foreach (string server in new[] { ServerTags.Aelrynth, ServerTags.Conquest, ServerTags.InfiniteLeaftide, "" })
+            foreach (string server in new[] { "aelrynth", "conquest", "" })
             {
                 c.Server.Force(server, server);
                 foreach (string tab in view.VisibleTabs())

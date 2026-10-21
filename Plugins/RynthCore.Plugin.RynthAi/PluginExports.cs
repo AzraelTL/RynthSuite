@@ -481,20 +481,21 @@ public static unsafe class PluginExports
     }
 
     // Manual HP override from the Damage panel (hp <= 0 clears it).
-    private static IntPtr _awakenedTierJsonPtr = IntPtr.Zero;
+    private static IntPtr _difficultyTierJsonPtr = IntPtr.Zero;
 
-    // Aelrynth difficulty tiers (2026-10-03): the Damage panel's tier label and picker.
-    // {"show":false} off Aelrynth or until the server has sent a tier; else
-    // {"show":true,"current":N,"view":M,"following":bool,"percent":5,"tiers":[0,...]}.
+    // Difficulty tiers (2026-10-03; a server plugin's values since 2026-10-21, CreatureData/DifficultyTier.cs):
+    // the Damage panel's tier label and picker. {"show":false} while no server plugin reports a tier; else
+    // {"show":true,"current":N,"view":M,"following":bool,"percent":P,"tiers":[0,...]} (P: health % a tier).
+    // The export keeps the name the engine binds ("...AwakenedTierJson", its first server's word).
     // An engine without the picker never calls this; the damage JSON then shows the current tier.
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetAwakenedTierJson", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetAwakenedTierJson()
+    public static IntPtr GetDifficultyTierJson()
     {
         try
         {
-            string json = Runtime.Plugin?.BuildAwakenedTierJson() ?? "{\"show\":false}";
+            string json = Runtime.Plugin?.BuildDifficultyTierJson() ?? "{\"show\":false}";
             IntPtr newPtr = Marshal.StringToHGlobalAnsi(json);
-            IntPtr oldPtr = Interlocked.Exchange(ref _awakenedTierJsonPtr, newPtr);
+            IntPtr oldPtr = Interlocked.Exchange(ref _difficultyTierJsonPtr, newPtr);
             if (oldPtr != IntPtr.Zero)
                 Marshal.FreeHGlobal(oldPtr);
             return newPtr;

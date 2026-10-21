@@ -148,6 +148,7 @@ internal static class Program
         SelfRatingsTests.Register(runner);
         ServerHubClientLookupTests.Register(runner);
         UbMtSafetyTests.Register(runner);
+        DifficultyTierTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }

@@ -155,17 +155,17 @@ public sealed class QuestsTabState
 }
 
 /// <summary>The parts of an old ilt-hub.json the universal tabs take over (first load only).</summary>
-public sealed class LegacyIltHubFile
+public sealed class LegacyHubFile
 {
     public PetTabState? Pet;
     /// <summary>The ILT Hub's IltCharacterState: its quest fields have QuestsTabState's names.</summary>
     public QuestsTabState? Character;
-    public LegacyIltGear? Gear;
+    public LegacyHubGear? Gear;
     /// <summary>The ILT Hub's Crafting tab (build-comp-10-11 hosted it in RynthAi): same field names.</summary>
     public CraftingTabState? Crafting;
 }
 
-public sealed class LegacyIltGear
+public sealed class LegacyHubGear
 {
     public string? LastUsdPath;
 }
@@ -202,7 +202,7 @@ internal sealed class MiniRemoteStore
             string legacy = Path.Combine(_charFolder, LegacyFileName);
             if (_charFolder.Length > 0 && File.Exists(legacy))
             {
-                var old = JsonSerializer.Deserialize(File.ReadAllText(legacy), RynthAiJsonContext.Default.LegacyIltHubFile);
+                var old = JsonSerializer.Deserialize(File.ReadAllText(legacy), RynthAiJsonContext.Default.LegacyHubFile);
                 if (old != null)
                 {
                     var s = FromLegacy(old);
@@ -216,7 +216,7 @@ internal sealed class MiniRemoteStore
     }
 
     /// <summary>The universal parts of an old ilt-hub.json as a fresh state.</summary>
-    internal static MiniRemoteState FromLegacy(LegacyIltHubFile old)
+    internal static MiniRemoteState FromLegacy(LegacyHubFile old)
     {
         var s = new MiniRemoteState
         {

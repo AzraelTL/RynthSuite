@@ -78,7 +78,7 @@ internal sealed class MiniRemoteController
     public Func<string, string, string>? MiniRemoteTabCommand { get; set; }
 
     /// <summary>True when the server plugin already says /myquests is off on its server (skip the login refresh).</summary>
-    public bool SkipLoginQuestRefresh => _ctx.ServerHub.ServerActive && _ctx.ServerHub.IsOff(RynthIltHub.FeatureQuests);
+    public bool SkipLoginQuestRefresh => _ctx.ServerHub.ServerActive && _ctx.ServerHub.IsOff(RynthServerHub.FeatureQuests);
 
     // ── Lifecycle ───────────────────────────────────────────────────────────
 
@@ -144,7 +144,7 @@ internal sealed class MiniRemoteController
         RynthLog.Trace(LogCat.Quests, "RefreshQuests()");
         QuestTracker? t = _quests();
         if (t == null) return "Quest tracker not ready.";
-        if (_ctx.ServerHub.IsOff(RynthIltHub.FeatureQuests) || t.Disabled) return "/myquests is disabled on this server.";
+        if (_ctx.ServerHub.IsOff(RynthServerHub.FeatureQuests) || t.Disabled) return "/myquests is disabled on this server.";
         long now = MiniRemoteContext.NowMs;
         if (now - _lastQuestRefreshAt < QuestRefreshCooldownMs)
             return $"Wait {(QuestRefreshCooldownMs - (now - _lastQuestRefreshAt)) / 1000}s (server allows one /myquests per minute).";

@@ -124,16 +124,6 @@ internal sealed partial class OracleView
         return new RefreshResult("Re-read your buffs and dropped the spell timers that ran out. Timers on targets are learned from your casts.");
     }
 
-    /// <summary>The Pet Breeding tab: RynthILT appraises every essence again; the line waits for the new snapshot.</summary>
-    private RefreshResult RefreshBreeding()
-    {
-        if (CoolingDown("breeding")) return new RefreshResult(TooSoon);
-        object before = _c.Breeding;
-        if (!_c.BreedingCommand(RynthCore.Plugin.Shared.IltBreedingView.RefreshVerb()))
-            return new RefreshResult("RynthILT didn't take that (not loaded, or older than 0.3.1).");
-        return new RefreshResult("Asked RynthILT to appraise your essences again.", () => !ReferenceEquals(_c.Breeding, before));
-    }
-
     private RefreshResult RefreshFellowship()
     {
         _c.Fellowship.Invalidate();

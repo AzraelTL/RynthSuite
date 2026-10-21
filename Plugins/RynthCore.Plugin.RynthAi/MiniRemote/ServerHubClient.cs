@@ -1,12 +1,13 @@
-// ServerHubClient.cs - RynthAi's side of a server plugin's hub (the "RynthILT.Hub" table layout,
-// Plugins/Shared/RynthIltHubApi.cs; was IltClient until 2026-10-20): the tabs, sub-tabs and sections
+// ServerHubClient.cs - RynthAi's side of a server plugin's hub ("RynthServer.Hub",
+// Plugins/Shared/RynthServerHubApi.cs; was IltClient until 2026-10-20): the tabs, sub-tabs and sections
 // the Mini Remote hosts for the server you're on, its feature bits (the Quests tab's /myquests bit),
 // its texts and settings, its "/ra" verbs, and its pet gate. RynthAi knows no server's content: it
 // shows what the plugin offers.
 //
-// The plugin is found by the engine's server list first (the active server's owner plugin, under the
-// neutral name "RynthServer.Hub"), then RynthILT under "RynthILT.Hub" (every RynthILT answers that;
-// older ones only that). Without one (not installed, too old, not loaded yet: any retail-like world)
+// The plugin is found through RynthCore's server list (plugin API v86, GetServerStateJson): the
+// active server's owner plugin first, else the owners of the other servers it lists (a server plugin
+// may follow its own world check or override), preferring one that says this world is its server.
+// Without one (not installed, too old, not loaded yet, an engine before v86: any retail-like world)
 // every call answers "nothing": no tab, no section, unknown feature bits, no verbs. The table is
 // looked up on the pump thread (Tick) at most every RecheckMs and kept in a volatile field for the
 // render thread; the plugin never frees it (Version goes to 0 on its shutdown), so reading a stale
@@ -32,7 +33,7 @@ internal sealed unsafe class ServerHubClient
     private IntPtr _table;          // volatile reads/writes: the render thread uses what the pump found
     private long _checkedAt;
     private bool _checkedOnce;      // false: look now (a sentinel time would overflow "now - _checkedAt")
-    private readonly IltTabV1[] _tabBuf = new IltTabV1[MaxTabs];
+    private readonly ServerHubTabV1[] _tabBuf = new ServerHubTabV1[MaxTabs];
     private readonly List<ServerTabInfo> _tabs = new();
 
     private bool _pinned;           // tests: a table handed in, never looked up
@@ -52,39 +53,69 @@ internal sealed unsafe class ServerHubClient
     {
         if (_pinned) return;
         long now = Environment.TickCount64;
-        var t = (RynthIltHubApiV1*)System.Threading.Volatile.Read(ref _table);
+        var t = (RynthServerHubApiV1*)System.Threading.Volatile.Read(ref _table);
         if (!LookupDue(_checkedOnce, _checkedAt, now, haveTable: t != null, tableLive: t != null && t->Version >= 1)) return;
         _checkedOnce = true;
         _checkedAt = now;
         IntPtr found = IntPtr.Zero;
         if (_host.HasGetPluginInterface)
         {
-            // The active server's own plugin (the engine's server list), under the neutral name ...
-            string owner = ActiveServerPlugin();
-            if (owner.Length > 0) found = Look(owner, RynthIltHubApiV1.NeutralInterfaceName);
-            // ... else RynthILT under its own name (every RynthILT; it also follows its own world check).
-            if (found == IntPtr.Zero) found = Look(RynthIltHub.PluginName, RynthIltHubApiV1.InterfaceName);
+            EngineServerState? st = EngineState();
+            IReadOnlyList<string> owners = OwnerOrder(st);
+            bool activeFirst = st != null && st.ActivePlugin.Length > 0;
+            IntPtr first = IntPtr.Zero;
+            for (int i = 0; i < owners.Count && found == IntPtr.Zero; i++)
+            {
+                IntPtr p = Look(owners[i]);
+                if (p == IntPtr.Zero) continue;
+                // The active server's own plugin is the one; another server's only when it claims this world.
+                var hub = (RynthServerHubApiV1*)p;
+                if ((i == 0 && activeFirst) || (hub->IsServerWorld != null && hub->IsServerWorld() != 0)) found = p;
+                else if (first == IntPtr.Zero) first = p;
+            }
+            // None claims this world: the first that serves a hub (its tabs say they're hidden).
+            if (found == IntPtr.Zero) found = first;
         }
         System.Threading.Volatile.Write(ref _table, found);
     }
 
-    /// <summary>A hub table <paramref name="plugin"/> serves as <paramref name="iface"/>, or 0.</summary>
-    private IntPtr Look(string plugin, string iface)
+    /// <summary>A hub table <paramref name="plugin"/> serves, or 0.</summary>
+    private IntPtr Look(string plugin)
     {
-        var p = (RynthIltHubApiV1*)_host.GetPluginInterface(plugin, iface, RynthIltHubApiV1.InterfaceVersion);
+        var p = (RynthServerHubApiV1*)_host.GetPluginInterface(plugin, RynthServerHubApiV1.InterfaceName, RynthServerHubApiV1.InterfaceVersion);
         // Any table at least as big as the first release's: newer functions are checked with Has.
-        return p != null && p->Version >= 1 && p->StructSize >= RynthIltHubApiV1.BaseStructSize ? (IntPtr)p : IntPtr.Zero;
+        return p != null && p->Version >= 1 && p->StructSize >= RynthServerHubApiV1.BaseStructSize ? (IntPtr)p : IntPtr.Zero;
     }
 
-    /// <summary>The plugin that owns the engine's active server ("" when none, or the engine is pre-v86). Pump thread.</summary>
-    private string ActiveServerPlugin()
+    /// <summary>RynthCore's server list (null when none, or the engine is pre-v86). Pump thread.</summary>
+    private EngineServerState? EngineState()
     {
         try
         {
-            if (!_host.HasGetServerStateJson || !_host.TryGetServerStateJson(out string json)) return string.Empty;
-            return EngineServerState.Parse(json)?.ActivePlugin ?? string.Empty;
+            if (!_host.HasGetServerStateJson || !_host.TryGetServerStateJson(out string json)) return null;
+            return EngineServerState.Parse(json);
         }
-        catch { return string.Empty; }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// The plugins to ask for a hub, in order: the active server's owner, then every other server's
+    /// owner RynthCore lists (each once). Empty without a server list. Pure.
+    /// </summary>
+    internal static IReadOnlyList<string> OwnerOrder(EngineServerState? st)
+    {
+        var list = new List<string>();
+        if (st == null) return list;
+        if (st.ActivePlugin.Length > 0) list.Add(st.ActivePlugin);
+        foreach (EngineServer s in st.Servers)
+        {
+            if (s.Plugin.Length == 0) continue;
+            bool seen = false;
+            foreach (string p in list)
+                if (p.Equals(s.Plugin, StringComparison.OrdinalIgnoreCase)) { seen = true; break; }
+            if (!seen) list.Add(s.Plugin);
+        }
+        return list;
     }
 
     /// <summary>Forget the table (login, logout); the next Tick looks again.</summary>
@@ -97,7 +128,7 @@ internal sealed unsafe class ServerHubClient
 
     /// <summary>
     /// Whether Tick looks the table up again. Pure. Always on the first call (and after Reset), at
-    /// once when the table RynthILT gave is shut down (Version 0), else every <see cref="RecheckMs"/>.
+    /// once when the table the plugin gave is shut down (Version 0), else every <see cref="RecheckMs"/>.
     /// </summary>
     internal static bool LookupDue(bool checkedOnce, long checkedAt, long now, bool haveTable, bool tableLive)
     {
@@ -106,11 +137,11 @@ internal sealed unsafe class ServerHubClient
         return now - checkedAt >= RecheckMs;
     }
 
-    private RynthIltHubApiV1* T
+    private RynthServerHubApiV1* T
     {
         get
         {
-            var t = (RynthIltHubApiV1*)System.Threading.Volatile.Read(ref _table);
+            var t = (RynthServerHubApiV1*)System.Threading.Volatile.Read(ref _table);
             return t != null && t->Version >= 1 ? t : null;
         }
     }
@@ -118,13 +149,13 @@ internal sealed unsafe class ServerHubClient
     /// <summary>A server plugin answers (any thread).</summary>
     public bool Loaded => T != null;
 
-    /// <summary>This world is the plugin's server (or forced there), as it sees it (RynthILT: Infinite Leaftide). Any thread.</summary>
+    /// <summary>This world is the plugin's server (or forced there), as it sees it. Any thread.</summary>
     public bool ServerActive
     {
         get
         {
             var t = T;
-            return t != null && t->IsIltWorld != null && t->IsIltWorld() != 0;
+            return t != null && t->IsServerWorld != null && t->IsServerWorld() != 0;
         }
     }
 
@@ -144,13 +175,13 @@ internal sealed unsafe class ServerHubClient
     public bool IsOn(string key) => Feature(key) == 1;
 
     /// <summary>
-    /// A short text from the server plugin (RynthIltHub.Text*: the session report's tail, its server id);
+    /// A short text from the server plugin (RynthServerHub.Text*: the session report's tail, its server id);
     /// "" without one, from an older one, or for nothing. Any thread.
     /// </summary>
     public string Text(string id)
     {
         var t = T;
-        if (t == null || !RynthIltHubApiV1.Has(t, RynthIltHubApiV1.GetTextOffset) || t->GetText == null) return string.Empty;
+        if (t == null || !RynthServerHubApiV1.Has(t, RynthServerHubApiV1.GetTextOffset) || t->GetText == null) return string.Empty;
         byte* buf = stackalloc byte[256];
         buf[0] = 0;
         int n;
@@ -161,7 +192,7 @@ internal sealed unsafe class ServerHubClient
     }
 
     /// <summary>
-    /// This character forces the plugin's server (RynthILT: "Treat this world as ILT"; set there or in
+    /// This character forces the plugin's server (its own override; set there or in
     /// RynthCore's Options > Diagnostics, never by RynthAi). Any thread.
     /// </summary>
     public bool ServerForced
@@ -169,7 +200,7 @@ internal sealed unsafe class ServerHubClient
         get
         {
             var t = T;
-            return t != null && t->GetForceIlt != null && t->GetForceIlt() != 0;
+            return t != null && t->GetForceServer != null && t->GetForceServer() != 0;
         }
     }
 
@@ -180,22 +211,22 @@ internal sealed unsafe class ServerHubClient
         var t = T;
         if (t == null || t->GetTabs == null) return _tabs;
         int n;
-        fixed (IltTabV1* buf = _tabBuf) n = t->GetTabs(buf, MaxTabs);
+        fixed (ServerHubTabV1* buf = _tabBuf) n = t->GetTabs(buf, MaxTabs);
         n = Math.Min(n, MaxTabs);
         for (int i = 0; i < n; i++)
         {
-            ref IltTabV1 tab = ref _tabBuf[i];
+            ref ServerHubTabV1 tab = ref _tabBuf[i];
             string id, label;
             fixed (byte* pid = tab.Id) id = Marshal.PtrToStringUTF8((IntPtr)pid) ?? string.Empty;
             fixed (byte* plabel = tab.Label) label = Marshal.PtrToStringUTF8((IntPtr)plabel) ?? string.Empty;
             if (id.Length == 0) continue;
             _tabs.Add(new ServerTabInfo(id, label.Length > 0 ? label : id, tab.Width, tab.Height,
-                (tab.Flags & RynthIltHub.TabShown) != 0, (tab.Flags & RynthIltHub.TabAvailable) != 0));
+                (tab.Flags & RynthServerHub.TabShown) != 0, (tab.Flags & RynthServerHub.TabAvailable) != 0));
         }
         return _tabs;
     }
 
-    /// <summary>Render thread: one ILT tab's body into the current child window; false = nothing drawn.</summary>
+    /// <summary>Render thread: one of the plugin's tabs into the current child window; false = nothing drawn.</summary>
     public bool RenderTab(string id)
     {
         var t = T;
@@ -204,7 +235,7 @@ internal sealed unsafe class ServerHubClient
         return t->RenderTab(s.P) != 0;
     }
 
-    /// <summary>Render thread: an ILT section (RynthIltHub.Section*); false = nothing drawn (not ILT, or no RynthILT).</summary>
+    /// <summary>Render thread: a server section (RynthServerHub.Section*); false = nothing drawn (not its server, or no plugin).</summary>
     public bool RenderSection(string id)
     {
         var t = T;
@@ -213,7 +244,7 @@ internal sealed unsafe class ServerHubClient
         return t->RenderSection(s.P) != 0;
     }
 
-    /// <summary>An ILT "/ra" verb ("hub bank", "guardian handin", ...); false when RynthILT doesn't take it.</summary>
+    /// <summary>One of the plugin's "/ra" verbs ("hub bank", ...); false when it doesn't take it.</summary>
     public bool Command(string text)
     {
         var t = T;
@@ -224,21 +255,21 @@ internal sealed unsafe class ServerHubClient
 
     /// <summary>
     /// The server plugin's answer to "may an EMPTY pet essence be summoned?" (the server refills it;
-    /// RynthILT: ACECustom's Summon Essence Refill charm). False without one, or from an older one
+    /// e.g. a refill charm). False without one, or from an older one
     /// that doesn't answer: an empty essence is then never used. Any thread.
     /// </summary>
     public bool AllowSummonOnEmpty()
     {
         var t = T;
-        return t != null && RynthIltHubApiV1.Has(t, RynthIltHubApiV1.AllowSummonOnEmptyOffset)
+        return t != null && RynthServerHubApiV1.Has(t, RynthServerHubApiV1.AllowSummonOnEmptyOffset)
                && t->AllowSummonOnEmpty != null && t->AllowSummonOnEmpty() != 0;
     }
 
-    /// <summary>One of the server plugin's mirrored settings (RynthIltHub.Setting*): its value, -1 when not offered. Any thread.</summary>
+    /// <summary>One of the server plugin's mirrored settings (RynthServerHub.Setting*): its value, -1 when not offered. Any thread.</summary>
     public int Setting(string key)
     {
         var t = T;
-        if (t == null || !RynthIltHubApiV1.Has(t, RynthIltHubApiV1.GetSettingOffset) || t->GetSetting == null) return -1;
+        if (t == null || !RynthServerHubApiV1.Has(t, RynthServerHubApiV1.GetSettingOffset) || t->GetSetting == null) return -1;
         using var k = new Utf8(key);
         return t->GetSetting(k.P);
     }
@@ -247,7 +278,7 @@ internal sealed unsafe class ServerHubClient
     public bool SetSetting(string key, int value)
     {
         var t = T;
-        if (t == null || !RynthIltHubApiV1.Has(t, RynthIltHubApiV1.SetSettingOffset) || t->SetSetting == null) return false;
+        if (t == null || !RynthServerHubApiV1.Has(t, RynthServerHubApiV1.SetSettingOffset) || t->SetSetting == null) return false;
         using var k = new Utf8(key);
         return t->SetSetting(k.P, value) != 0;
     }
@@ -256,15 +287,15 @@ internal sealed unsafe class ServerHubClient
 
     /// <summary>
     /// The sub-tabs the server plugin adds to one of the Mini Remote's tabs (<paramref name="parent"/>
-    /// "pets": RynthILT's Breeding). Each id is a RenderSection id. Empty without one. A new list each
+    /// "pets": e.g. a Breeding sub-tab). Each id is a RenderSection id. Empty without one. A new list each
     /// call (the render thread draws them, a command looks one up). Any thread.
     /// </summary>
     public IReadOnlyList<ServerTabInfo> SubTabs(string parent)
     {
         var t = T;
-        if (t == null || !RynthIltHubApiV1.Has(t, RynthIltHubApiV1.GetSubTabsOffset) || t->GetSubTabs == null)
+        if (t == null || !RynthServerHubApiV1.Has(t, RynthServerHubApiV1.GetSubTabsOffset) || t->GetSubTabs == null)
             return Array.Empty<ServerTabInfo>();
-        IltTabV1* buf = stackalloc IltTabV1[MaxSubTabs];
+        ServerHubTabV1* buf = stackalloc ServerHubTabV1[MaxSubTabs];
         int n;
         using (var p = new Utf8(parent)) n = t->GetSubTabs(p.P, buf, MaxSubTabs);
         n = Math.Min(n, MaxSubTabs);
@@ -272,14 +303,14 @@ internal sealed unsafe class ServerHubClient
         var list = new List<ServerTabInfo>(n);
         for (int i = 0; i < n; i++)
         {
-            IltTabV1* tab = &buf[i];
+            ServerHubTabV1* tab = &buf[i];
             tab->Id[23] = 0;      // never read past a buffer the other side filled to the brim
             tab->Label[31] = 0;
             string id = Marshal.PtrToStringUTF8((IntPtr)tab->Id) ?? string.Empty;
             string label = Marshal.PtrToStringUTF8((IntPtr)tab->Label) ?? string.Empty;
             if (id.Length == 0) continue;
             list.Add(new ServerTabInfo(id, label.Length > 0 ? label : id, tab->Width, tab->Height,
-                (tab->Flags & RynthIltHub.TabShown) != 0, (tab->Flags & RynthIltHub.TabAvailable) != 0));
+                (tab->Flags & RynthServerHub.TabShown) != 0, (tab->Flags & RynthServerHub.TabAvailable) != 0));
         }
         return list;
     }

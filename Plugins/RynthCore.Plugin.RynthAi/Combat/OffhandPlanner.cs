@@ -152,7 +152,9 @@ internal static class OffhandRules
 ///     adds none).
 ///   * An explicit item (the Damage tab's per-monster offhand, else the rule's old item pick):
 ///     used when it is listed and allowed (a weapon needs the Dual Wield skill and the
-///     slot-wield call), else the mode decides.
+///     slot-wield call), else the mode decides. An explicit weapon that is the main weapon this
+///     fight (picked for the monster's weakness) gives its place to the other listed one-handed
+///     weapon, so the character keeps dual wielding.
 ///   * Shield: the best listed shield. Weapon: a second listed one-handed melee weapon when
 ///     the Dual Wield skill is trained, else the best shield. Auto: the best shield; a second
 ///     listed one-handed weapon instead only when <paramref name="preferDualWield"/> is on and
@@ -180,12 +182,21 @@ internal static class OffhandPlanner
             else if (weapon == null || (c.InOffhand && !weapon.InOffhand)) weapon = c;
         }
 
-        if (explicitId != 0 && explicitId != mainId)
+        if (explicitId != 0)
         {
             foreach (var c in listed)
             {
                 if (c.Id != explicitId) continue;
-                if (c.IsShield || dualOk) return new OffhandPlan(c.Id, explicitSource);
+                if (explicitId != mainId)
+                {
+                    if (c.IsShield || dualOk) return new OffhandPlan(c.Id, explicitSource);
+                }
+                // The off-hand weapon picked is the main weapon this fight (chosen for the monster's
+                // weakness): the other listed one-handed weapon goes in the off hand, so the
+                // character still dual wields. It used to fall to the mode, and Auto with no shield
+                // listed left the off hand empty (Drakkon, 2026-10-21).
+                else if (!c.IsShield && dualOk && weapon != null)
+                    return new OffhandPlan(weapon.Id, explicitSource + "; it is in the main hand, so the other weapon");
                 break;
             }
         }

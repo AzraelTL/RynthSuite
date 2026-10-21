@@ -24,6 +24,54 @@ public static unsafe class PluginExports
         catch { }
         try { ReleaseSnapshot(); }
         catch { }
+        try { ReleaseSections(); }
+        catch { }
+    }
+
+    // The windows RynthNet draws (plugin API v89 hosts them; docs in RynthCore docs/PLUGIN_WINDOWS.md).
+    private static string? _sectionsJson;
+    private static IntPtr _sectionsPtr;
+
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetSectionsJson", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static IntPtr GetSectionsJson()
+    {
+        try
+        {
+            if (Runtime.Plugin == null) return IntPtr.Zero;
+            string json = Characters.CharactersManifest.Json;
+            if (json == _sectionsJson && _sectionsPtr != IntPtr.Zero) return _sectionsPtr;
+            _sectionsJson = json;
+            IntPtr fresh = Marshal.StringToCoTaskMemUTF8(json);
+            IntPtr old = Interlocked.Exchange(ref _sectionsPtr, fresh);
+            if (old != IntPtr.Zero) Marshal.FreeCoTaskMem(old);
+            return fresh;
+        }
+        catch { return IntPtr.Zero; }
+    }
+
+    private static void ReleaseSections()
+    {
+        IntPtr old = Interlocked.Exchange(ref _sectionsPtr, IntPtr.Zero);
+        if (old != IntPtr.Zero) Marshal.FreeCoTaskMem(old);
+        _sectionsJson = null;
+    }
+
+    // A window's body (AC's render thread): 1 drawn, 0 not this plugin's surface or not ready.
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginRenderEmbed", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int RenderEmbed(byte* surface, float width, float height, float* wantWidth, float* wantHeight)
+    {
+        try
+        {
+            if (surface == null) return 0;
+            string name = Marshal.PtrToStringUTF8((IntPtr)surface) ?? string.Empty;
+            if (name.EndsWith(":popout", StringComparison.Ordinal)) name = name[..^":popout".Length];
+            RynthNetPlugin? plugin = Runtime.Plugin;
+            if (plugin == null || !plugin.RenderEmbed(name, out float wantH)) return 0;
+            if (wantWidth != null) *wantWidth = width;
+            if (wantHeight != null) *wantHeight = wantH > 0 ? wantH : height;
+            return 1;
+        }
+        catch { return 0; }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginName", CallConvs = new[] { typeof(CallConvCdecl) })]

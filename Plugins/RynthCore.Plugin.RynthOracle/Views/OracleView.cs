@@ -13,16 +13,17 @@ internal sealed partial class OracleView
         TabSkills = "Skills", TabAttributes = "Attributes", TabProgress = "Progress",
         TabAugs = "Augs", TabSociety = "Society",
         TabTitles = "Titles", TabVoid = "Void", TabFellowship = "Fellowship",
-        TabBreeding = "Pet Breeding", TabAbout = "About";
-    // The Markers tab (and the Legendary and Dynamic Stamps trackers and RynthILT's Temple guardians)
-    // are rows of the Quests tab: QuestsTab.cs, ShowTrackers, /ro markers. A saved tab name of the old
-    // Markers tab falls back to Quests (see Tab).
+        TabAbout = "About";
+    // The Markers tab (and the Legendary tracker) are rows of the Quests tab: QuestsTab.cs,
+    // ShowTrackers, /ro markers. A saved tab name of an old tab falls back to Quests (see Tab).
+    // A server's own pages are its server plugin's: Conquest's and Aelrynth's since 2026-10-20,
+    // Infinite Leaftide's (Pet Breeding, the stamps and guardians) since 2026-10-21.
 
     /// <summary>
-    /// A tab: shown where any of its server tags matches the server; no tags = everywhere (retail).
-    /// Refresh is the page's Refresh button (Views\RefreshBar.cs); Help its tooltip.
+    /// A tab (every one is shown on every server). Refresh is the page's Refresh button
+    /// (Views\RefreshBar.cs); Help its tooltip.
     /// </summary>
-    private sealed record TabDef(string Name, string[] Servers, Action<UiWindow> Draw, bool LiveTimers,
+    private sealed record TabDef(string Name, Action<UiWindow> Draw, bool LiveTimers,
                                  Func<RefreshResult> Refresh, Func<string> Help);
 
     private readonly OracleContext _c;
@@ -35,60 +36,37 @@ internal sealed partial class OracleView
     public OracleView(OracleContext c)
     {
         _c = c;
-        string[] any = Array.Empty<string>();
         _tabs = new TabDef[]
         {
-            new(TabQuests, any, DrawQuests, true, () => RefreshQuests(),
+            new(TabQuests, DrawQuests, true, () => RefreshQuests(),
                 () => "Sends /myquests to the server and reads the reply."),
-            new(TabCharacter, any, DrawCharacter, true, RefreshCharacter,
+            new(TabCharacter, DrawCharacter, true, RefreshCharacter,
                 () => "Re-reads your level, experience, buffs and skills from the game now (and RynthAi's session)."),
             // Skills / Attributes / Progress: RynthCore draws its Skills panel body under the tab
             // strip (SkillsEmbed). The engine's panel reads the game itself, so there is no Refresh row.
-            new(TabSkills, any, DrawEmbedded, false, RefreshCharacter,
+            new(TabSkills, DrawEmbedded, false, RefreshCharacter,
                 () => "RynthCore's skills panel: raise and train skills."),
-            new(TabAttributes, any, DrawEmbedded, false, RefreshCharacter,
+            new(TabAttributes, DrawEmbedded, false, RefreshCharacter,
                 () => "RynthCore's skills panel: attributes and vitals."),
-            new(TabProgress, any, DrawEmbedded, false, RefreshCharacter,
-                () => "RynthCore's skills panel: progression planners (Infinite Leaftide)."),
-            new(TabAugs, any, DrawAugs, true, RefreshCharacterAndQuests,
+            new(TabProgress, DrawEmbedded, false, RefreshCharacter,
+                () => "RynthCore's skills panel: progression planners (where the server has them)."),
+            new(TabAugs, DrawAugs, true, RefreshCharacterAndQuests,
                 () => "Re-reads your character from the game and sends /myquests for the gem timers."),
-            new(TabSociety, any, DrawSociety, true, RefreshCharacterAndQuests,
+            new(TabSociety, DrawSociety, true, RefreshCharacterAndQuests,
                 () => "Re-reads your society standing from the game and sends /myquests for today's ribbons and quest timers."),
-            new(TabTitles, any, DrawTitles, false, RefreshTitles,
+            new(TabTitles, DrawTitles, false, RefreshTitles,
                 () => "Re-reads the titles you hold from the game."),
-            new(TabVoid, any, DrawVoid, true, RefreshVoid,
+            new(TabVoid, DrawVoid, true, RefreshVoid,
                 () => "Re-reads your buffs from the game and drops the spell timers that ran out."),
-            new(TabFellowship, any, DrawFellowship, false, RefreshFellowship,
+            new(TabFellowship, DrawFellowship, false, RefreshFellowship,
                 () => "Re-reads the fellowship and its members from the game."),
-            // A server's own pages are its server plugin's since 2026-10-20: Conquest's (bank, augs,
-            // boards, ...) RynthConquest's, Aelrynth's leaderboards and Trials RynthAelrynth's.
-            // Infinite Leaftide only, and only while the server has pet breeding (BreedingOffered).
-            new(TabBreeding, new[] { Data.ServerTags.InfiniteLeaftide }, DrawBreeding, false, RefreshBreeding,
-                () => "Asks RynthILT to appraise every essence again (charges, rest timers, bond, growth)."),
-            new(TabAbout, any, DrawAbout, false, RefreshAbout,
+            new(TabAbout, DrawAbout, false, RefreshAbout,
                 () => "Loads the quest list and server pack from their files again and asks RynthCore which server this is."),
         };
     }
 
-    private bool Visible(TabDef t)
-    {
-        if (t.Name == TabBreeding && !BreedingOffered()) return false;
-        if (t.Servers.Length == 0) return true;
-        foreach (string s in t.Servers) if (_c.Server.Is(s)) return true;
-        return false;
-    }
-
-    /// <summary>
-    /// The Pet Breeding tab is offered on an Infinite Leaftide world unless RynthILT's profile says
-    /// the server has pet breeding switched off (a feature it doesn't know yet counts as on).
-    /// </summary>
-    internal bool BreedingOffered()
-    {
-        if (!_c.Server.Is(Data.ServerTags.InfiniteLeaftide)) return false;
-        foreach (Data.IltFeature f in _c.Ilt.Profile.Features)
-            if (f.Key == "pet_breeding") return f.State != RynthCore.Plugin.Shared.RynthIltServer.StateOff;
-        return true;
-    }
+    /// <summary>Every tab shows on every server (a server's own pages are its server plugin's).</summary>
+    private static bool Visible(TabDef t) => true;
 
     /// <summary>The selected tab's name; a tab not available on this server falls back to Quests.</summary>
     public string Tab

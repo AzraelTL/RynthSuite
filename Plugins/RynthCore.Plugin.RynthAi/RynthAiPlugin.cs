@@ -192,10 +192,11 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     // Per-character learned combat damage (avg damage by wcid/element/tier +
     // learned HP-to-kill), used by CombatManager for kill-shot prediction.
     private CreatureData.MonsterDamageStore? _damageStore;
-    // Aelrynth's difficulty tier where the player stands (and which server this is): keys the
-    // tier-scaled learned numbers. Inert (tier 0) on every other server.
-    private readonly CreatureData.AwakenedTier _tier = new();
-    internal CreatureData.AwakenedTier AwakenedTier => _tier;
+    // The difficulty tier where the player stands, as the active server's plugin reports it (and
+    // which server this is): keys the tier-scaled learned numbers. Inert (tier 0) on every server
+    // whose plugin reports none.
+    private readonly CreatureData.DifficultyTier _tier = new();
+    internal CreatureData.DifficultyTier DifficultyTier => _tier;
     // The tier the Damage panel shows: -1 = the current one (the default).
     private volatile int _damageViewTier = -1;
     // wcids appraised this session (AutoId of nearby mobs). Surfaced as bare rows in the
@@ -755,7 +756,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _combatManager.SetPlayerId(_playerId);
         _combatManager.SetDamageStores(_creatureStore, _damageStore);
         _combatManager.MobSeedLookup = LookupMobSeed;
-        _combatManager.SetAwakenedTier(_tier);
+        _combatManager.SetDifficultyTier(_tier);
         // The raycast init thread may already have finished (warm dats): hand it over now.
         WireRaycastIntoCombat();
         _navigationEngine?.SetCombatManager(_combatManager);
@@ -1534,7 +1535,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             _objectCache?.Tick();
             if (diag) Host.Log("[RynthAi] OnTick: after cache tick");
 
-            if (_loginComplete) TickAwakenedTier();
+            if (_loginComplete) TickDifficultyTier();
 
             // A stop the action pacing held (nothing of ours moving, a server action unanswered)
             // goes out as soon as the server has answered: a stop is never dropped (2026-10-12).
@@ -2585,7 +2586,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     {
         var store = _damageStore;
         if (store == null) return "[]";
-        // The Aelrynth difficulty tier shown (0 off Aelrynth): HP, kills, casts to kill, seconds
+        // The difficulty tier shown (0 without a server plugin's tiers): HP, kills, casts to kill, seconds
         // per kill and hit rate are that tier's; damage per cast and every rule are shared.
         int vt = DamageViewDifficulty;
         _jsonViewTier = vt;
@@ -2961,17 +2962,18 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     {
         if (_damageStore == null) return;
         // The Damage panel shows (and so edits) the HP of the difficulty tier it shows; the
-        // override is kept as the real-Dereth value, which every tier scales by 5% a tier.
-        // Off Aelrynth the tier is 0 and this is the value as typed, as before.
+        // override is kept as the real-Dereth value, which every tier scales by the server's
+        // percent a tier. Without a server plugin's tiers the tier is 0 and this is the value as
+        // typed, as before.
         int vt = DamageViewDifficulty;
-        double value = hp > 0 && vt > 0 ? hp / CreatureData.AwakenedTier.HealthScale(vt) : hp;
+        double value = hp > 0 && vt > 0 ? hp / _tier.HealthScale(vt) : hp;
         foreach (uint w in DamageGroupOf(wcid)) _damageStore.SetManualHp(w, value);   // every kind of the row
         _damageStore.SaveIfDirty();
     }
 
     /// <summary>
-    /// The Aelrynth difficulty tier the Damage panel shows: the one picked there, else the one
-    /// where the player stands. Always 0 off Aelrynth (or before the server has sent a tier).
+    /// The difficulty tier the Damage panel shows: the one picked there, else the one where the
+    /// player stands. Always 0 while no server plugin reports a tier.
     /// </summary>
     internal int DamageViewDifficulty
     {
@@ -2987,10 +2989,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     public void SetDamageViewTier(int tier) => _damageViewTier = tier < 0 ? -1 : tier;
 
     /// <summary>
-    /// The tier picker's state for the Damage panel: {"show":false} off Aelrynth or until the
-    /// server has sent a tier this login - the panel then shows nothing of it.
+    /// The tier picker's state for the Damage panel (RynthPluginGetAwakenedTierJson): {"show":false}
+    /// while no server plugin reports a tier - the panel then shows nothing of it.
     /// </summary>
-    public string BuildAwakenedTierJson()
+    public string BuildDifficultyTierJson()
     {
         if (!_tier.Active) return "{\"show\":false}";
         var tiers = new SortedSet<int> { 0, _tier.Current };
@@ -3001,7 +3003,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         sb.Append("{\"show\":true,\"current\":").Append(_tier.Current)
           .Append(",\"view\":").Append(view)
           .Append(",\"following\":").Append(_damageViewTier < 0 ? "true" : "false")
-          .Append(",\"percent\":").Append(JsonNum(CreatureData.AwakenedTier.PercentPerTier))
+          .Append(",\"percent\":").Append(JsonNum(_tier.HealthPercentPerTier))
           .Append(",\"tiers\":[").Append(string.Join(",", tiers)).Append("]}");
         return sb.ToString();
     }
@@ -3009,15 +3011,15 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     /// <summary>
     /// A monster's HP at a difficulty tier, for the Damage panel: the manual override (a
     /// real-Dereth value, scaled), else that tier's appraisal, else that tier's learned pool
-    /// (<paramref name="learned"/>), else - above tier 0 only - tier 0's scaled by 5% a tier,
+    /// (<paramref name="learned"/>), else - above tier 0 only - tier 0's scaled by the tier,
     /// flagged as an estimate. At tier 0 this is the panel's old order exactly.
     /// </summary>
     private (double Hp, bool Manual, bool Estimated, string Source) HpAt(uint wcid, int difficulty, bool learned = true)
     {
         var store = _damageStore;
         if (store == null || wcid == 0) return (0, false, false, "");
-        double scale = CreatureData.AwakenedTier.HealthScale(difficulty);
-        double pct = difficulty * CreatureData.AwakenedTier.PercentPerTier;
+        double scale = _tier.HealthScale(difficulty);
+        double pct = difficulty * _tier.HealthPercentPerTier;
         double manual = store.GetManualHp(wcid);
         if (manual > 0)
             return (manual * scale, true, false, difficulty > 0 ? $"set by you (real Dereth {manual:0}, +{pct:0}%)" : "set by you");
@@ -3251,18 +3253,18 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private const uint PROP_FLOAT_RESIST_ELECTRIC = 70;
 
     /// <summary>
-    /// Once a second (AwakenedTier throttles): which server, and Aelrynth's tier where the player
-    /// stands. The creature store follows the server; the damage store records under the tier.
-    /// Off Aelrynth the tier stays 0, so nothing below changes there.
+    /// Once a second (DifficultyTier throttles): which server, and the difficulty tier where the
+    /// player stands as the server's plugin reports it. The creature store follows the server; the
+    /// damage store records under the tier. Without a server plugin's tiers the tier stays 0, so
+    /// nothing below changes there.
     /// </summary>
-    private void TickAwakenedTier()
+    private void TickDifficultyTier()
     {
         try
         {
-            uint pid = _playerId != 0 ? _playerId : Host.GetPlayerId();
             bool wasActive = _tier.Active;
             int was = _tier.Current;
-            _tier.Refresh(Host, pid);
+            _tier.Refresh(Host);
             if (_damageStore != null) _damageStore.Difficulty = _tier.Current;
 
             if (_creatureStore != null && _tier.ServerKey.Length > 0
@@ -3273,11 +3275,12 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             }
 
             if (_tier.Active && (!wasActive || was != _tier.Current))
-                Log($"RynthAi: Aelrynth difficulty tier {_tier.Current} - learned HP, casts to kill, accuracy and fight times are kept for this tier.");
+                Log($"RynthAi: difficulty tier {_tier.Current} (+{_tier.HealthPercentPerTier:0.##}% monster health a tier, from {_tier.Source})"
+                    + " - learned HP, casts to kill, accuracy and fight times are kept for this tier.");
         }
         catch (Exception ex)
         {
-            Host.Log($"[RynthAi] TickAwakenedTier: {ex.Message}");
+            Host.Log($"[RynthAi] TickDifficultyTier: {ex.Message}");
         }
     }
 
@@ -3332,7 +3335,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 }
             }
 
-            TickAwakenedTier();   // the right server's file and tier before the first write (throttled)
+            TickDifficultyTier();   // the right server's file and tier before the first write (throttled)
             _creatureStore.Upsert(sample, _tier.Current);
 
             // Remember this monster type so the Damage table shows it (as a bare row with

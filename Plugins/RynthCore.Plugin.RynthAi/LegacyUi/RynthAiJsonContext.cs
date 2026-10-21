@@ -24,7 +24,7 @@ namespace RynthCore.Plugin.RynthAi;
 [JsonSerializable(typeof(RynthCore.Plugin.RynthAi.RynthLogConfig))]
 [JsonSerializable(typeof(RynthCore.Plugin.RynthAi.Huds.HudState))]
 [JsonSerializable(typeof(RynthCore.Plugin.RynthAi.MiniRemote.MiniRemoteState))]
-[JsonSerializable(typeof(RynthCore.Plugin.RynthAi.MiniRemote.LegacyIltHubFile))]
+[JsonSerializable(typeof(RynthCore.Plugin.RynthAi.MiniRemote.LegacyHubFile))]
 [JsonSerializable(typeof(RynthCore.Plugin.RynthAi.BuffProfile))]
 [JsonSourceGenerationOptions(
     WriteIndented = true,

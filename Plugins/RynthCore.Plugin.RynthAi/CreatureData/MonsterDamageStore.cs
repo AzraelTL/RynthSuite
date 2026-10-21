@@ -32,13 +32,13 @@ namespace RynthCore.Plugin.RynthAi.CreatureData;
 ///   D|&lt;wcid&gt;|&lt;name&gt;|&lt;weaponId&gt;|&lt;element&gt;|&lt;tier&gt;|&lt;avgDamage&gt;|&lt;dmgSamples&gt;|&lt;avgCastsToKill&gt;|&lt;killSamples&gt;|&lt;critAvg&gt;|&lt;critSamples&gt;|&lt;nonCritAvg&gt;|&lt;nonCritSamples&gt;
 /// (The loader also accepts the older 9/10-field name-less / crit-less D rows so existing data carries over.)
 ///
-/// Aelrynth difficulty tiers (2026-10-03, <see cref="AwakenedTier"/>): Aelrynth's awakened worlds
-/// and scaled copies hold the same monsters (same wcids) with health, skills and damage scaled 5%
-/// a tier. What a tier changes is kept per (wcid, tier): the HP pool, casts-to-kill, hits and
+/// Difficulty tiers (2026-10-03, <see cref="DifficultyTier"/>: the active server plugin reports
+/// them): a server's scaled worlds and copies hold the same monsters (same wcids) with health,
+/// skills and damage scaled by the tier. What a tier changes is kept per (wcid, tier): the HP pool, casts-to-kill, hits and
 /// misses, seconds per kill (per weapon and per summon) and the damage the monster does to us.
 /// What it does not change stays shared: per-cast damage (resistances and armour don't scale)
-/// and every rule (weapon, offhand, pet, manual HP). Tier 0 - real Dereth, and every other
-/// server, where the tier is always 0 - is today's data in today's rows, untouched. Tiers above 0
+/// and every rule (weapon, offhand, pet, manual HP). Tier 0 - the unscaled world, and every
+/// server without tiers, where the tier is always 0 - is today's data in today's rows, untouched. Tiers above 0
 /// are extra rows an older loader skips:
 ///   AH|&lt;tier&gt;|&lt;wcid&gt;|&lt;name&gt;|&lt;hpToKill&gt;|&lt;samples&gt;
 ///   AD|&lt;tier&gt;|&lt;wcid&gt;|&lt;name&gt;|&lt;weaponId&gt;|&lt;element&gt;|&lt;spellTier&gt;|&lt;avgCastsToKill&gt;|&lt;killSamples&gt;
@@ -115,7 +115,7 @@ internal sealed class MonsterDamageStore
         public int    KillSamples;
     }
 
-    /// <summary>What one Aelrynth difficulty tier above 0 changes about one monster (see the class comment).</summary>
+    /// <summary>What one difficulty tier above 0 changes about one monster (see the class comment).</summary>
     private sealed class TierProfile
     {
         public double HpPool;
@@ -134,9 +134,9 @@ internal sealed class MonsterDamageStore
     private volatile int _difficulty;
 
     /// <summary>
-    /// The Aelrynth difficulty tier new observations are recorded under, and the one the
-    /// tier-less readers answer for: the tier where the player stands (AwakenedTier.Current,
-    /// set every tick). Always 0 off Aelrynth.
+    /// The difficulty tier new observations are recorded under, and the one the tier-less
+    /// readers answer for: the tier where the player stands (DifficultyTier.Current, set every
+    /// tick). Always 0 on a server without tiers.
     /// </summary>
     public int Difficulty
     {
@@ -425,7 +425,7 @@ internal sealed class MonsterDamageStore
     private void AppendTierRows(StringBuilder sb)
     {
         if (_byTier.Count == 0) return;
-        sb.Append("# Aelrynth difficulty tiers above 0 (awakened worlds, scaled copies); tier 0 is the rows above:\n");
+        sb.Append("# Above tier 0: the server's difficulty tiers (scaled worlds, copies); tier 0 is the rows above:\n");
         sb.Append("# AH|tier|wcid|name|hpToKill|samples\n");
         sb.Append("# AD|tier|wcid|name|weaponId|element|spellTier|avgCastsToKill|killSamples\n");
         sb.Append("# AU|tier|wcid|name|weaponId|hits|misses|secToKillAvg|secSamples\n");
@@ -764,7 +764,7 @@ internal sealed class MonsterDamageStore
         return tp;
     }
 
-    /// <summary>The difficulty tiers above 0 with anything learned, ascending (empty off Aelrynth).</summary>
+    /// <summary>The difficulty tiers above 0 with anything learned, ascending (empty on a server without tiers).</summary>
     public List<int> KnownDifficulties()
     {
         var set = new SortedSet<int>();

@@ -676,7 +676,7 @@ internal sealed class PetsTab
     internal string? PendingSubTab => _selectSubTab;
 
     /// <summary>The sub-tabs the server plugin adds to this tab now (RynthILT's Breeding); empty without one.</summary>
-    public IReadOnlyList<ServerTabInfo> SubTabs() => _ctx.ServerHub.SubTabs(RynthIltHub.TabParentPets);
+    public IReadOnlyList<ServerTabInfo> SubTabs() => _ctx.ServerHub.SubTabs(RynthServerHub.TabParentPets);
 
     /// <summary>
     /// The shown sub-tab a "/ra hub open|tab &lt;name&gt;" names: its label ("Breeding"), its id, or its id
@@ -699,7 +699,7 @@ internal sealed class PetsTab
         return null;
     }
 
-    private const string SubTabPrefix = RynthIltHub.TabParentPets + "-";
+    private const string SubTabPrefix = RynthServerHub.TabParentPets + "-";
 
     /// <summary>
     /// The Pets tab: the universal roster, and Roster | ... sub-tabs when the server plugin adds some
@@ -770,11 +770,11 @@ internal sealed class PetsTab
         RenderRosterTable();
         // The server plugin's own pet features (RynthILT: ACECustom's charms and siphon capture);
         // each draws its own separator, and nothing off its server.
-        _ctx.ServerHub.RenderSection(RynthIltHub.SectionPetCharms);
-        _ctx.ServerHub.RenderSection(RynthIltHub.SectionPetCapture);
+        _ctx.ServerHub.RenderSection(RynthServerHub.SectionPetCharms);
+        _ctx.ServerHub.RenderSection(RynthServerHub.SectionPetCapture);
         ImGui.Separator();
         RenderHealing();
-        _ctx.ServerHub.RenderSection(RynthIltHub.SectionPetLogs);
+        _ctx.ServerHub.RenderSection(RynthServerHub.SectionPetLogs);
     }
 
     /// <summary>Type / Sort combos, action buttons, the active-summon line and per-type options.</summary>

@@ -17,6 +17,37 @@ namespace RynthOracle.Tests
             SettingsKeepUnknown();
             ConquestGone();
             AelrynthGone();
+            IltGone();
+        }
+
+        /// <summary>
+        /// Infinite Leaftide without RynthOracle (2026-10-21): its charms, pet breeding, Temple guardians,
+        /// Dynamic Stamps, /qb list and feature list are RynthILT's own pages, so RynthOracle has none of
+        /// their types, readers, tabs, tracker kinds or tag, on any world.
+        /// </summary>
+        private static void IltGone()
+        {
+            const System.Reflection.BindingFlags All = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static
+                | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+            Type[] types = typeof(RynthOraclePlugin).Assembly.GetTypes();
+            string[] iltTypes = Array.ConvertAll(Array.FindAll(types, t =>
+                t.Name.StartsWith("Ilt", StringComparison.Ordinal) || t.Name.StartsWith("RynthIlt", StringComparison.Ordinal)
+                || t.Name.StartsWith("DynamicStamp", StringComparison.Ordinal)), t => t.FullName ?? t.Name);
+            Check(iltTypes.Length == 0, "ilt: no RynthILT reader, view or Dynamic Stamp type in RynthOracle: " + string.Join(",", iltTypes));
+            foreach (string field in new[] { "Ilt", "IltData", "Charms", "Breeding", "Guardian", "ToggleCharm", "BreedingCommand", "GuardianCommand", "UbGiveAvailable" })
+                Check(typeof(OracleContext).GetField(field, All) == null, "ilt: OracleContext has no " + field);
+            Check(typeof(OracleContext).Assembly.GetType("RynthCore.Plugin.RynthOracle.Data.ServerTags") == null, "ilt: no server tags at all");
+            Check(typeof(OracleView).GetField("TabBreeding", All) == null, "ilt: no Pet Breeding tab");
+            Check(Enum.GetNames<QuestKind>().Length == 3 && Enum.IsDefined(QuestKind.Marker), "ilt: the Quests list has quests, Legendary quests and markers only");
+
+            var c = new OracleContext { InWorld = true };
+            var view = new OracleView(c);
+            foreach ((string tag, string world) in new[] { ("", "InfiniteLeaftide"), ("", "Coldeve") })
+            {
+                c.Server.Force(tag, world);
+                string[] tabs = view.VisibleTabs();
+                Check(Array.IndexOf(tabs, "Pet Breeding") < 0 && tabs.Length == 11, $"ilt: {world}: the same eleven tabs: " + string.Join(",", tabs));
+            }
         }
 
         /// <summary>Aelrynth without RynthAelrynth: no leaderboards or Trials in RynthOracle (the quest pack stays, as data).</summary>
@@ -27,11 +58,13 @@ namespace RynthOracle.Tests
             Check(typeof(OracleContext).GetField("Boards") == null, "aelrynth: RynthOracle keeps no leaderboard data");
             var c = new OracleContext { InWorld = true };
             var view = new OracleView(c);
-            c.Server.Force(ServerTags.Aelrynth, "Aeshnidae");
+            c.Server.Force("aelrynth", "Aeshnidae", "RynthAelrynth");
             string[] tabs = view.VisibleTabs();
             Check(Array.IndexOf(tabs, "Leaderboards") < 0, "aelrynth: no Leaderboards tab in RynthOracle on Aelrynth: " + string.Join(",", tabs));
-            c.Catalog.Load(ServerTags.Aelrynth, null);
-            Check(c.Catalog.PackServer == ServerTags.Aelrynth && c.Catalog.ServerCount > 0, "aelrynth: the quest pack is still RynthOracle's (data)");
+            // The quest pack is RynthAelrynth's since 2026-10-21; RynthOracle merges it as offered.
+            c.Catalog.Load(QuestCatalog.SourceFor(c.Server, TestPacks.Offer("aelrynth", "Aelrynth", "RynthAelrynth")), null);
+            Check(c.Catalog.PackServer == "Aelrynth" && c.Catalog.ServerCount > 0 && c.Catalog.PackSource == "from RynthAelrynth",
+                  "aelrynth: RynthAelrynth's quest pack, merged as offered");
         }
 
         /// <summary>
@@ -52,7 +85,7 @@ namespace RynthOracle.Tests
             // Conquest tagged by its world name (RynthConquest not installed): retail tabs only.
             var c = new OracleContext { InWorld = true };
             var view = new OracleView(c);
-            c.Server.Force(ServerTags.Conquest, "Conquest");
+            c.Server.Force("conquest", "Conquest");
             string[] tabs = view.VisibleTabs();
             Check(Array.IndexOf(tabs, "Conquest") < 0 && Array.IndexOf(tabs, "Leaderboards") < 0,
                   "conquest: no Conquest pages in RynthOracle on Conquest: " + string.Join(",", tabs));

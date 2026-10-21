@@ -1101,7 +1101,7 @@ internal sealed partial class LegacyDashboardRenderer
     // ── Settings bridge (engine-side Avalonia SettingsPanel) ─────────────────
 
     /// <summary>
-    /// The active server plugin's mirrored settings (RynthILT.Hub GetSetting / SetSetting, through the
+    /// The active server plugin's mirrored settings (RynthServer.Hub GetSetting / SetSetting, through the
     /// Mini Remote's server client): the value, or -1 when none is offered. Set by RynthAiPlugin.
     /// </summary>
     public Func<string, int>? ServerSettingGet { get; set; }
@@ -1238,7 +1238,7 @@ internal sealed partial class LegacyDashboardRenderer
                 CorpseApproachRangeMin     = s.CorpseApproachRangeMin,
                 // Navigation
                 BoostNavPriority           = s.BoostNavPriority,
-                EnableVaultedDungeons      = ServerSettingBool(RynthCore.Plugin.Shared.RynthIltHub.SettingVaultedDungeons),   // RynthILT's (null: the row hides)
+                EnableVaultedDungeons      = ServerSettingBool(RynthCore.Plugin.Shared.RynthServerHub.SettingVaultedDungeons),   // the server plugin's (null: the row hides)
                 FollowNavMin               = s.FollowNavMin,
                 NavRingThickness           = s.NavRingThickness,
                 NavLineThickness           = s.NavLineThickness,
@@ -1499,7 +1499,7 @@ internal sealed partial class LegacyDashboardRenderer
             // Navigation
             s.BoostNavPriority           = p.BoostNavPriority;
             if (p.EnableVaultedDungeons is bool vaulted)                                               // absent = unchanged
-                ServerSettingSet?.Invoke(RynthCore.Plugin.Shared.RynthIltHub.SettingVaultedDungeons, vaulted ? 1 : 0);   // RynthILT's switch
+                ServerSettingSet?.Invoke(RynthCore.Plugin.Shared.RynthServerHub.SettingVaultedDungeons, vaulted ? 1 : 0);   // the server plugin's switch
             s.FollowNavMin               = p.FollowNavMin;
             s.NavRingThickness           = p.NavRingThickness;
             s.NavLineThickness           = p.NavLineThickness;

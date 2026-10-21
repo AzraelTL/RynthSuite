@@ -50,7 +50,7 @@ public sealed partial class RynthAiPlugin
             ChatLine("[RynthAi] Mini Remote server tabs: no server plugin hub connected (none loaded for this world).");
         else
         {
-            string id = hub.Text(RynthIltHub.TextServerId);
+            string id = hub.Text(RynthServerHub.TextServerId);
             ChatLine($"[RynthAi] Mini Remote server tabs: connected{(id.Length > 0 ? " (server '" + id + "')" : string.Empty)}, "
                      + (hub.ServerActive ? "its server is this world." : "its server is not this world (nothing shown)."));
         }

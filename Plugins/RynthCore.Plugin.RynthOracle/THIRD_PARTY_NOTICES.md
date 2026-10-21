@@ -10,9 +10,10 @@ contributions from aunrela and porranlc (one commit each). Thank you, Advis!
   LICENSE file and names no copyright line, so the standard MIT text is reproduced below
   with the author and the years of the repository's history.
 
-Not from upstream: `quests.aelrynth.csv` is generated from Aelrynth's own world database by
-`Tools\RynthOracle.QuestPackGen`; where a quest is also in Advis's list, that list's name and notes
-are kept (the pack only adds Aelrynth's timers and who sets the flag).
+Server quest packs are the server plugins' since 2026-10-21 (each with its own notice): the
+master list's Conquest and Levistras rows are in RynthConquest and RynthLevistras, and the pack
+generated from Aelrynth's world database by `Tools\RynthOracle.QuestPackGen` is in RynthAelrynth.
+RynthOracle merges whichever pack the active server's plugin offers.
 
 What came from upstream:
 
@@ -20,8 +21,8 @@ What came from upstream:
   in `Resources\` (`quests.csv`, `augmentations.csv`, `augquests.csv`, `society.csv`,
   `titles.csv`, `markers.csv`), copied unchanged, except that the
   master quest list is split by its own Server column into `quests.csv` (every retail
-  quest), `quests.conquest.csv` and `quests.levistras.csv` (each server's own rows, loaded
-  only on that server); the lines themselves are untouched. `quests.csv` is Oracle of Dereth's curator-maintained master quest list;
+  quest) and each server's own rows (now in that server's plugin, see above); the lines
+  themselves are untouched. `quests.csv` is Oracle of Dereth's curator-maintained master quest list;
   its README says the Quest Flags list "was assembled with AI assistance and may contain
   errors". The curator is the same author (every commit that updates it is Advis Eveldan's); the
   file carries no licence of its own, so it is treated as part of the MIT-licensed repository.

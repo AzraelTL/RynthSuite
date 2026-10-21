@@ -77,6 +77,9 @@ internal static unsafe class FakeHost
     public static (uint Hp, uint Stam, uint Mana) BaseVitals;
     public static string WorldName = "";
     public static string AccountName = "";
+    /// <summary>A test's extra engine calls (e.g. FakeServerState), set into the table last by Create; Reset clears it.</summary>
+    public delegate void ApiHook(ref RynthCoreApiNative api);
+    public static ApiHook? ConfigureApi;
     /// <summary>The player's facing, 0 = north, clockwise (read back through the pose quaternion).</summary>
     public static double HeadingDeg;
     public static readonly Dictionary<uint, uint> Wcids = new();
@@ -321,6 +324,7 @@ internal static unsafe class FakeHost
         ObjectPropertiesCalls = false; PropertyRecord = null; PropertyQueries.Clear();
         ObjectStates.Clear(); OnUseObject = null; OnUseObjectOn = null;
         TargetVitals.Clear(); LiveObjectsCalls = false;
+        ConfigureApi = null;
     }
 
     /// <summary>
@@ -516,6 +520,7 @@ internal static unsafe class FakeHost
             api.Version = Math.Max(api.Version, 84u);
             api.GetObjectPropertiesFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, byte*, int, int>)&GetObjectProperties;
         }
+        ConfigureApi?.Invoke(ref api);
         LastApi = api;
         if (EquippedCalls) api.Version = Math.Max(api.Version, 87u);   // v87 GetWieldedItems
         return new RynthCoreHost(api);

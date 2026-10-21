@@ -507,7 +507,7 @@ public partial class CombatManager : IDisposable
     private int    _fightCastCount;         // offensive casts fired this fight (for casts-to-kill learning)
     private bool   _fightAppraiseRequested; // one appraisal attempt per fight to fill unknown HP
     private bool   _fightHpEstimated;       // _fightTargetMaxHp is tier 0's scaled by the tier, not measured
-    private AwakenedTier? _awakenedTier;    // Aelrynth's difficulty tier where we stand (0 elsewhere)
+    private DifficultyTier? _difficultyTier; // the server plugin's difficulty tier where we stand (0 without one)
 
     // Predicted one-shots are swapped away BEFORE their own KillerNotification
     // arrives, so OnKillNotification (which keys off the CURRENT target) can't
@@ -589,10 +589,10 @@ public partial class CombatManager : IDisposable
         _damageStore = damage;
     }
 
-    internal void SetAwakenedTier(AwakenedTier? tier) => _awakenedTier = tier;
+    internal void SetDifficultyTier(DifficultyTier? tier) => _difficultyTier = tier;
 
-    /// <summary>Aelrynth's difficulty tier where we stand; always 0 on other servers.</summary>
-    private int Difficulty => _awakenedTier?.Current ?? 0;
+    /// <summary>The difficulty tier where we stand, as the server plugin reports it; always 0 without one.</summary>
+    private int Difficulty => _difficultyTier?.Current ?? 0;
 
     public int RaycastBlockCount { get; private set; }
     public int RaycastCheckCount { get; private set; }
@@ -2762,10 +2762,10 @@ public partial class CombatManager : IDisposable
 
         if (_fightTargetMaxHp > 0 && !_fightHpEstimated) return;
 
-        // Aelrynth's awakened worlds and scaled copies: the same wcid, +5% health a tier.
-        // 0 everywhere else, and then this is the old resolution exactly.
+        // A server's scaled worlds and copies: the same wcid, its health percent a tier (the server
+        // plugin's numbers, DifficultyTier). 0 everywhere else, and then this is the old resolution exactly.
         int difficulty = Difficulty;
-        double scale = AwakenedTier.HealthScale(difficulty);
+        double scale = _difficultyTier?.HealthScale(difficulty) ?? 1.0;
 
         // User-entered HP override (set in the Damage panel) is authoritative —
         // it's the manual fix for ACE's skill-gated appraisal reading low.

@@ -10,7 +10,7 @@
 //  rules' wield counters (the T11 counters RynthILT reads from /aug).
 //  Compiled into both plugins (linked source), so the layout can't drift.
 //
-//  Rules: as RynthILT.Hub (Shared/RynthIltHubApi.cs): append-only, UTF-8 strings,
+//  Rules: as RynthServer.Hub (Shared/RynthServerHubApi.cs): append-only, UTF-8 strings,
 //  each function says its thread, no exception crosses, the table lives as long as
 //  the RynthAi copy (never freed; Version 0 after Shutdown), callers re-query.
 //  RynthILT works without RynthAi: every feature that needs it says so.
@@ -192,7 +192,7 @@ public unsafe struct RynthAiHubApiV1
     /// <summary>
     /// VaultedDungeonsEnabled(): obsolete since 2026-10-20, kept because the table is append-only. The
     /// Vaulted Dungeons master switch is RynthILT's own setting now (RynthILT 0.4+ reads its state, and
-    /// RynthAi mirrors it for the engine through RynthILT.Hub GetSetting / SetSetting). RynthAi answers
+    /// RynthAi mirrors it for the engine through RynthServer.Hub GetSetting / SetSetting). RynthAi answers
     /// the value its profile still carries (what RynthILT copied once), so an older RynthILT keeps
     /// working; 0 before login and after shutdown. Any thread.
     /// </summary>

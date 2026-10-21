@@ -253,7 +253,7 @@ internal static class DamageRowsTests
         var host = FakeHost.Create(Player);
         var bot = new Bot(host, "one-wcid");
 
-        // The same Rampager from every source: learned at real Dereth and at an Aelrynth
+        // The same Rampager from every source: learned at real Dereth and at a server's
         // difficulty tier (kept per (wcid, tier)), appraised this session, standing nearby,
         // and in creatures.json under a differently cased name.
         bot.Store.RecordKill(Wand, RampagerA, "Rampager", "Fire", 7, 3, 435);

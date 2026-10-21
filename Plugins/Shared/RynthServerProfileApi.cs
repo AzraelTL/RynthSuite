@@ -42,8 +42,13 @@
 //    } ],
 //    "discord": "", "website": "", "wiki": "", "source": "",
 //    "values": {                        // live numbers for this character on this server ({} when none;
-//      "voidDotDurationScale": 1.35     //  ServerProfileView.Value reads one): RynthConquest's Void DoT
-//    }                                  //  duration rule, which RynthOracle's Void timers apply
+//                                       //  ServerProfileView.Value reads one; RynthServerProfile.Value*):
+//      "voidDotDurationScale": 1.35,    //  RynthConquest's Void DoT duration rule, which RynthOracle's
+//                                       //  Void timers apply;
+//      "difficultyTier": 3,             //  the difficulty tier where the player stands (0 = the unscaled
+//                                       //  world; absent = the server has no tiers, or hasn't said yet),
+//      "difficultyHealthPercent": 5     //  and the monster health one tier adds, in percent of tier 0's
+//    }                                  //  (RynthAelrynth; RynthAi keeps learned HP and kills per tier)
 //  }
 // ============================================================================
 
@@ -62,6 +67,22 @@ public static class RynthServerProfile
     public const string BottingAllowed = "allowed";
     public const string BottingRestricted = "restricted";
     public const string BottingForbidden = "forbidden";
+
+    // "values" keys with a meaning across RynthSuite (a server plugin publishes them with
+    // ServerPackPlugin.SetProfileValue; a reader takes them from the active server's owner).
+
+    /// <summary>
+    /// The difficulty tier where the player stands: the same monsters (same wcids) at a scaled
+    /// strength, 0 = the unscaled world. Absent: the server has no tiers (or hasn't sent one yet),
+    /// and readers behave as at tier 0. Whole numbers.
+    /// </summary>
+    public const string ValueDifficultyTier = "difficultyTier";
+
+    /// <summary>
+    /// The monster health one difficulty tier adds, in percent of the tier-0 value (5 = +5% a tier,
+    /// so tier 3 is 1.15 times tier 0's). Absent with a tier: 0 (health doesn't scale).
+    /// </summary>
+    public const string ValueDifficultyHealthPercent = "difficultyHealthPercent";
 }
 
 [StructLayout(LayoutKind.Sequential)]

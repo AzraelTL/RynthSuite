@@ -29,9 +29,11 @@ internal sealed partial class OracleView
 
         w.SeparatorText("Server");
         ServerIdentity sv = _c.Server;
-        w.Text(sv.Tag.Length == 0 ? "No server-specific pages here (retail features only)."
-            : sv.Is(ServerTags.InfiniteLeaftide) ? $"{sv.Tag}: its own pages are on (stamps and guardians on the Quests tab, Pet Breeding)."
-            : $"{sv.Tag}: its own pages and quest pack are on.");
+        QuestCatalog pc = _c.Catalog;
+        w.Text(sv.ServerId.Length == 0 ? "No server active (retail quests only)."
+            : pc.PackServer.Length > 0 ? $"{sv.DisplayName}: its quest pack is on ({pc.ServerCount} {pc.PackServer} quests, {pc.PackSource})."
+            : $"{sv.DisplayName}: no quest pack ({(sv.Plugin.Length > 0 ? sv.Plugin + " offers none" : "no server plugin loaded for it")}; retail quests only).");
+        w.TextDisabled("A server's quest pack comes from its server plugin, and its own pages are that plugin's: the Mini Remote's Server section, or /rserver.");
         w.TextDisabled($"How it was decided: {sv.Source}");
         // RynthCore's server list (API v86) and the active server's settings from the plugin that owns it.
         RynthCore.Plugin.Shared.ServerStateClient st = _c.ServerState;
@@ -46,11 +48,9 @@ internal sealed partial class OracleView
                 w.TextDisabled($"{es.ActivePlugin} hasn't sent its server settings (an older plugin?).");
             w.TextDisabled("Change the server: RynthCore Options > Diagnostics > Server, or /rc server pick <id>|auto.");
         }
-        else if (_c.Host.Version >= 75 && _c.Host.Version < 85)
-            w.TextDisabled($"This engine is API v{_c.Host.Version}; v86 lets RynthOracle follow RynthCore's server pick and overrides.");
-        if (_c.Host.Version < 75) w.TextDisabled($"This engine is API v{_c.Host.Version}; v75 adds a surer server check and the titles you hold.");
-
-        DrawServerFeatures(w);
+        else if (_c.Host.Version > 0 && _c.Host.Version < 86)
+            w.TextDisabled($"This engine is API v{_c.Host.Version}; server quest packs need v86 (RynthCore's server list).");
+        if (_c.Host.Version > 0 && _c.Host.Version < 75) w.TextDisabled($"This engine is API v{_c.Host.Version}; v75 adds the titles you hold.");
 
         w.SeparatorText("Quest list");
         QuestCatalog cat = _c.Catalog;
@@ -70,77 +70,18 @@ internal sealed partial class OracleView
 
         w.SeparatorText("Commands");
         w.BulletText("/ro  open or close this window");
-        w.BulletText("/ro character  the Character tab (status, session, charms)");
+        w.BulletText("/ro character  the Character tab (status, session)");
         w.BulletText("/ro skills  the Skills tab (raise and train); /ro attributes, /ro progress likewise");
         w.BulletText("/ro timers  open or close the Quest Timers window");
         w.BulletText("/ro fellowship  the Fellowship tab");
-        w.BulletText("/ro trackers  the Quests tab, trackers only (Legendary, markers, and on ILT stamps and guardians)");
+        w.BulletText("/ro trackers  the Quests tab, trackers only (Legendary, markers)");
         w.BulletText("/ro legendary  John's Legendary Key quests: have, missing, repeat timers");
         w.BulletText("/ro markers  the 100 exploration markers: found and still to find");
-        if (_c.Server.Is(Data.ServerTags.InfiniteLeaftide))
-        {
-            w.BulletText("/ro dynamic  Infinite Leaftide Dynamic Stamps: NPC stamps you have and are missing");
-            w.BulletText("/ro guardians  the Temple guardians: riddle answers, auto hand-in, buy if missing, turn-ins");
-            w.BulletText("/ro breeding  the Pet Breeding tab (when the server has pet breeding)");
-        }
-        w.BulletText("/ro about  this tab (settings, server, server features)");
+        w.BulletText("/ro about  this tab (settings, server, quest list)");
         w.BulletText("/ro void  open or close the Void window");
         w.BulletText("/ro quests  read your quest flags now");
         w.BulletText("/ro help  list the commands in chat");
-        w.TextDisabled("A server quest pack can be replaced without a rebuild: put quests.<server>.csv in %APPDATA%\\RynthCore\\RynthOracle\\packs.");
-    }
-
-    /// <summary>
-    /// "Server features": the Leaftide feature list RynthILT keeps (sent in its "RynthILT.Server"
-    /// profile), drawn group by group in RynthILT's order with each feature's state and where it
-    /// lives. Nothing here is hard-coded: a newer RynthILT adds features without an Oracle update.
-    /// </summary>
-    private void DrawServerFeatures(UiWindow w)
-    {
-        IltServerProfile p = _c.Ilt.Profile;
-        if (!p.Available)
-        {
-            if (_c.Server.Is(ServerTags.InfiniteLeaftide))
-            {
-                w.SeparatorText("Server features");
-                w.TextDisabled("Load RynthILT to list the Infinite Leaftide features here.");
-            }
-            return;
-        }
-        if (p.Features.Count == 0) return;
-
-        w.SeparatorText("Server features");
-        string checkedText = p.CheckedUtc == DateTime.MinValue ? "not checked yet" : $"checked {p.CheckedUtc.ToLocalTime():yyyy-MM-dd HH:mm}";
-        w.TextDisabled(p.Ilt
-            ? $"From RynthILT ({(p.World.Length > 0 ? p.World : "this world")}, {checkedText}{(p.Forced ? ", forced on" : "")})."
-            : "From RynthILT: this isn't an Infinite Leaftide world, so no Leaftide feature is claimed.");
-
-        // Groups in the order RynthILT lists them; one table per group.
-        var groups = new System.Collections.Generic.List<string>();
-        foreach (IltFeature f in p.Features)
-            if (!groups.Exists(g => string.Equals(g, f.Group, StringComparison.OrdinalIgnoreCase))) groups.Add(f.Group);
-
-        int on = 0;
-        foreach (IltFeature f in p.Features) if (f.State == RynthCore.Plugin.Shared.RynthIltServer.StateOn) on++;
-        w.TextDisabled($"{on} of {p.Features.Count} on.");
-
-        foreach (string group in groups)
-        {
-            if (!w.CollapsingHeader(group.Length > 0 ? group : "Other", "o.feat.h." + group)) continue;
-            foreach (IltFeature f in p.InGroup(group))
-            {
-                uint color = f.State switch
-                {
-                    RynthCore.Plugin.Shared.RynthIltServer.StateOn => UiColors.Green,
-                    RynthCore.Plugin.Shared.RynthIltServer.StateOff => UiColors.Red,
-                    _ => UiColors.Yellow,
-                };
-                w.TextColored(color, $"[{IltServerProfile.StateText(f.State)}]");
-                w.SameLine();
-                w.Text(f.Label);
-                if (f.Where.Length > 0) w.Tooltip("Where: " + f.Where);
-            }
-        }
+        w.TextDisabled("A server quest pack can be replaced without a rebuild: put quests.<server id>.csv in %APPDATA%\\RynthCore\\RynthOracle\\packs.");
     }
 
     private void StartQuestListCheck()
@@ -155,7 +96,7 @@ internal sealed partial class OracleView
     {
         try { File.Delete(QuestCatalog.DownloadedPath); }
         catch (Exception ex) { _c.UpdaterMessage = "Couldn't remove the downloaded list: " + ex.Message; return; }
-        _c.Catalog.Load(_c.Server.Tag, null);
+        _c.Catalog.Reload(null);
         _c.Catalog.SyncDiscoveries(_c.Flags);
         _c.UpdaterMessage = "Using the bundled quest list.";
     }

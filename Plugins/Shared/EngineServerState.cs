@@ -25,10 +25,6 @@ internal sealed record EngineServer(string Id, string Name, bool Active, bool De
 /// <summary>The engine's server list at one moment (GetServerStateJson, schema 1).</summary>
 internal sealed class EngineServerState
 {
-    /// <summary>Engine server ids with a meaning across RynthSuite.</summary>
-    public const string IltId = "ilt";
-    public const string AelrynthId = "aelrynth";
-
     public int Revision { get; private init; }
     /// <summary>The connect host the client was launched with ("" when not known).</summary>
     public string Host { get; private init; } = string.Empty;
@@ -59,45 +55,6 @@ internal sealed class EngineServerState
 
     /// <summary>True when <paramref name="id"/> is the active server.</summary>
     public bool IsActive(string id) => Active.Equals(id, StringComparison.OrdinalIgnoreCase) && Active.Length > 0;
-
-    /// <summary>
-    /// Whether this world is one of <paramref name="names"/> (a user's server list, "InfiniteLeaftide,
-    /// Conquest"): names compare case- and space-insensitively against server ids, names and the world.
-    /// Without the engine (<paramref name="engine"/> null) the world name decides. With it, an active
-    /// server decides ("ilt" counts as any Leaftide name); with none active the world name still counts,
-    /// unless it names a server the engine lists, which is then off on purpose (not detected, or this
-    /// character's override).
-    /// </summary>
-    public static bool MatchesNameList(EngineServerState? engine, string? world, IReadOnlyList<string> names)
-    {
-        bool Named(string? s)
-        {
-            string n = Norm(s);
-            if (n.Length == 0) return false;
-            foreach (string name in names)
-                if (Norm(name) == n) return true;
-            return false;
-        }
-        bool anyLeaftide = false;
-        foreach (string name in names)
-            if (Norm(name).Contains("leaftide", StringComparison.Ordinal)) anyLeaftide = true;
-
-        if (engine == null) return Named(world);
-        if (engine.HasActive)
-            return Named(engine.Active) || Named(engine.ActiveName) || (anyLeaftide && engine.IsActive(IltId));
-        if (!Named(world)) return false;
-        string w = Norm(world);
-        foreach (EngineServer s in engine.Servers)
-        {
-            if (Norm(s.Id) == w || Norm(s.Name) == w) return false;
-            // ILT's world names ("InfiniteLeaftide") are the engine's own ILT detection.
-            if (s.Id.Equals(IltId, StringComparison.OrdinalIgnoreCase) && w.Contains("leaftide", StringComparison.Ordinal)) return false;
-        }
-        return true;
-    }
-
-    /// <summary>Lower case without spaces, so "Infinite Leaftide" equals "InfiniteLeaftide".</summary>
-    private static string Norm(string? s) => (s ?? string.Empty).Replace(" ", string.Empty).Trim().ToLowerInvariant();
 
     /// <summary>
     /// Parses GetServerStateJson output. Null for empty or unusable text, or another schema's.
@@ -159,7 +116,7 @@ internal sealed class EngineServerState
 /// owns the server), read leniently: a field the owner doesn't send stays "".
 /// </summary>
 internal sealed record ServerProfileView(string Id, string Name, string Plugin, string Ruleset, string Emulator,
-                                         string Botting, string BottingNote, string AccountLimit, bool Ilt, int FeaturesOn)
+                                         string Botting, string BottingNote, string AccountLimit)
 {
     /// <summary>Null for empty or unusable text.</summary>
     public static ServerProfileView? Parse(string? json)
@@ -170,16 +127,11 @@ internal sealed record ServerProfileView(string Id, string Name, string Plugin, 
             using JsonDocument doc = JsonDocument.Parse(json);
             JsonElement root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object) return null;
-            // RynthILT's profile: its feature list, state 1 = on.
-            int on = 0;
-            if (root.TryGetProperty("features", out JsonElement features) && features.ValueKind == JsonValueKind.Array)
-                foreach (JsonElement f in features.EnumerateArray())
-                    if (f.ValueKind == JsonValueKind.Object && EngineServerState.Int(f, "state") == 1) on++;
             return new ServerProfileView(
                 EngineServerState.Str(root, "id"), EngineServerState.Str(root, "name"), EngineServerState.Str(root, "plugin"),
                 EngineServerState.Str(root, "ruleset"), EngineServerState.Str(root, "emulator"),
                 EngineServerState.Str(root, "botting"), EngineServerState.Str(root, "bottingNote"),
-                EngineServerState.Str(root, "accountLimit"), EngineServerState.Bool(root, "ilt"), on);
+                EngineServerState.Str(root, "accountLimit"));
         }
         catch (JsonException)
         {
@@ -220,7 +172,6 @@ internal sealed record ServerProfileView(string Id, string Name, string Plugin, 
             parts.Add(Ruleset.Length > 0 && Emulator.Length > 0 ? Ruleset + ", " + Emulator : Ruleset + Emulator);
         if (Botting.Length > 0) parts.Add("botting " + Botting + (BottingNote.Length > 0 ? " - " + BottingNote : string.Empty));
         if (AccountLimit.Length > 0) parts.Add("accounts: " + AccountLimit);
-        if (Ilt || FeaturesOn > 0) parts.Add((Ilt ? "ILT world" : "not ILT") + ", " + FeaturesOn + " Leaftide features on");
         return parts.Count == 0 ? "no details" : string.Join("; ", parts);
     }
 }

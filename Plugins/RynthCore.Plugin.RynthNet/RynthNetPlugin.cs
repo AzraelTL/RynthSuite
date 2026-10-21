@@ -58,6 +58,9 @@ public sealed partial class RynthNetPlugin : RynthPluginBase
 
     public override int Initialize()
     {
+        // The Characters window draws with ImGui.NET bound to the engine's cimgui, in the engine's look.
+        RynthCore.Plugin.Shared.ImGuiNativeBinding.Ensure(msg => Host.Log("[RynthNet] " + msg));
+        RynthCore.Plugin.Shared.RynthUi.RynthUi.Init(Host);
         _settings = RynthNetSettings.Load(out string? settingsError);
         _settingsStamp = RynthNetSettings.FileStamp();
         if (settingsError != null) Host.Log("[RynthNet] " + settingsError);
@@ -196,6 +199,7 @@ public sealed partial class RynthNetPlugin : RynthPluginBase
             _nextSnapshotMs = now + 500;
             _snapshot = BuildSnapshotJson(node, now);
         }
+        TickCharacters();
     }
 
     internal string Snapshot => _snapshot;

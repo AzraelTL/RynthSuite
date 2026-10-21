@@ -453,10 +453,10 @@ internal sealed class MiniRemoteHud
     {
         // The server plugin's Remote sections (RynthILT: Bank, Guardian answer) decide themselves whether
         // they show (their switches are the plugin's); nothing is drawn without one.
-        bool drawn = remote?.ServerHub.RenderSection(RynthIltHub.SectionRemoteBank) == true;
+        bool drawn = remote?.ServerHub.RenderSection(RynthServerHub.SectionRemoteBank) == true;
         if (s.MiniShowRebuff) RenderRebuff();
         if (s.MiniShowTranslate && _hud.Translate is { } translate) translate.RenderHubSection();
-        drawn |= remote?.ServerHub.RenderSection(RynthIltHub.SectionRemoteGuardian) == true;
+        drawn |= remote?.ServerHub.RenderSection(RynthServerHub.SectionRemoteGuardian) == true;
         _serverEconomyDrawn = drawn;
     }
 
@@ -490,7 +490,7 @@ internal sealed class MiniRemoteHud
             if (ImGui.IsItemHovered()) SafeImGui.SetTooltip($"{v.LumPassUp:N0} this session.\n{PassUpTooltip}");
         }
         Stat("Kills:", HudDraw.Compact(v.KillsPerHour) + "/h");
-        remote?.ServerHub.RenderSection(RynthIltHub.SectionRemoteStats);
+        remote?.ServerHub.RenderSection(RynthServerHub.SectionRemoteStats);
     }
 
     /// <summary>
@@ -660,7 +660,7 @@ internal sealed class MiniRemoteHud
                       + $"({HudDraw.Compact(v.LumLast5Min)} last 5m)";
         if (v.PassUpTracked) line += $", Pass-up {HudDraw.Compact(v.PassUpPerHour)}/h";
         line += $", Kills {HudDraw.Compact(v.KillsPerHour)}/h ({v.Kills:N0})";
-        line += _hud.Remote()?.ServerHub.Text(RynthIltHub.TextSessionReport) ?? string.Empty;   // the server plugin's rates
+        line += _hud.Remote()?.ServerHub.Text(RynthServerHub.TextSessionReport) ?? string.Empty;   // the server plugin's rates
         _hud.Chat(line);
     }
 
@@ -832,7 +832,7 @@ internal sealed class MiniRemoteHud
         Flag("Rebuff", ref s.MiniShowRebuff);
         Flag("Translate", ref s.MiniShowTranslate);
         // The server plugin's Remote sections (RynthILT: Bank, Guardian answer): its own switches.
-        _hud.Remote()?.ServerHub.RenderSection(RynthIltHub.SectionRemoteOptions);
+        _hud.Remote()?.ServerHub.RenderSection(RynthServerHub.SectionRemoteOptions);
         ImGui.Separator();
         Flag("Horizontal layout", ref s.MiniRemoteHorizontal);
         RenderSlotSizeSlider(s);
@@ -937,13 +937,13 @@ internal sealed class MiniRemoteHud
         ServerMenuGroup[]? groups = ServerMenuModel.Groups;
         if (groups == null)
         {
-            remote?.ServerHub.RenderSection(RynthIltHub.SectionServerMenu);
+            remote?.ServerHub.RenderSection(RynthServerHub.SectionServerMenu);
             return;
         }
         if (groups.Length == 0) return;   // no server plugin installed
 
         // The server the active server plugin's tabs and status belong to (RynthILT: "ilt"); "" without one.
-        string pluginServer = remote?.ServerHub.Text(RynthIltHub.TextServerId) ?? string.Empty;
+        string pluginServer = remote?.ServerHub.Text(RynthServerHub.TextServerId) ?? string.Empty;
         bool any = false;
         foreach (ServerMenuGroup g in groups)
         {
@@ -969,7 +969,7 @@ internal sealed class MiniRemoteHud
                     SafeImGui.SetTooltip(enabled ? item.Tooltip : item.Tooltip + "\nShows once the server reports this feature on.");
             }
             // The plugin's status under its server (RynthILT: why no ILT feature is on, Refresh).
-            if (ours) remote?.ServerHub.RenderSection(RynthIltHub.SectionIltStatus);
+            if (ours) remote?.ServerHub.RenderSection(RynthServerHub.SectionServerStatus);
         }
         if (any) return;
 
