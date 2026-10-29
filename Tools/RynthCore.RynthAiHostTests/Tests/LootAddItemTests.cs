@@ -43,6 +43,8 @@ internal static class LootAddItemTests
         r.Add("loot add: unsaved edits in the Loot Editor block the add (nothing saved behind them)", BridgeRefusesUnderEdits);
         r.Add("loot add: the popup says when RynthAi's built-in looting takes the item (Mana Tap, mana stones)", BuiltInReasons);
         r.Add("loot: Mana Tap takes a high-mana wand like any other item (they drain)", ManaTapTakesWands);
+        r.Add("loot inspector: inventory units versus corpse totals (.utl)", InspectorInventoryUnits);
+        r.Add("loot inspector: native rules normalize inventory; explicit currency rules still match", InspectorNativeInventoryUnits);
     }
 
     // ── World and plugin ──────────────────────────────────────────────────────
@@ -110,6 +112,70 @@ internal static class LootAddItemTests
     }
 
     // ── .utl ──────────────────────────────────────────────────────────────────
+
+    private static Bot InspectorWorld()
+    {
+        const uint pack = 0x80271901, corpse = 0x80271902;
+        return new Bot(() =>
+        {
+            FakeHost.ContentsCalls = true; // inspector membership uses the real container-walk API
+            FakeHost.Names[pack] = "Side Pack";
+            FakeHost.ItemTypes[pack] = 0x200;
+            FakeHost.Containers[pack] = Player;
+            FakeHost.Containers[Coin] = Player;
+            FakeHost.Ints[(Coin, 12)] = 10000;
+            FakeHost.Ints[(Coin, 19)] = 10000;
+            FakeHost.Ints[(Coin, 5)] = 40;
+            FakeHost.Names[Taper] = "Silver Scarab";
+            FakeHost.Containers[Taper] = pack;
+            FakeHost.Ints[(Taper, 12)] = 97;
+            FakeHost.Ints[(Taper, 19)] = 24250;
+            FakeHost.Ints[(Taper, 5)] = 97;
+            FakeHost.Names[corpse] = "Corpse";
+            FakeHost.ItemTypes[corpse] = 0x200;
+            FakeHost.Containers[corpse] = 0;
+            FakeHost.Containers[Opal] = corpse;
+            FakeHost.Ints[(Opal, 12)] = 10000;
+            FakeHost.Ints[(Opal, 19)] = 10000;
+            FakeHost.Ints[(Opal, 5)] = 40;
+        }, pack, corpse);
+    }
+
+    private static string InspectorVerdict(Bot bot, uint id)
+    {
+        bot.Set("_lootInspectMode", true);
+        return (string)typeof(RynthAiPlugin).GetMethod("LootVerdictSuffix", Any)!.Invoke(bot.P, new object[] { unchecked((int)id) })!;
+    }
+
+    private static void InspectorInventoryUnits()
+    {
+        var bot = InspectorWorld();
+        bot.S.CurrentLootPath = Temp("inspector.utl", Utl("UTL", "1", "1", "Sellables", "", "0;1;3;2", "11", "10000", "19", "8", "400", "5"));
+        Check.True(InspectorVerdict(bot, Coin).Contains("no rule matched"), "10000 inventory pyreals are evaluated at 1 each");
+        Check.True(InspectorVerdict(bot, Taper).Contains("no rule matched"), "97 scarabs inside a side pack are evaluated at 250 each");
+        Check.True(InspectorVerdict(bot, Opal).Contains("[Keep] Sellables"), "corpse stack retains total-value matching");
+        Check.Eq(bot.Item(Coin).Values(19, 0), 10000, "inspector does not change cached stack total");
+        Check.Eq(bot.Item(Taper).Values(12, 0), 97, "inspector does not change cached quantity");
+    }
+
+    private static void InspectorNativeInventoryUnits()
+    {
+        var bot = InspectorWorld();
+        var profile = new LootProfile { Name = "Inspector native" };
+        var rule = new LootRule { Name = "Sellables", Action = LootAction.Keep };
+        rule.Conditions.Add(new LongValKeyGECondition { Key = 19, Value = 10000 });
+        rule.Conditions.Add(new LongValKeyLECondition { Key = 5, Value = 400 });
+        profile.Rules.Add(rule);
+        string path = Path.Combine(Program.TempRoot, "inspector-native.json");
+        profile.Save(path);
+        bot.S.CurrentLootPath = path;
+        Check.True(InspectorVerdict(bot, Coin).Contains("no rule matched"), "native inventory currency uses unit value");
+        Check.True(InspectorVerdict(bot, Taper).Contains("no rule matched"), "native side-pack components use unit value");
+        Check.True(InspectorVerdict(bot, Opal).Contains("[Keep] Sellables"), "native corpse preview keeps stack totals");
+        bot.S.CurrentLootPath = Temp("inspector-currency.utl", SellGems);
+        Check.True(InspectorVerdict(bot, Coin).Contains("[Keep] Keep pyreals"), "explicit currency rule still matches inventory currency");
+    }
+
 
     private static void UtlAddBeforeBroaderRule()
     {

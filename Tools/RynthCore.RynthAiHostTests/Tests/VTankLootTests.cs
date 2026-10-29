@@ -45,6 +45,8 @@ internal static class VTankLootTests
         r.Add("loot vtank: fixture file with a SalvageCombine block", FixtureFile);
         r.Add("loot vtank: malformed .utl text", MalformedUtl);
         r.Add("loot keep#: counts whole stacks of what the rule matches", KeepCapCountsStacks);
+        r.Add("loot keep#: inventory stacks match per unit; corpse stacks keep totals", KeepCapInventoryUnits);
+        r.Add("loot keep#: unit metadata, burden and original properties are preserved", KeepCapUnitProperties);
         r.Add("loot keep#: pending approvals and merged stacks", KeepCapPending);
         r.Add("loot keep#: the cap boundary, zero and missing counts", KeepCapBoundary);
     }
@@ -517,6 +519,54 @@ internal static class VTankLootTests
 
     private static bool IsKit(WorldObject wo) => wo.Name.Contains("Healing Kit", StringComparison.OrdinalIgnoreCase);
 
+    private static void KeepCapInventoryUnits()
+    {
+        var sellables = Rule("Sellables", VTankLootAction.KeepUpTo,
+            C(N.LongValKeyGE, "10000", "19"), C(N.LongValKeyLE, "400", "5"));
+        bool Matches(WorldObject item) => VTankLootEvaluator.Match(sellables, item);
+        WorldObject scarabs = new Item("Silver Scarab").Int(12, 97).Int(19, 24250).Int(5, 97);
+        WorldObject pyreals = new Item("Pyreal").Int(12, 25128).Int(19, 25128).Int(5, 100);
+        Check.True(Matches(scarabs), "corpse rule still matches the stack's total value");
+        Check.True(Matches(pyreals), "corpse currency stays lootable by the same broad rule");
+        Check.Eq(LootKeepCap.CountHave(new[] { scarabs, pyreals }, Matches, NoPending, _ => true), 0,
+            "scarabs worth 250 each and pyreals worth 1 each are not expensive inventory items");
+        var expensive = new Item("Expensive gem").Int(12, 3).Int(19, 30000).Int(5, 900);
+        var cheap = new Item("Cheaper gem").Int(12, 2).Int(19, 19998).Int(5, 2);
+        Check.Eq(LootKeepCap.CountHave(new WorldObject[] { expensive, cheap }, Matches, NoPending, _ => true), 3,
+            "value and burden both apply per unit; 10000 qualifies and 9999 does not");
+        var components = Rule("Scarabs", VTankLootAction.KeepUpTo, C(N.StringValueMatch, "^Silver Scarab$", "1"));
+        Check.Eq(LootKeepCap.CountHave(new[] { scarabs }, i => VTankLootEvaluator.Match(components, i), NoPending, _ => true), 97,
+            "a component-specific rule counts all 97 matching units, not one slot");
+        var single = Rule("Single unit", VTankLootAction.KeepUpTo, C(N.LongValKeyE, "1", "12"));
+        Check.Eq(LootKeepCap.CountHave(new[] { scarabs }, i => VTankLootEvaluator.Match(single, i), NoPending, _ => true), 97,
+            "stack-size conditions also evaluate a single inventory unit");
+        Check.Eq(scarabs.Values(19, 0), 24250, "matching did not change original value");
+        Check.Eq(scarabs.Values(12, 0), 97, "matching did not change original quantity");
+    }
+
+    private static void KeepCapUnitProperties()
+    {
+        WorldObject stack = new Item("Example").Int(12, 3).Int(19, 30000).Int(5, 1200)
+            .Int(15, 10000).Int(13, 400).Int(105, 7).Str(15, "description").Dbl(29, 1.2);
+        var originalOverlay = stack.Overlay;
+        var unit = LootKeepCap.InventoryUnit(stack);
+        Check.Eq(unit.Values(19, -1), 10000, "uses unit value metadata");
+        Check.Eq(unit.Values(5, -1), 400, "uses unit burden metadata");
+        Check.Eq(unit.Values(105, -1), 7, "other int properties retained");
+        Check.Eq(unit.Values(StringValueKey.ShortDesc, ""), "description", "string properties retained");
+        Check.Eq(unit.Values(DoubleValueKey.WeaponDefense, 0.0), 1.2, "double properties retained");
+        Check.Eq(unit.Id, stack.Id, "identity retained for host-backed conditions");
+        Check.True(ReferenceEquals(stack.Overlay, originalOverlay), "original overlay not replaced");
+        Check.Eq(stack.Values(5, -1), 1200, "original burden remains a stack total");
+        WorldObject missing = new Item("Missing totals").Int(12, 5);
+        Check.Eq(LootKeepCap.InventoryUnit(missing).Values(19, -99), -99, "missing value is not synthesized");
+        Check.Eq(LootKeepCap.InventoryUnit(missing).Values(5, -99), -99, "missing burden is not synthesized");
+        foreach (int count in new[] { 0, -1, 1 })
+        {
+            WorldObject one = new Item("Single").Int(12, count).Int(19, 10000).Int(5, 400);
+            Check.True(ReferenceEquals(LootKeepCap.InventoryUnit(one), one), "nonstacked or invalid count stays unchanged");
+        }
+    }
     private static void KeepCapCountsStacks()
     {
         var pack = new List<WorldObject>

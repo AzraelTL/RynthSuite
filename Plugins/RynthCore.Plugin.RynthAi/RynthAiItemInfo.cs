@@ -203,6 +203,16 @@ public sealed partial class RynthAiPlugin
             LegacyUi.LegacyUiSettings? settings = _dashboard?.Settings;
             WorldObject? wo = _objectCache?[itemId];
             if (!_lootInspectMode || settings == null || wo == null || string.IsNullOrEmpty(settings.CurrentLootPath)) return "";
+            // Inventory inspection must agree with Keep #'s per-unit comparison.
+            // Use the pack walk to include side packs and exclude corpse/ground stacks.
+            foreach (var inventoryItem in _objectCache!.GetDirectInventory(forceRefresh: true))
+            {
+                if (inventoryItem.Id != itemId) continue;
+                wo = Loot.LootKeepCap.InventoryUnit(inventoryItem);
+                break;
+            }
+
+
             if (!ClassifyLootItem(wo, settings, preview: true, out string action, out _, out string rule, out string builtIn))
                 // A rule can match and still not take it (its Keep # reached, a Read rule on a non-scroll).
                 return rule.Length > 0 ? $" | Loot: leave ({rule} matched, not taken)" : " | Loot: no rule matched";
