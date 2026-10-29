@@ -43,7 +43,8 @@ internal static class LootAddItemTests
         r.Add("loot add: unsaved edits in the Loot Editor block the add (nothing saved behind them)", BridgeRefusesUnderEdits);
         r.Add("loot add: the popup says when RynthAi's built-in looting takes the item (Mana Tap, mana stones)", BuiltInReasons);
         r.Add("loot: Mana Tap takes a high-mana wand like any other item (they drain)", ManaTapTakesWands);
-        r.Add("loot inspector: inventory units versus corpse totals (.utl)", InspectorInventoryUnits);
+        r.Add("loot inspector: inventory and corpse stacks match units (.utl)", InspectorInventoryUnits);
+        r.Add("loot corpse stacks: match units, approve whole stacks and count full pending quantities", CorpseStackRuleUnits);
         r.Add("loot inspector: native rules normalize inventory; explicit currency rules still match", InspectorNativeInventoryUnits);
     }
 
@@ -113,6 +114,54 @@ internal static class LootAddItemTests
 
     // ── .utl ──────────────────────────────────────────────────────────────────
 
+    private static void CorpseStackRuleUnits()
+    {
+        foreach (bool native in new[] { false, true })
+        {
+            var bot = InspectorWorld();
+            string path;
+            if (native)
+            {
+                var profile = new LootProfile { Name = "Corpse unit cap" };
+                var rule = new LootRule { Name = "Sellables", Action = LootAction.KeepUpTo, KeepCount = 2 };
+                rule.Conditions.Add(new LongValKeyGECondition { Key = 19, Value = 10000 });
+                rule.Conditions.Add(new LongValKeyLECondition { Key = 5, Value = 400 });
+                profile.Rules.Add(rule);
+                path = Path.Combine(Program.TempRoot, "corpse-unit-cap.json");
+                profile.Save(path);
+            }
+            else path = Temp("corpse-unit-cap.utl", Utl("UTL", "1", "1", "Sellables", "", "0;10;3;2", "2", "11", "10000", "19", "8", "400", "5"));
+            bot.S.CurrentLootPath = path;
+            // The corpse's 10000-value currency stack is worth only 1 per unit.
+            Check.True(InspectorVerdict(bot, Opal).Contains("no rule matched"), "corpse rules use individual unit value in both formats");
+
+            // Each unit qualifies despite the whole stack's burden exceeding 400.
+            FakeHost.Ints[(Opal, 12)] = 3;
+            FakeHost.Ints[(Opal, 19)] = 30000;
+            FakeHost.Ints[(Opal, 5)] = 900;
+            bot.Cache.OnCreateObject(Opal);
+            var classify = typeof(RynthAiPlugin).GetMethod("ClassifyLootItem", Any)!;
+            object[] args = { bot.Item(Opal), bot.S, false, "", false, "", "" };
+            Check.True((bool)classify.Invoke(bot.P, args)!, "three qualifying units are approved as one whole pickup while under cap");
+            var pending = bot.Get<System.Collections.Generic.Dictionary<string, System.Collections.Generic.Dictionary<int, int>>>("_pendingKeepUpTo")!;
+            Check.Eq(pending.Values.Single()[unchecked((int)Opal)], 3, "pending count records all three units, not the comparison's quantity of one");
+            Check.Eq(bot.Item(Opal).Values(12, 0), 3, "original stack quantity retained for pickup and merging");
+            Check.Eq(bot.Item(Opal).Values(19, 0), 30000, "original total value retained");
+            Check.Eq(bot.Item(Opal).Values(5, 0), 900, "original total burden retained");
+
+            FakeHost.Names[Ring] = "Another valuable item";
+            FakeHost.ItemTypes[Ring] = ItemTypeGem;
+            FakeHost.Containers[Ring] = 0x80271902;
+            FakeHost.Ints[(Ring, 12)] = 1;
+            FakeHost.Ints[(Ring, 19)] = 10000;
+            FakeHost.Ints[(Ring, 5)] = 100;
+            bot.Cache.OnCreateObject(Ring);
+            object[] next = { bot.Item(Ring), bot.S, false, "", false, "", "" };
+            Check.False((bool)classify.Invoke(bot.P, next)!, "whole pending stack already exceeds Keep #2, so next matching item is left");
+        }
+    }
+
+
     private static Bot InspectorWorld()
     {
         const uint pack = 0x80271901, corpse = 0x80271902;
@@ -153,7 +202,7 @@ internal static class LootAddItemTests
         bot.S.CurrentLootPath = Temp("inspector.utl", Utl("UTL", "1", "1", "Sellables", "", "0;1;3;2", "11", "10000", "19", "8", "400", "5"));
         Check.True(InspectorVerdict(bot, Coin).Contains("no rule matched"), "10000 inventory pyreals are evaluated at 1 each");
         Check.True(InspectorVerdict(bot, Taper).Contains("no rule matched"), "97 scarabs inside a side pack are evaluated at 250 each");
-        Check.True(InspectorVerdict(bot, Opal).Contains("[Keep] Sellables"), "corpse stack retains total-value matching");
+        Check.True(InspectorVerdict(bot, Opal).Contains("no rule matched"), "corpse stack uses individual value too");
         Check.Eq(bot.Item(Coin).Values(19, 0), 10000, "inspector does not change cached stack total");
         Check.Eq(bot.Item(Taper).Values(12, 0), 97, "inspector does not change cached quantity");
     }
@@ -171,7 +220,7 @@ internal static class LootAddItemTests
         bot.S.CurrentLootPath = path;
         Check.True(InspectorVerdict(bot, Coin).Contains("no rule matched"), "native inventory currency uses unit value");
         Check.True(InspectorVerdict(bot, Taper).Contains("no rule matched"), "native side-pack components use unit value");
-        Check.True(InspectorVerdict(bot, Opal).Contains("[Keep] Sellables"), "native corpse preview keeps stack totals");
+        Check.True(InspectorVerdict(bot, Opal).Contains("no rule matched"), "native corpse preview uses individual value too");
         bot.S.CurrentLootPath = Temp("inspector-currency.utl", SellGems);
         Check.True(InspectorVerdict(bot, Coin).Contains("[Keep] Keep pyreals"), "explicit currency rule still matches inventory currency");
     }

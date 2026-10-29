@@ -526,8 +526,8 @@ internal static class VTankLootTests
         bool Matches(WorldObject item) => VTankLootEvaluator.Match(sellables, item);
         WorldObject scarabs = new Item("Silver Scarab").Int(12, 97).Int(19, 24250).Int(5, 97);
         WorldObject pyreals = new Item("Pyreal").Int(12, 25128).Int(19, 25128).Int(5, 100);
-        Check.True(Matches(scarabs), "corpse rule still matches the stack's total value");
-        Check.True(Matches(pyreals), "corpse currency stays lootable by the same broad rule");
+        Check.True(Matches(scarabs), "raw evaluator sees the original total; the looter supplies a unit view");
+        Check.True(Matches(pyreals), "raw stack retains its properties; matching no longer uses them directly");
         Check.Eq(LootKeepCap.CountHave(new[] { scarabs, pyreals }, Matches, NoPending, _ => true), 0,
             "scarabs worth 250 each and pyreals worth 1 each are not expensive inventory items");
         var expensive = new Item("Expensive gem").Int(12, 3).Int(19, 30000).Int(5, 900);
@@ -549,7 +549,7 @@ internal static class VTankLootTests
         WorldObject stack = new Item("Example").Int(12, 3).Int(19, 30000).Int(5, 1200)
             .Int(15, 10000).Int(13, 400).Int(105, 7).Str(15, "description").Dbl(29, 1.2);
         var originalOverlay = stack.Overlay;
-        var unit = LootKeepCap.InventoryUnit(stack);
+        var unit = LootKeepCap.UnitForRule(stack);
         Check.Eq(unit.Values(19, -1), 10000, "uses unit value metadata");
         Check.Eq(unit.Values(5, -1), 400, "uses unit burden metadata");
         Check.Eq(unit.Values(105, -1), 7, "other int properties retained");
@@ -559,12 +559,12 @@ internal static class VTankLootTests
         Check.True(ReferenceEquals(stack.Overlay, originalOverlay), "original overlay not replaced");
         Check.Eq(stack.Values(5, -1), 1200, "original burden remains a stack total");
         WorldObject missing = new Item("Missing totals").Int(12, 5);
-        Check.Eq(LootKeepCap.InventoryUnit(missing).Values(19, -99), -99, "missing value is not synthesized");
-        Check.Eq(LootKeepCap.InventoryUnit(missing).Values(5, -99), -99, "missing burden is not synthesized");
+        Check.Eq(LootKeepCap.UnitForRule(missing).Values(19, -99), -99, "missing value is not synthesized");
+        Check.Eq(LootKeepCap.UnitForRule(missing).Values(5, -99), -99, "missing burden is not synthesized");
         foreach (int count in new[] { 0, -1, 1 })
         {
             WorldObject one = new Item("Single").Int(12, count).Int(19, 10000).Int(5, 400);
-            Check.True(ReferenceEquals(LootKeepCap.InventoryUnit(one), one), "nonstacked or invalid count stays unchanged");
+            Check.True(ReferenceEquals(LootKeepCap.UnitForRule(one), one), "nonstacked or invalid count stays unchanged");
         }
     }
     private static void KeepCapCountsStacks()

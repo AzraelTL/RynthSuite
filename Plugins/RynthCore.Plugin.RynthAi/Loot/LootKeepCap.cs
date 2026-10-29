@@ -35,7 +35,7 @@ internal static class LootKeepCap
                 liveIds.Add(inv.Id);
                 if (string.IsNullOrEmpty(inv.Name)) continue;
                 bool m;
-                try { m = matches(InventoryUnit(inv)); } catch { m = false; }
+                try { m = matches(UnitForRule(inv)); } catch { m = false; }
                 if (m) have += StackOf(inv);
             }
         }
@@ -45,11 +45,11 @@ internal static class LootKeepCap
     }
 
     /// <summary>
-    /// A read-only comparison view of one unit in an inventory stack. Corpse evaluation
-    /// keeps its original stack totals. Matching units still contribute the original
+    /// A read-only comparison view of one unit in a stack. Loot rules use this view;
+    /// pickup and inventory counts still use the original object and its full
     /// stack quantity to the cap; no properties on the live item are changed.
     /// </summary>
-    internal static WorldObject InventoryUnit(WorldObject item)
+    internal static WorldObject UnitForRule(WorldObject item)
     {
         int count = StackOf(item);
         if (count == 1) return item;
