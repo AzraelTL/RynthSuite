@@ -2617,10 +2617,13 @@ public sealed partial class RynthAiPlugin
             return false;
         }
 
+        // Match one unit, but retain the original object for whole-stack pickup and cap accounting.
+        WorldObject ruleItem = LootKeepCap.UnitForRule(item);
+
         if (TryLoadNativeLootProfile(out LootProfile nativeProfile, out _))
         {
             if (!preview) _corpseItemsEvaluated++;
-            var (nativeAction, nativeRule) = LootEvaluator.Classify(nativeProfile, item, _charSkills);
+            var (nativeAction, nativeRule) = LootEvaluator.Classify(nativeProfile, ruleItem, _charSkills);
             if (nativeRule == null)
             {
                 if (TryClassifyAsManaTap(item, settings, preview, out actionLabel, out ruleLabel, out builtIn))
@@ -2652,7 +2655,7 @@ public sealed partial class RynthAiPlugin
 
         if (!preview) _corpseItemsEvaluated++;
         VTankLootContext lootCtx = new(Host, _playerId) { Cache = _objectCache };
-        VTankLootRule? matchedRule = VTankLootEvaluator.FirstMatch(vtankProfile, item, lootCtx, out int matchedRuleIndex);
+        VTankLootRule? matchedRule = VTankLootEvaluator.FirstMatch(vtankProfile, ruleItem, lootCtx, out int matchedRuleIndex);
 
         if (matchedRule == null)
         {
@@ -2750,6 +2753,7 @@ public sealed partial class RynthAiPlugin
         if (_lootKeptCache.TryGetValue(item.Id, out var c) && now - c.At < LootKeptCacheMs)
             return c.Kept;
 
+        WorldObject ruleItem = LootKeepCap.UnitForRule(item);
         bool kept;
         string path = (_dashboard?.Settings?.CurrentLootPath ?? string.Empty).Trim().Trim('"');
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
@@ -2760,7 +2764,7 @@ public sealed partial class RynthAiPlugin
             {
                 if (TryLoadNativeLootProfile(out LootProfile nativeProfile, out _))
                 {
-                    var (action, rule) = LootEvaluator.Classify(nativeProfile, item, _charSkills);
+                    var (action, rule) = LootEvaluator.Classify(nativeProfile, ruleItem, _charSkills);
                     kept = rule != null && (action == LootAction.Keep || action == LootAction.KeepUpTo);
                 }
                 else if (TryLoadLootProfile(string.Empty, out VTankLootProfile vtankProfile, out _))
@@ -2769,7 +2773,7 @@ public sealed partial class RynthAiPlugin
                     VTankLootContext ctx = new(Host, _playerId) { Cache = _objectCache };
                     foreach (var rule in vtankProfile.Rules)
                     {
-                        if (!VTankLootEvaluator.Match(rule, item, ctx)) continue;
+                        if (!VTankLootEvaluator.Match(rule, ruleItem, ctx)) continue;
                         kept = rule.Action == VTankLootAction.Keep || rule.Action == VTankLootAction.KeepUpTo;
                         break;
                     }
